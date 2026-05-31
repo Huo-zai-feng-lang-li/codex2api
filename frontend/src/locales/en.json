@@ -771,6 +771,7 @@
     "cooldown": "Cooling Down",
     "rate_limited": "Rate Limited",
     "usage_exhausted": "Rate Limited",
+    "payment_required": "Quota Blocked",
     "unauthorized": "Banned",
     "error": "Error",
     "refreshing": "Refreshing",

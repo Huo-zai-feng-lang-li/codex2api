@@ -1196,6 +1196,16 @@ func upstreamAccountErrorMessage(statusCode int, body []byte) string {
 	if message == "" {
 		message = http.StatusText(statusCode)
 	}
+	code := ""
+	for _, path := range []string{"error.code", "detail.code", "code"} {
+		code = strings.TrimSpace(gjson.GetBytes(body, path).String())
+		if code != "" {
+			break
+		}
+	}
+	if code != "" && !strings.Contains(message, code) {
+		message = fmt.Sprintf("%s (code: %s)", message, code)
+	}
 	return fmt.Sprintf("上游返回 %d: %s", statusCode, message)
 }
 
@@ -3342,6 +3352,38 @@ func Apply429Cooldown(store *auth.Store, account *auth.Account, body []byte, res
 	return decision
 }
 
+// ApplyUpstreamAccountFailure writes the canonical account state for upstream
+// failures that make the selected account temporarily or permanently
+// unschedulable.
+func ApplyUpstreamAccountFailure(store *auth.Store, account *auth.Account, statusCode int, body []byte, resp *http.Response, model string) bool {
+	if store == nil || account == nil {
+		return false
+	}
+
+	switch statusCode {
+	case http.StatusTooManyRequests:
+		Apply429Cooldown(store, account, body, resp, model)
+		return true
+	case http.StatusUnauthorized:
+		atomic.StoreInt32(&account.Disabled, 1)
+		if isMissingScopeUnauthorized(body) {
+			atomic.StoreInt32(&account.Disabled, 0)
+			return true
+		}
+		store.MarkCooldownWithError(account, 5*time.Minute, "unauthorized", upstreamAccountErrorMessage(statusCode, body))
+		return true
+	case http.StatusPaymentRequired, http.StatusForbidden:
+		if IsDeactivatedWorkspaceError(body) {
+			store.MarkError(account, upstreamAccountErrorMessage(statusCode, body))
+			return true
+		}
+		store.MarkCooldownWithError(account, 30*time.Minute, "payment_required", upstreamAccountErrorMessage(statusCode, body))
+		return true
+	default:
+		return false
+	}
+}
+
 // applyCooldown 根据上游状态码设置智能冷却
 func (h *Handler) applyCooldown(account *auth.Account, statusCode int, body []byte, resp *http.Response) {
 	h.applyCooldownForModel(account, statusCode, body, resp, "")
@@ -3358,12 +3400,9 @@ func (h *Handler) applyCooldownForModel(account *auth.Account, statusCode int, b
 		log.Printf("账号 %d 被限速 (plan=%s, reason=%s)，冷却到 %s", account.ID(), account.GetPlanType(), decision.Reason, decision.ResetAt.Format(time.RFC3339))
 		return decision
 	case http.StatusUnauthorized:
-		// 原子标志瞬间置位，阻止其他并发请求再选到该账号
-		atomic.StoreInt32(&account.Disabled, 1)
-
 		if isMissingScopeUnauthorized(body) {
 			log.Printf("账号 %d 收到 missing_scope 401，保留在号池", account.ID())
-			atomic.StoreInt32(&account.Disabled, 0)
+			ApplyUpstreamAccountFailure(h.store, account, statusCode, body, resp, model)
 			return codex429Decision{}
 		}
 
@@ -3378,17 +3417,15 @@ func (h *Handler) applyCooldownForModel(account *auth.Account, statusCode int, b
 			}
 			h.store.RemoveAccount(account.ID())
 		} else {
-			h.store.MarkCooldown(account, 5*time.Minute, "unauthorized")
+			ApplyUpstreamAccountFailure(h.store, account, statusCode, body, resp, model)
 		}
 	case http.StatusPaymentRequired, http.StatusForbidden:
 		if IsDeactivatedWorkspaceError(body) {
 			log.Printf("账号 %d 工作区已停用，标记为错误", account.ID())
-			if h.store != nil {
-				h.store.MarkError(account, upstreamAccountErrorMessage(statusCode, body))
-			}
-			return codex429Decision{}
+		} else {
+			log.Printf("账号 %d 收到 payment_required，进入额度受限冷却", account.ID())
 		}
-		h.store.MarkCooldown(account, 30*time.Minute, "payment_required")
+		ApplyUpstreamAccountFailure(h.store, account, statusCode, body, resp, model)
 	}
 	return codex429Decision{}
 }

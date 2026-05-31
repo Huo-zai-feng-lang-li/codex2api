@@ -771,6 +771,7 @@
     "cooldown": "冷却中",
     "rate_limited": "限流",
     "usage_exhausted": "限流中",
+    "payment_required": "额度受限",
     "unauthorized": "封禁",
     "error": "错误",
     "refreshing": "刷新中",

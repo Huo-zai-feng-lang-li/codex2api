@@ -416,7 +416,7 @@ func (h *Handler) GetStats(c *gin.Context) {
 			continue
 		}
 		switch acc.RuntimeStatus() {
-		case "rate_limited", "usage_exhausted":
+		case "rate_limited", "usage_exhausted", "payment_required":
 			rateLimitedCount++
 		}
 	}

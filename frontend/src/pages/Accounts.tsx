@@ -873,12 +873,19 @@ export default function Accounts() {
         account.status === "error" ||
         account.enabled === false,
     ).length;
+    const paymentRequiredAccounts = accounts.filter(
+      (account) =>
+        account.status !== "unauthorized" &&
+        account.status !== "error" &&
+        account.enabled !== false &&
+        isPaymentRequiredAccount(account),
+    ).length;
     const rateLimitedExclusive = accounts.filter(
       (account) =>
         account.status !== "unauthorized" &&
         account.status !== "error" &&
         account.enabled !== false &&
-        isRateLimitedAccount(account),
+        (isRateLimitedAccount(account) || isPaymentRequiredAccount(account)),
     ).length;
     const normalAccounts = accounts.length - abnormalAccounts - rateLimitedExclusive;
     return {
@@ -887,6 +894,7 @@ export default function Accounts() {
       rateLimitedAccounts: rateLimitedExclusive,
       rateLimited5hAccounts: rateLimitedWindowStats.fiveHour,
       rateLimited7dAccounts: rateLimitedWindowStats.sevenDay,
+      paymentRequiredAccounts,
       abnormalAccounts,
       bannedAccounts,
       errorAccounts,
@@ -911,6 +919,7 @@ export default function Accounts() {
     rateLimitedAccounts,
     rateLimited5hAccounts,
     rateLimited7dAccounts,
+    paymentRequiredAccounts,
     abnormalAccounts,
     bannedAccounts,
     errorAccounts,
@@ -941,7 +950,8 @@ export default function Accounts() {
             account.status === "unauthorized" ||
             account.status === "error" ||
             account.enabled === false ||
-            isRateLimitedAccount(account)
+            isRateLimitedAccount(account) ||
+            isPaymentRequiredAccount(account)
           )
             return false;
           if (account.status !== "active" && account.status !== "ready")
@@ -954,7 +964,8 @@ export default function Accounts() {
             account.enabled === false
           )
             return false;
-          if (!isRateLimitedAccount(account)) return false;
+          if (!isRateLimitedAccount(account) && !isPaymentRequiredAccount(account))
+            return false;
           break;
         case "abnormal":
           if (
@@ -2683,6 +2694,7 @@ export default function Accounts() {
               details={[
                 { label: "5h", value: rateLimited5hAccounts },
                 { label: "7d", value: rateLimited7dAccounts },
+                { label: t("status.payment_required"), value: paymentRequiredAccounts },
               ]}
             />
             <CompactStat
@@ -5626,6 +5638,12 @@ type RateLimitWindow = "5h" | "7d";
 
 function isRateLimitedAccount(account: AccountRow): boolean {
   return getAccountRateLimitWindow(account) !== null;
+}
+
+function isPaymentRequiredAccount(account: AccountRow): boolean {
+  const status = (account.status || "").toLowerCase();
+  const reason = (account.cooldown_reason || "").toLowerCase();
+  return status === "payment_required" || reason === "payment_required";
 }
 
 function getAccountRateLimitWindow(

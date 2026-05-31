@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -95,6 +96,93 @@ func TestConnectionUnauthorizedRecordsErrorMessage(t *testing.T) {
 	account.Mu().RUnlock()
 	if !strings.Contains(errorMsg, "token_invalidated") {
 		t.Fatalf("ErrorMsg = %q, want token_invalidated", errorMsg)
+	}
+}
+
+func TestConnectionPaymentRequiredRecordsCooldown(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstreamBody := `{"error":"Usage limit reached, will reset on Jun 2 at 11:22 PM (UTC+8)"}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusPaymentRequired)
+		_, _ = w.Write([]byte(upstreamBody))
+	}))
+	defer server.Close()
+
+	store := auth.NewStore(nil, nil, nil)
+	account := &auth.Account{
+		DBID:         43,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      server.URL,
+		APIKey:       "sk-test",
+		Models:       []string{"gpt-5.4-mini"},
+		Status:       auth.StatusReady,
+		HealthTier:   auth.HealthTierHealthy,
+	}
+	store.AddAccount(account)
+	handler := &Handler{store: store}
+	router := gin.New()
+	router.GET("/api/admin/accounts/:id/test", handler.TestConnection)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/accounts/43/test?model=gpt-5.4-mini", nil)
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "Usage limit reached") {
+		t.Fatalf("SSE response %q does not contain usage limit message", recorder.Body.String())
+	}
+	if got := account.RuntimeStatus(); got != "payment_required" {
+		t.Fatalf("RuntimeStatus() = %q, want payment_required", got)
+	}
+	account.Mu().RLock()
+	errorMsg := account.ErrorMsg
+	account.Mu().RUnlock()
+	if !strings.Contains(errorMsg, "Usage limit reached") {
+		t.Fatalf("ErrorMsg = %q, want usage limit message", errorMsg)
+	}
+}
+
+func TestBatchConnectionPaymentRequiredRecordsCooldown(t *testing.T) {
+	upstreamBody := `{"error":"Usage limit reached, will reset on Jun 2 at 11:22 PM (UTC+8)"}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusPaymentRequired)
+		_, _ = w.Write([]byte(upstreamBody))
+	}))
+	defer server.Close()
+
+	store := auth.NewStore(nil, nil, nil)
+	account := &auth.Account{
+		DBID:         44,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      server.URL,
+		APIKey:       "sk-test",
+		Models:       []string{"gpt-5.4-mini"},
+		Status:       auth.StatusReady,
+		HealthTier:   auth.HealthTierHealthy,
+	}
+	store.AddAccount(account)
+	handler := &Handler{store: store}
+
+	status, message := handler.runSingleBatchTest(context.Background(), account)
+
+	if status != "rate_limited" {
+		t.Fatalf("status = %q, want rate_limited (message=%q)", status, message)
+	}
+	if !strings.Contains(message, "Usage limit reached") {
+		t.Fatalf("message = %q, want usage limit message", message)
+	}
+	if got := account.RuntimeStatus(); got != "payment_required" {
+		t.Fatalf("RuntimeStatus() = %q, want payment_required", got)
+	}
+	account.Mu().RLock()
+	errorMsg := account.ErrorMsg
+	account.Mu().RUnlock()
+	if !strings.Contains(errorMsg, "Usage limit reached") {
+		t.Fatalf("ErrorMsg = %q, want usage limit message", errorMsg)
 	}
 }
 

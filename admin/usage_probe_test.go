@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/codex2api/auth"
@@ -54,48 +55,6 @@ func TestShouldFallbackUsageProbeAfterWhamFailure(t *testing.T) {
 	}
 }
 
-func TestShouldMarkUsageProbeAccountError(t *testing.T) {
-	tests := []struct {
-		name       string
-		statusCode int
-		body       []byte
-		want       bool
-	}{
-		{
-			name:       "payment required deactivated workspace",
-			statusCode: http.StatusPaymentRequired,
-			body:       []byte(`{"detail":{"code":"deactivated_workspace"}}`),
-			want:       true,
-		},
-		{
-			name:       "forbidden deactivated workspace",
-			statusCode: http.StatusForbidden,
-			body:       []byte(`{"error":{"code":"deactivated_workspace"}}`),
-			want:       true,
-		},
-		{
-			name:       "generic payment required is not account error",
-			statusCode: http.StatusPaymentRequired,
-			body:       []byte(`{"error":{"code":"billing_hard_limit_reached"}}`),
-			want:       false,
-		},
-		{
-			name:       "rate limit handled separately",
-			statusCode: http.StatusTooManyRequests,
-			body:       []byte(`{"detail":{"code":"deactivated_workspace"}}`),
-			want:       false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := shouldMarkUsageProbeAccountError(tt.statusCode, tt.body); got != tt.want {
-				t.Fatalf("shouldMarkUsageProbeAccountError() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestProbeUsageSnapshotUsesOpenAIResponsesAPIRequest(t *testing.T) {
 	var called bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -135,5 +94,42 @@ func TestProbeUsageSnapshotUsesOpenAIResponsesAPIRequest(t *testing.T) {
 	}
 	if !called {
 		t.Fatal("ProbeUsageSnapshot should call the OpenAI Responses upstream")
+	}
+}
+
+func TestProbeUsageSnapshotPaymentRequiredRecordsCooldown(t *testing.T) {
+	upstreamBody := `{"error":"Usage limit reached, will reset on Jun 2 at 11:22 PM (UTC+8)"}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusPaymentRequired)
+		_, _ = w.Write([]byte(upstreamBody))
+	}))
+	defer server.Close()
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{TestModel: "gpt-5.4-mini", MaxConcurrency: 1})
+	handler := &Handler{store: store}
+	account := &auth.Account{
+		DBID:         2,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      server.URL,
+		APIKey:       "sk-test",
+		Models:       []string{"gpt-5.4-mini"},
+		Status:       auth.StatusReady,
+		HealthTier:   auth.HealthTierHealthy,
+	}
+
+	err := handler.ProbeUsageSnapshot(context.Background(), account)
+
+	if err == nil {
+		t.Fatal("ProbeUsageSnapshot should return an error for payment_required")
+	}
+	if got := account.RuntimeStatus(); got != "payment_required" {
+		t.Fatalf("RuntimeStatus() = %q, want payment_required", got)
+	}
+	account.Mu().RLock()
+	errorMsg := account.ErrorMsg
+	account.Mu().RUnlock()
+	if !strings.Contains(errorMsg, "Usage limit reached") {
+		t.Fatalf("ErrorMsg = %q, want usage limit message", errorMsg)
 	}
 }

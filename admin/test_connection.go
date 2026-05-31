@@ -95,15 +95,12 @@ func (h *Handler) TestConnection(c *gin.Context) {
 		}
 		errBody, _ := io.ReadAll(resp.Body)
 		errMsg := fmt.Sprintf("上游返回 %d: %s", resp.StatusCode, truncate(string(errBody), 500))
-		switch resp.StatusCode {
-		case http.StatusUnauthorized:
-			h.store.MarkCooldownWithError(account, 24*time.Hour, "unauthorized", errMsg)
-		case http.StatusTooManyRequests:
-			if isOpenAIResponsesAccount {
-				h.store.MarkCooldown(account, time.Minute, "rate_limited")
-			} else {
-				proxy.Apply429Cooldown(h.store, account, errBody, resp, testModel)
+		if proxy.ApplyUpstreamAccountFailure(h.store, account, resp.StatusCode, errBody, resp, testModel) {
+			account.Mu().RLock()
+			if account.ErrorMsg != "" {
+				errMsg = account.ErrorMsg
 			}
+			account.Mu().RUnlock()
 		}
 		sendTestEvent(c, testEvent{Type: "error", Error: errMsg})
 		return
@@ -767,6 +764,17 @@ func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (st
 		return "rate_limited", "账号触发 429 限流"
 	default:
 		msg := fmt.Sprintf("上游返回 %d: %s", resp.StatusCode, truncate(string(body), 300))
+		if proxy.ApplyUpstreamAccountFailure(h.store, acc, resp.StatusCode, body, resp, testModel) {
+			acc.Mu().RLock()
+			if acc.ErrorMsg != "" {
+				msg = acc.ErrorMsg
+			}
+			acc.Mu().RUnlock()
+			if resp.StatusCode == http.StatusPaymentRequired || (resp.StatusCode == http.StatusForbidden && !proxy.IsDeactivatedWorkspaceError(body)) {
+				return "rate_limited", msg
+			}
+			return "failed", msg
+		}
 		if shouldMarkBatchTestAccountError(resp.StatusCode, body) {
 			h.store.MarkError(acc, "批量测试"+msg)
 		}

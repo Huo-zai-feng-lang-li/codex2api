@@ -64,18 +64,14 @@ func (h *Handler) probeOpenAIResponsesAPI(ctx context.Context, account *auth.Acc
 	case http.StatusOK:
 		h.store.ReportRequestSuccess(account, 0)
 		return nil
-	case http.StatusUnauthorized:
-		h.store.ReportRequestFailure(account, "client", 0)
-		h.store.MarkCooldownWithError(account, 24*time.Hour, "unauthorized", fmt.Sprintf("OpenAI Responses 探针上游返回 %d: %s", resp.StatusCode, truncate(string(body), 300)))
-		return nil
-	case http.StatusTooManyRequests:
-		h.store.ReportRequestFailure(account, "client", 0)
-		proxy.Apply429Cooldown(h.store, account, body, resp, model)
-		return nil
 	default:
-		if shouldMarkUsageProbeAccountError(resp.StatusCode, body) {
-			h.store.MarkError(account, fmt.Sprintf("OpenAI Responses 探针上游返回 %d: %s", resp.StatusCode, truncate(string(body), 300)))
-			return nil
+		if proxy.ApplyUpstreamAccountFailure(h.store, account, resp.StatusCode, body, resp, model) {
+			if resp.StatusCode >= 500 {
+				h.store.ReportRequestFailure(account, "server", 0)
+			} else if resp.StatusCode >= 400 {
+				h.store.ReportRequestFailure(account, "client", 0)
+			}
+			return fmt.Errorf("OpenAI Responses 探针返回状态 %d", resp.StatusCode)
 		}
 		if resp.StatusCode >= 500 {
 			h.store.ReportRequestFailure(account, "server", 0)
@@ -144,18 +140,14 @@ func (h *Handler) probeUsageViaResponses(ctx context.Context, account *auth.Acco
 			h.store.ClearCooldown(account)
 		}
 		return nil
-	case http.StatusUnauthorized:
-		h.store.ReportRequestFailure(account, "client", 0)
-		h.store.MarkCooldownWithError(account, 24*time.Hour, "unauthorized", fmt.Sprintf("用量探针上游返回 %d: %s", resp.StatusCode, truncate(string(body), 300)))
-		return nil
-	case http.StatusTooManyRequests:
-		h.store.ReportRequestFailure(account, "client", 0)
-		proxy.Apply429Cooldown(h.store, account, body, resp, h.store.GetTestModel())
-		return nil
 	default:
-		if shouldMarkUsageProbeAccountError(resp.StatusCode, body) {
-			h.store.MarkError(account, fmt.Sprintf("用量探针上游返回 %d: %s", resp.StatusCode, truncate(string(body), 300)))
-			return nil
+		if proxy.ApplyUpstreamAccountFailure(h.store, account, resp.StatusCode, body, resp, h.store.GetTestModel()) {
+			if resp.StatusCode >= 500 {
+				h.store.ReportRequestFailure(account, "server", 0)
+			} else if resp.StatusCode >= 400 {
+				h.store.ReportRequestFailure(account, "client", 0)
+			}
+			return fmt.Errorf("探针返回状态 %d", resp.StatusCode)
 		}
 		if resp.StatusCode >= 500 {
 			h.store.ReportRequestFailure(account, "server", 0)
@@ -163,15 +155,6 @@ func (h *Handler) probeUsageViaResponses(ctx context.Context, account *auth.Acco
 			h.store.ReportRequestFailure(account, "client", 0)
 		}
 		return fmt.Errorf("探针返回状态 %d", resp.StatusCode)
-	}
-}
-
-func shouldMarkUsageProbeAccountError(statusCode int, body []byte) bool {
-	switch statusCode {
-	case http.StatusPaymentRequired, http.StatusForbidden:
-		return proxy.IsDeactivatedWorkspaceError(body)
-	default:
-		return false
 	}
 }
 

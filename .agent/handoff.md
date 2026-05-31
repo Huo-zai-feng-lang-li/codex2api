@@ -1,4 +1,27 @@
-# 最新接续状态 (2026-05-31 12:07)
+# 最新接续状态 (2026-05-31 13:25)
+
+## 当前阶段：payment_required 额度受限闭环
+- 本轮已把上游 `402 Payment Required` / 非停用工作区 `403 Forbidden` 统一沉淀为账号运行态 `payment_required`，避免额度不足被误归成普通限流或只停留在探针日志里。
+- 修复点：`proxy/handler.go` 新增 `ApplyUpstreamAccountFailure` 作为上游账号失败状态唯一写入口，统一处理 `429`、`401`、`402`、`403`；错误消息会带上上游 `error/detail/code`，便于页面和日志定位。
+- 管理台手动测试连接、批量测试连接与用量探针已改为复用同一个失败写入口；`payment_required` 会进入 30 分钟额度受限冷却，停用工作区仍标记为错误。
+- 前端账号页新增 `payment_required` 状态文案与橙色状态点，统计卡会把它单独列为“额度受限”，同时仍计入限流/受限总组。
+- 当前运行服务已替换为新构建的 `codex2api.exe`，监听 `127.0.0.1:18080` 的 PID 为 `19664`，启动时间 `2026-05-31 13:23:45`；旧 exe 备份为 `codex2api.prev-20260531-132345.exe`。
+
+## 当前阶段验证记录
+- `go test ./admin -run TestBatchConnectionPaymentRequiredRecordsCooldown -count=1`：先红后绿，确认批量测试路径此前未沉淀 `payment_required`。
+- `go test ./admin ./proxy -count=1`：通过。
+- `go test ./... -count=1`：通过。
+- `pnpm typecheck`：通过。
+- `pnpm build`：通过。
+- `go build -o codex2api.new.exe .`：通过，并已替换运行中的 `codex2api.exe`。
+- `curl http://127.0.0.1:18080/health`：返回 `{"available":2,"status":"ok","total":8}`。
+- 浏览器实看 `http://127.0.0.1:18080/admin/accounts?verify=payment_required`：账号页展示“额度受限：2”，账号行状态可见“额度受限”，本次加载新增控制台 errors=0、warnings=0。
+
+## 当前阶段待办事项
+- 如需提交代码，本轮相关文件是：`proxy/handler.go`、`admin/handler.go`、`admin/test_connection.go`、`admin/test_connection_test.go`、`admin/usage_probe.go`、`admin/usage_probe_test.go`、`frontend/src/components/StatusBadge.tsx`、`frontend/src/pages/Accounts.tsx`、`frontend/src/locales/en.json`、`frontend/src/locales/zh.json`、`.agent/handoff.md`。
+- 如果后续仍出现额度类账号异常，优先看上游状态码和 `ErrorMsg` 中的 `code`；`deactivated_workspace` 应是错误态，普通余额/额度不足应是 `payment_required`。
+
+## 上一阶段：账号恢复调度与 compact 修复
 
 ## GitHub 提交策略
 - 本次提交目标仓库：`https://github.com/Huo-zai-feng-lang-li/codex2api.git`，直接推送 `main`。
