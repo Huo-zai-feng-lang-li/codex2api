@@ -83,6 +83,46 @@ func TestImageJobJPEGFallbackDecision(t *testing.T) {
 	}
 }
 
+func TestCreateImageGenerationJobReturnsBusyWhenGateFull(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var releases []func()
+	for i := 0; i < maxConcurrentImageStudioJobs; i++ {
+		release, ok := tryAcquireImageStudioJobSlot()
+		if !ok {
+			t.Fatalf("slot %d should be available", i)
+		}
+		releases = append(releases, release)
+	}
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+
+	db := newTestAdminDB(t)
+	tc := cache.NewMemory(1)
+	defer tc.Close()
+	store := auth.NewStore(db, tc, nil)
+	handler := NewHandler(store, db, tc, nil, "admin-secret")
+	router := gin.New()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/images/jobs", strings.NewReader(`{"prompt":"draw a house","model":"gpt-image-2"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Admin-Key", "admin-secret")
+	recorder := httptest.NewRecorder()
+
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusServiceUnavailable, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "繁忙") {
+		t.Fatalf("busy response should mention busy state; body=%s", recorder.Body.String())
+	}
+}
+
 func TestSaveImageJobAssetsPersistsFilesAndMetadata(t *testing.T) {
 	db := newTestAdminDB(t)
 	dir := t.TempDir()

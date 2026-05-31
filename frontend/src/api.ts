@@ -27,6 +27,7 @@ import type {
   ModelsResponse,
   OAuthExchangeResponse,
   OAuthURLResponse,
+  OpenAIResponsesAccountConfig,
   OpsErrorSummary,
   OpsOverviewResponse,
   PromptFilterLogsResponse,
@@ -34,6 +35,7 @@ import type {
   PromptFilterTestResponse,
   RuntimeStatusResponse,
   ResetRadarResponse,
+  ShutdownResponse,
   SiteBranding,
   StatsResponse,
   SetupHintsResponse,
@@ -203,6 +205,8 @@ export const api = {
     request<CreateAccountResponse>('/accounts/openai-responses', { method: 'POST', body: JSON.stringify(data) }),
   fetchOpenAIResponsesModels: (data: FetchOpenAIResponsesModelsRequest) =>
     request<FetchOpenAIResponsesModelsResponse>('/accounts/openai-responses/models', { method: 'POST', body: JSON.stringify(data) }),
+  getOpenAIResponsesAccount: (id: number) =>
+    request<OpenAIResponsesAccountConfig>(`/accounts/${id}/openai-responses`),
   updateOpenAIResponsesAccount: (id: number, data: UpdateOpenAIResponsesAccountRequest) =>
     request<MessageResponse>(`/accounts/${id}/openai-responses`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteAccount: (id: number) =>
@@ -235,6 +239,7 @@ export const api = {
   getHealth: () => request<HealthResponse>('/health'),
   getOpsOverview: () => request<OpsOverviewResponse>('/ops/overview'),
   getRuntimeStatus: () => request<RuntimeStatusResponse>('/runtime-status'),
+  shutdownSystem: () => request<ShutdownResponse>('/system/shutdown', { method: 'POST' }),
   getResetRadar: () => request<ResetRadarResponse>('/reset-radar'),
   getOpsErrorSummary: (params: {
     start: string
@@ -478,9 +483,9 @@ export const api = {
   testProxy: (url: string, id?: number, lang?: string) =>
     request<ProxyTestResult>('/proxies/test', { method: 'POST', body: JSON.stringify({ url, id, lang }) }),
   // OAuth
-  generateOAuthURL: (data: { proxy_url?: string; redirect_uri?: string }) =>
+  generateOAuthURL: (data: { proxy_url?: string; redirect_uri?: string; tags?: string[] }) =>
     request<OAuthURLResponse>('/oauth/generate-auth-url', { method: 'POST', body: JSON.stringify(data) }),
-  exchangeOAuthCode: (data: { session_id: string; code: string; state: string; name?: string; proxy_url?: string }) =>
+  exchangeOAuthCode: (data: { session_id: string; code: string; state: string; name?: string; proxy_url?: string; tags?: string[] }) =>
     request<OAuthExchangeResponse>('/oauth/exchange-code', { method: 'POST', body: JSON.stringify(data) }),
 }
 

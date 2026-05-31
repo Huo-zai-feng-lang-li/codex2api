@@ -427,6 +427,54 @@ func TestUsageErrorSummaryAndFilters(t *testing.T) {
 	}
 }
 
+func TestUsageLogsExposeAccountNameWhenCredentialEmailIsProviderURL(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	accountID, err := db.InsertOpenAIResponsesAccount(ctx, "owner@example.com", map[string]interface{}{
+		"api_key":  "sk-test",
+		"base_url": "https://api.freemodel.dev",
+		"email":    "https://api.freemodel.dev",
+	}, "")
+	if err != nil {
+		t.Fatalf("InsertOpenAIResponsesAccount 返回错误: %v", err)
+	}
+	if err := db.InsertUsageLog(ctx, &UsageLogInput{
+		AccountID:    accountID,
+		Endpoint:     "/v1/responses",
+		Model:        "gpt-5.5",
+		StatusCode:   504,
+		DurationMs:   61_290,
+		ErrorMessage: "Gateway Time-out",
+	}); err != nil {
+		t.Fatalf("InsertUsageLog 返回错误: %v", err)
+	}
+	db.flushLogs()
+
+	page, err := db.ListUsageLogsByTimeRangePaged(ctx, UsageLogFilter{
+		Start:     time.Now().Add(-1 * time.Hour),
+		End:       time.Now().Add(1 * time.Hour),
+		Page:      1,
+		PageSize:  10,
+		ErrorOnly: true,
+	})
+	if err != nil {
+		t.Fatalf("ListUsageLogsByTimeRangePaged 返回错误: %v", err)
+	}
+	if len(page.Logs) != 1 {
+		t.Fatalf("logs len = %d, want 1", len(page.Logs))
+	}
+	if page.Logs[0].AccountName != "owner@example.com" {
+		t.Fatalf("AccountName = %q, want owner@example.com", page.Logs[0].AccountName)
+	}
+}
+
 func TestUsageLogModeOffSkipsAllLogs(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
 

@@ -19,10 +19,11 @@ import PageHeader from '../components/PageHeader'
 import Pagination from '../components/Pagination'
 import StateShell from '../components/StateShell'
 import { useDataLoader } from '../hooks/useDataLoader'
+import { useVisiblePolling } from '../hooks/useVisiblePolling'
 import { useToast } from '../hooks/useToast'
 import { DEFAULT_PAGE_SIZE_OPTIONS, usePersistedPageSize } from '../hooks/usePersistedPageSize'
 import { getTimeRangeISO, type TimeRangeKey } from '../lib/timeRange'
-import { formatCompactEmail } from '../lib/utils'
+import { formatAccountIdentity } from '../lib/utils'
 import { formatBeijingTime } from '../utils/time'
 import type { APIKeyRow, OpsErrorSummary, UsageLog } from '../types'
 import { Badge } from '@/components/ui/badge'
@@ -103,27 +104,37 @@ export default function OperationsErrors() {
     }
   }, [apiKeyFilter, endpointFilter, errorKindFilter, searchQuery, statusFilter, streamFilter, timeRange])
 
-  const loadErrorData = useCallback(async () => {
+  const loadErrorCore = useCallback(async () => {
     const baseParams = buildBaseParams()
-    const [summary, pageResult, apiKeysResult] = await Promise.all([
+    const [summary, pageResult] = await Promise.all([
       api.getOpsErrorSummary(baseParams),
       api.getOpsErrors({
         ...baseParams,
         page,
         pageSize,
       }),
-      api.getAPIKeys().catch(() => ({ keys: [] as APIKeyRow[] })),
     ])
 
     return {
       summary,
       logs: pageResult.logs ?? [],
       total: pageResult.total ?? 0,
-      apiKeys: apiKeysResult.keys ?? [],
     }
   }, [buildBaseParams, page, pageSize])
 
-  const { data, loading, error, reload, reloadSilently } = useDataLoader<{
+  const loadErrorData = useCallback(async () => {
+    const [core, apiKeysResult] = await Promise.all([
+      loadErrorCore(),
+      api.getAPIKeys().catch(() => ({ keys: [] as APIKeyRow[] })),
+    ])
+
+    return {
+      ...core,
+      apiKeys: apiKeysResult.keys ?? [],
+    }
+  }, [loadErrorCore])
+
+  const { data, setData, loading, error, reload } = useDataLoader<{
     summary: OpsErrorSummary | null
     logs: UsageLog[]
     total: number
@@ -138,13 +149,10 @@ export default function OperationsErrors() {
     load: loadErrorData,
   })
 
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      void reloadSilently()
-    }, 15000)
-
-    return () => window.clearInterval(timer)
-  }, [reloadSilently])
+  useVisiblePolling(async () => {
+    const core = await loadErrorCore()
+    setData((current) => ({ ...current, ...core }))
+  }, 15000)
 
   const hasActiveFilters = Boolean(statusFilter || errorKindFilter || endpointFilter || apiKeyFilter || streamFilter || searchQuery)
   const totalPages = Math.max(1, Math.ceil(data.total / pageSize))
@@ -199,6 +207,7 @@ export default function OperationsErrors() {
       error_kind: log.upstream_error_kind,
       error_message: log.error_message,
       account_id: log.account_id,
+      account_name: log.account_name,
       account_email: log.account_email,
       api_key_id: log.api_key_id,
       api_key_name: log.api_key_name,
@@ -472,7 +481,7 @@ export default function OperationsErrors() {
                           </div>
                         </TableCell>
                         <TableCell className={`${errorTableTextClass} text-muted-foreground`}>
-                          {formatCompactEmail(log.account_email) || `ID ${log.account_id}`}
+                          {formatAccountLabel(log)}
                         </TableCell>
                         <TableCell className={`${errorTableTextClass} text-muted-foreground`}>
                           <span className="block max-w-[160px] truncate" title={formatAPIKeyLabel(log)}>
@@ -550,7 +559,7 @@ export default function OperationsErrors() {
                   <DetailRow label="Reasoning" value={selectedLog.reasoning_effort || '-'} />
                 </DetailPanel>
                 <DetailPanel title={t('opsErrors.runtimeContext')}>
-                  <DetailRow label={t('usage.tableAccount')} value={`${formatCompactEmail(selectedLog.account_email) || '-'} · ID ${selectedLog.account_id}`} />
+                  <DetailRow label={t('usage.tableAccount')} value={`${formatAccountLabel(selectedLog)} · ID ${selectedLog.account_id}`} />
                   <DetailRow label={t('usage.tableApiKey')} value={formatAPIKeyLabel(selectedLog) || t('usage.unknownApiKey')} />
                   <DetailRow label={t('usage.tableDuration')} value={formatDuration(selectedLog.duration_ms)} mono />
                   <DetailRow label={t('usage.tableFirstToken')} value={selectedLog.first_token_ms > 0 ? formatDuration(selectedLog.first_token_ms) : '-'} mono />
@@ -637,6 +646,10 @@ function formatAPIKeyLabel(log: UsageLog): string {
   if (!masked) return ''
   if (masked.length <= 8) return masked
   return `${masked.slice(0, 4)}...${masked.slice(-4)}`
+}
+
+function formatAccountLabel(log: UsageLog): string {
+  return formatAccountIdentity(log)
 }
 
 function formatEndpoint(log: UsageLog): string {

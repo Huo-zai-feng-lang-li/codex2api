@@ -85,6 +85,8 @@ func RequestSizeLimiter(maxSize int64) gin.HandlerFunc {
 			return
 		}
 
+		c.Set("raw_body", body)
+
 		// Replace the body so it can be read again
 		c.Request.Body = io.NopCloser(bytes.NewReader(body))
 		c.Next()

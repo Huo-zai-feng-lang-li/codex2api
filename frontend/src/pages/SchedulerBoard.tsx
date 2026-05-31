@@ -7,6 +7,7 @@ import PageHeader from '../components/PageHeader'
 import Pagination from '../components/Pagination'
 import StateShell from '../components/StateShell'
 import { useDataLoader } from '../hooks/useDataLoader'
+import { useVisiblePolling } from '../hooks/useVisiblePolling'
 import StatusBadge from '../components/StatusBadge'
 import type { AccountRow, OpsOverviewResponse } from '../types'
 import { formatCompactEmail } from '../lib/utils'
@@ -48,13 +49,7 @@ export default function SchedulerBoard() {
     load: loadSchedulerData,
   })
 
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      void reloadSilently()
-    }, 15000)
-
-    return () => window.clearInterval(timer)
-  }, [reloadSilently])
+  useVisiblePolling(() => reloadSilently(), 15000)
 
   const overview = data.overview
   const accounts = data.accounts

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ShieldAlert, X } from 'lucide-react'
 import { api } from '../api'
+import { useVisiblePolling } from '../hooks/useVisiblePolling'
 
 const DISMISS_STORAGE_KEY = 'codex2api_security_banner_dismissed_at'
 const DISMISS_TTL_MS = 24 * 60 * 60 * 1000 // 用户手动关闭后 24h 内不再骚扰
@@ -40,11 +41,8 @@ export default function SecurityBanner() {
 
   useEffect(() => {
     void refresh()
-    const timer = window.setInterval(() => {
-      void refresh()
-    }, 60_000)
-    return () => window.clearInterval(timer)
   }, [refresh])
+  useVisiblePolling(refresh, 60_000, { enabled: !dismissed && (keyCount === null || keyCount === 0) })
 
   if (dismissed) return null
   if (keyCount === null) return null

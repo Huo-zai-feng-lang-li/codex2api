@@ -447,6 +447,143 @@ func TestStoreNextConcurrentAcquireDoesNotExceedDynamicLimit(t *testing.T) {
 	store.Release(acc)
 }
 
+func TestWaitForSessionAvailableTriggersRecoveryProbeForOnlyErroredBannedAccount(t *testing.T) {
+	store := NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency:               1,
+		RecoveryProbeIntervalMinutes: 30,
+	})
+	acc := &Account{
+		DBID:          1,
+		AccessToken:   "token",
+		RefreshToken:  "refresh-token",
+		ExpiresAt:     time.Now().Add(time.Hour),
+		Status:        StatusError,
+		HealthTier:    HealthTierBanned,
+		FailureStreak: 3,
+	}
+	atomic.StoreInt32(&acc.Disabled, 1)
+	store.AddAccount(acc)
+
+	var probed int32
+	store.SetUsageProbeFunc(func(_ context.Context, account *Account) error {
+		if account.DBID != acc.DBID {
+			t.Fatalf("recovery probe account dbID=%d, want %d", account.DBID, acc.DBID)
+		}
+		atomic.AddInt32(&probed, 1)
+		return nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	got, _ := store.WaitForSessionAvailableWithFilter(ctx, "", 500*time.Millisecond, 0, nil, nil)
+	if got == nil {
+		t.Fatal("WaitForSessionAvailableWithFilter() returned nil; want recovered account")
+	}
+	defer store.Release(got)
+	if got.DBID != acc.DBID {
+		t.Fatalf("WaitForSessionAvailableWithFilter() picked dbID=%d, want %d", got.DBID, acc.DBID)
+	}
+	if calls := atomic.LoadInt32(&probed); calls != 1 {
+		t.Fatalf("recovery probe calls = %d, want 1", calls)
+	}
+
+	acc.mu.RLock()
+	status := acc.Status
+	healthTier := acc.HealthTier
+	failureStreak := acc.FailureStreak
+	acc.mu.RUnlock()
+	if atomic.LoadInt32(&acc.Disabled) != 0 {
+		t.Fatal("Disabled flag should be cleared after successful recovery probe")
+	}
+	if status != StatusReady {
+		t.Fatalf("Status = %v, want ready", status)
+	}
+	if healthTier == HealthTierBanned {
+		t.Fatal("HealthTier should recover from banned")
+	}
+	if failureStreak != 0 {
+		t.Fatalf("FailureStreak = %d, want 0", failureStreak)
+	}
+}
+
+func TestWaitForSessionAvailableTriggersRecoveryProbeForOpenAIResponsesAccount(t *testing.T) {
+	store := NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency:               1,
+		RecoveryProbeIntervalMinutes: 30,
+	})
+	acc := &Account{
+		DBID:         1,
+		UpstreamType: UpstreamOpenAIResponses,
+		BaseURL:      "https://api.example.test",
+		APIKey:       "sk-test",
+		Models:       []string{"gpt-5.4"},
+		Status:       StatusError,
+		HealthTier:   HealthTierBanned,
+	}
+	atomic.StoreInt32(&acc.Disabled, 1)
+	store.AddAccount(acc)
+
+	var probed int32
+	store.SetUsageProbeFunc(func(_ context.Context, account *Account) error {
+		if account.DBID != acc.DBID {
+			t.Fatalf("recovery probe account dbID=%d, want %d", account.DBID, acc.DBID)
+		}
+		atomic.AddInt32(&probed, 1)
+		return nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	got, _ := store.WaitForSessionAvailableWithFilter(ctx, "", 500*time.Millisecond, 0, nil, nil)
+	if got == nil {
+		t.Fatal("WaitForSessionAvailableWithFilter() returned nil; want recovered OpenAI Responses account")
+	}
+	defer store.Release(got)
+	if got.DBID != acc.DBID {
+		t.Fatalf("WaitForSessionAvailableWithFilter() picked dbID=%d, want %d", got.DBID, acc.DBID)
+	}
+	if calls := atomic.LoadInt32(&probed); calls != 1 {
+		t.Fatalf("recovery probe calls = %d, want 1", calls)
+	}
+}
+
+func TestWaitForSessionAvailableTriggersRecoveryProbeForErroredOpenAIResponsesAccount(t *testing.T) {
+	store := NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency:               1,
+		RecoveryProbeIntervalMinutes: 30,
+	})
+	acc := &Account{
+		DBID:         1,
+		UpstreamType: UpstreamOpenAIResponses,
+		BaseURL:      "https://api.example.test",
+		APIKey:       "sk-test",
+		Models:       []string{"gpt-5.4"},
+		Status:       StatusError,
+		HealthTier:   HealthTierRisky,
+	}
+	store.AddAccount(acc)
+
+	var probed int32
+	store.SetUsageProbeFunc(func(_ context.Context, account *Account) error {
+		if account.DBID != acc.DBID {
+			t.Fatalf("recovery probe account dbID=%d, want %d", account.DBID, acc.DBID)
+		}
+		atomic.AddInt32(&probed, 1)
+		return nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	got, _ := store.WaitForSessionAvailableWithFilter(ctx, "", 500*time.Millisecond, 0, nil, nil)
+	if got == nil {
+		t.Fatal("WaitForSessionAvailableWithFilter() returned nil; want recovered errored OpenAI Responses account")
+	}
+	defer store.Release(got)
+	if calls := atomic.LoadInt32(&probed); calls != 1 {
+		t.Fatalf("recovery probe calls = %d, want 1", calls)
+	}
+}
+
 func TestAccountPremium5hUrgencyBonusOnlyAffectsDispatchScore(t *testing.T) {
 	acc := &Account{
 		DBID:                1,

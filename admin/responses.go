@@ -258,12 +258,30 @@ type runtimeProbesResponse struct {
 }
 
 type runtimeAccountsResponse struct {
-	Status         string         `json:"status"`
-	Total          int            `json:"total"`
-	Available      int            `json:"available"`
-	ActiveRequests int64          `json:"active_requests"`
-	TotalRequests  int64          `json:"total_requests"`
-	StatusCounts   map[string]int `json:"status_counts"`
+	Status               string                         `json:"status"`
+	Total                int                            `json:"total"`
+	Available            int                            `json:"available"`
+	ActiveRequests       int64                          `json:"active_requests"`
+	TotalRequests        int64                          `json:"total_requests"`
+	StatusCounts         map[string]int                 `json:"status_counts"`
+	ActiveRequestDetails []runtimeActiveRequestResponse `json:"active_request_details"`
+}
+
+type runtimeActiveRequestResponse struct {
+	ID               int64  `json:"id"`
+	AccountID        int64  `json:"account_id"`
+	AccountName      string `json:"account_name"`
+	AccountEmail     string `json:"account_email"`
+	Endpoint         string `json:"endpoint"`
+	UpstreamEndpoint string `json:"upstream_endpoint"`
+	Model            string `json:"model"`
+	EffectiveModel   string `json:"effective_model"`
+	APIKeyID         int64  `json:"api_key_id"`
+	APIKeyName       string `json:"api_key_name"`
+	APIKeyMasked     string `json:"api_key_masked"`
+	Stream           bool   `json:"stream"`
+	StartedAt        string `json:"started_at"`
+	DurationMs       int64  `json:"duration_ms"`
 }
 
 type runtimeImageStorageResponse struct {

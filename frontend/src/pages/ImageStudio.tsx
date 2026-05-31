@@ -6,6 +6,7 @@ import { api } from '../api'
 import PageHeader from '../components/PageHeader'
 import { useConfirmDialog } from '../hooks/useConfirmDialog'
 import { useToast } from '../hooks/useToast'
+import { useVisiblePolling } from '../hooks/useVisiblePolling'
 import { formatBeijingTime } from '../utils/time'
 import type { APIKeyRow, CreateImageJobPayload, ImageAsset, ImageGenerationJob, ImagePromptTemplate, ImagePromptTemplatePayload } from '../types'
 import { Badge } from '@/components/ui/badge'
@@ -620,21 +621,26 @@ export default function ImageStudio() {
     })
   }, [visibleAssets])
 
-  useEffect(() => {
+  const pollCurrentJob = useCallback(async () => {
     if (!currentJob || !['queued', 'running'].includes(currentJob.status)) return
-    const timer = window.setInterval(async () => {
-      try {
-        const res = await api.getImageJob(currentJob.id, { includeCache: true })
-        setCurrentJob(res.job)
-        if (!['queued', 'running'].includes(res.job.status)) {
-          await Promise.all([loadJobs(), loadAssets(), loadTemplates(), loadHistoryJobs()])
+    try {
+      const res = await api.getImageJob(currentJob.id, { includeCache: true })
+      setCurrentJob(res.job)
+      if (!['queued', 'running'].includes(res.job.status)) {
+        const refreshes = [loadJobs(), loadAssets(), loadTemplates()]
+        if (activeView === 'history') {
+          refreshes.push(loadHistoryJobs())
         }
-      } catch {
-        // keep polling quiet; the visible job state is enough context
+        await Promise.all(refreshes)
       }
-    }, 2500)
-    return () => window.clearInterval(timer)
-  }, [currentJob, loadAssets, loadHistoryJobs, loadJobs, loadTemplates])
+    } catch {
+      // keep polling quiet; the visible job state is enough context
+    }
+  }, [activeView, currentJob, loadAssets, loadHistoryJobs, loadJobs, loadTemplates])
+
+  useVisiblePolling(pollCurrentJob, 2500, {
+    enabled: Boolean(currentJob && ['queued', 'running'].includes(currentJob.status)),
+  })
 
   const promptForAsset = useCallback((asset: ImageAsset) => {
     const job = [...jobs, ...historyJobs].find(item => item.id === asset.job_id)

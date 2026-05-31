@@ -39,6 +39,7 @@ type oauthSession struct {
 	CodeVerifier string
 	RedirectURI  string
 	ProxyURL     string
+	Tags         []string
 	CreatedAt    time.Time
 
 	// 回调自动捕获字段
@@ -138,10 +139,16 @@ func oauthCodeChallenge(verifier string) string {
 // POST /api/admin/oauth/generate-auth-url
 func (h *Handler) GenerateOAuthURL(c *gin.Context) {
 	var req struct {
-		ProxyURL    string `json:"proxy_url"`
-		RedirectURI string `json:"redirect_uri"`
+		ProxyURL    string          `json:"proxy_url"`
+		RedirectURI string          `json:"redirect_uri"`
+		Tags        json.RawMessage `json:"tags"`
 	}
 	_ = c.ShouldBindJSON(&req)
+	tags, err := parseOptionalStringSliceField(req.Tags, "tags")
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	redirectURI := strings.TrimSpace(req.RedirectURI)
 	if redirectURI == "" {
@@ -171,6 +178,7 @@ func (h *Handler) GenerateOAuthURL(c *gin.Context) {
 		CodeVerifier: codeVerifier,
 		RedirectURI:  redirectURI,
 		ProxyURL:     strings.TrimSpace(req.ProxyURL),
+		Tags:         append([]string(nil), tags.Values...),
 		CreatedAt:    time.Now(),
 	})
 
@@ -195,11 +203,12 @@ func (h *Handler) GenerateOAuthURL(c *gin.Context) {
 // POST /api/admin/oauth/exchange-code
 func (h *Handler) ExchangeOAuthCode(c *gin.Context) {
 	var req struct {
-		SessionID string `json:"session_id"`
-		Code      string `json:"code"`
-		State     string `json:"state"`
-		Name      string `json:"name"`
-		ProxyURL  string `json:"proxy_url"`
+		SessionID string          `json:"session_id"`
+		Code      string          `json:"code"`
+		State     string          `json:"state"`
+		Name      string          `json:"name"`
+		ProxyURL  string          `json:"proxy_url"`
+		Tags      json.RawMessage `json:"tags"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeError(c, http.StatusBadRequest, "请求格式错误")
@@ -218,6 +227,14 @@ func (h *Handler) ExchangeOAuthCode(c *gin.Context) {
 	if req.State != sess.State {
 		writeError(c, http.StatusBadRequest, "state 不匹配，请重新发起授权")
 		return
+	}
+	tags, err := parseOptionalStringSliceField(req.Tags, "tags")
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !tags.Set && len(sess.Tags) > 0 {
+		tags = optionalStringSlice{Set: true, Values: append([]string(nil), sess.Tags...)}
 	}
 
 	proxyURL := sess.ProxyURL
@@ -275,9 +292,6 @@ func (h *Handler) ExchangeOAuthCode(c *gin.Context) {
 		go proxy.InheritLease(resinTempID, fmt.Sprintf("%d", id))
 	}
 
-	newAcc := accountFromCredentialSeed(id, proxyURL, seed)
-	h.store.AddAccount(newAcc)
-
 	email := ""
 	planType := ""
 	if accountInfo != nil {
@@ -290,6 +304,17 @@ func (h *Handler) ExchangeOAuthCode(c *gin.Context) {
 	if planType == "" {
 		planType = seed.planType
 	}
+	newAcc := accountFromCredentialSeed(id, proxyURL, seed)
+	groupIDs, err := h.applyAccountCreateMetadata(ctx, id, tags, autoAccountGroupForPlan(planType))
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "账号标签/分组写入失败: "+err.Error())
+		return
+	}
+	if tags.Set {
+		newAcc.Tags = append([]string(nil), tags.Values...)
+	}
+	newAcc.GroupIDs = append([]int64(nil), groupIDs...)
+	h.store.AddAccount(newAcc)
 
 	c.JSON(http.StatusOK, gin.H{
 		"message":   fmt.Sprintf("OAuth 账号 %s 添加成功", name),
@@ -460,9 +485,6 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 		go proxy.InheritLease(resinTempID, fmt.Sprintf("%d", id))
 	}
 
-	newAcc := accountFromCredentialSeed(id, proxyURL, seed)
-	h.store.AddAccount(newAcc)
-
 	email := ""
 	planType := ""
 	if accountInfo != nil {
@@ -475,6 +497,21 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 	if planType == "" {
 		planType = seed.planType
 	}
+	newAcc := accountFromCredentialSeed(id, proxyURL, seed)
+	groupIDs, err := h.applyAccountCreateMetadata(ctx, id, optionalStringSlice{Set: len(sess.Tags) > 0, Values: append([]string(nil), sess.Tags...)}, autoAccountGroupForPlan(planType))
+	if err != nil {
+		sess.ExchangeResult = &oauthExchangeResult{
+			Success: false,
+			Error:   "账号标签/分组写入失败: " + err.Error(),
+		}
+		c.String(http.StatusOK, oauthCallbackPage("授权失败", "写入标签/分组失败: "+err.Error(), false))
+		return
+	}
+	if len(sess.Tags) > 0 {
+		newAcc.Tags = append([]string(nil), sess.Tags...)
+	}
+	newAcc.GroupIDs = append([]int64(nil), groupIDs...)
+	h.store.AddAccount(newAcc)
 
 	sess.ExchangeResult = &oauthExchangeResult{
 		Success:  true,

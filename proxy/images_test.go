@@ -29,8 +29,8 @@ func TestBuildImagesResponsesRequestMatchesReferenceChain(t *testing.T) {
 	if got := gjson.GetBytes(body, "model").String(); got != defaultImagesMainModel {
 		t.Fatalf("responses model = %q, want %q", got, defaultImagesMainModel)
 	}
-	if got := gjson.GetBytes(body, "tool_choice.type").String(); got != "image_generation" {
-		t.Fatalf("tool_choice.type = %q, want image_generation", got)
+	if gjson.GetBytes(body, "tool_choice").Exists() {
+		t.Fatalf("tool_choice should be omitted for image proxy requests; body=%s", body)
 	}
 	if got := gjson.GetBytes(body, "tools.0.type").String(); got != "image_generation" {
 		t.Fatalf("tools.0.type = %q, want image_generation", got)
@@ -57,6 +57,52 @@ func TestNextImageAccountPrefersPlusOrHigherPlan(t *testing.T) {
 
 	if account.DBID != 2 {
 		t.Fatalf("nextImageAccount picked account %d, want plus account 2", account.DBID)
+	}
+}
+
+func TestNextImageAccountPrefersOpenAIResponsesAPI(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	store.AddAccount(&auth.Account{DBID: 1, AccessToken: "plus-token", PlanType: "plus"})
+	store.AddAccount(&auth.Account{
+		DBID:         2,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      "https://api.example.test",
+		APIKey:       "sk-test",
+		Models:       []string{defaultImagesMainModel},
+	})
+	handler := &Handler{store: store}
+
+	account, _ := handler.nextImageAccount(0, nil, "gpt-image-2")
+	if account == nil {
+		t.Fatal("nextImageAccount returned nil")
+	}
+	defer store.Release(account)
+
+	if account.DBID != 2 {
+		t.Fatalf("nextImageAccount picked account %d, want OpenAI Responses account 2", account.DBID)
+	}
+}
+
+func TestNextImageAccountFallsBackWhenOpenAIResponsesLacksMainModel(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	store.AddAccount(&auth.Account{
+		DBID:         1,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      "https://api.example.test",
+		APIKey:       "sk-test",
+		Models:       []string{"gpt-4.1"},
+	})
+	store.AddAccount(&auth.Account{DBID: 2, AccessToken: "plus-token", PlanType: "plus"})
+	handler := &Handler{store: store}
+
+	account, _ := handler.nextImageAccount(0, nil, "gpt-image-2")
+	if account == nil {
+		t.Fatal("nextImageAccount returned nil")
+	}
+	defer store.Release(account)
+
+	if account.DBID != 2 {
+		t.Fatalf("nextImageAccount picked account %d, want Codex plus account 2", account.DBID)
 	}
 }
 

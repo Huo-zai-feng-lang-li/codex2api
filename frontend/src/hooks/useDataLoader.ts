@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { getErrorMessage } from '../utils/error'
 
 export interface LoadOptions {
@@ -15,32 +15,52 @@ export function useDataLoader<T>({ initialData, load, onError }: UseDataLoaderOp
   const [data, setData] = useState<T>(initialData)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const activeRequestId = useRef(0)
+  const inFlight = useRef<Promise<T | null> | null>(null)
 
   const run = useCallback(async (options: LoadOptions = {}) => {
     const { silent = false } = options
+    if (silent && inFlight.current) {
+      return inFlight.current
+    }
 
     if (!silent) {
       setLoading(true)
       setError(null)
     }
 
-    try {
+    const requestId = activeRequestId.current + 1
+    activeRequestId.current = requestId
+
+    const request = (async () => {
       const nextData = await load(options)
-      setData(nextData)
-      setError(null)
-      return nextData
-    } catch (err) {
-      const message = getErrorMessage(err)
-      if (!silent) {
-        setError(message)
+      if (activeRequestId.current === requestId) {
+        setData(nextData)
+        setError(null)
       }
-      onError?.(message, err)
+      return nextData
+    })()
+
+    const trackedRequest = request.catch((err) => {
+      if (activeRequestId.current === requestId) {
+        const message = getErrorMessage(err)
+        if (!silent) {
+          setError(message)
+        }
+        onError?.(message, err)
+      }
       return null
-    } finally {
-      if (!silent) {
+    }).finally(() => {
+      if (inFlight.current === trackedRequest) {
+        inFlight.current = null
+      }
+      if (!silent && activeRequestId.current === requestId) {
         setLoading(false)
       }
-    }
+    })
+
+    inFlight.current = trackedRequest
+    return inFlight.current
   }, [load, onError])
 
   useEffect(() => {

@@ -7,8 +7,10 @@ import PageHeader from '../components/PageHeader'
 import StateShell from '../components/StateShell'
 import StatCard from '../components/StatCard'
 import UsageStatsSummary from '../components/UsageStatsSummary'
-import type { StatsResponse, UsageStats, ChartAggregation } from '../types'
+import ActiveRequestsPanel from '../components/ActiveRequestsPanel'
+import type { StatsResponse, UsageStats, ChartAggregation, RuntimeStatusResponse } from '../types'
 import { useDataLoader } from '../hooks/useDataLoader'
+import { useVisiblePolling } from '../hooks/useVisiblePolling'
 import { Card, CardContent } from '@/components/ui/card'
 import { Users, CheckCircle, Gauge, XCircle, Activity } from 'lucide-react'
 
@@ -52,18 +54,20 @@ export default function Dashboard() {
 
   // 仅加载轻量级统计数据（秒级响应）
   const loadDashboardStats = useCallback(async () => {
-    const [stats, usageStats] = await Promise.all([
+    const [stats, usageStats, runtimeStatus] = await Promise.all([
       api.getStats(),
       api.getUsageStats(),
+      api.getRuntimeStatus(),
     ])
-    return { stats, usageStats }
+    return { stats, usageStats, runtimeStatus }
   }, [])
 
   const { data, loading, error, reload, reloadSilently } = useDataLoader<{
     stats: StatsResponse | null
     usageStats: UsageStats | null
+    runtimeStatus: RuntimeStatusResponse | null
   }>({
-    initialData: { stats: null, usageStats: null },
+    initialData: { stats: null, usageStats: null, runtimeStatus: null },
     load: loadDashboardStats,
   })
 
@@ -96,19 +100,11 @@ export default function Dashboard() {
   }, [loadChartData])
 
   // 仅在 1h（实时）模式下启用自动刷新
-  useEffect(() => {
-    if (timeRange !== '1h') return
+  useVisiblePolling(async () => {
+    await Promise.all([reloadSilently(), loadChartData()])
+  }, DASHBOARD_REFRESH_INTERVAL_MS, { enabled: timeRange === '1h' })
 
-    const timer = window.setInterval(() => {
-      if (document.visibilityState !== 'visible') return
-      void reloadSilently()
-      void loadChartData()
-    }, DASHBOARD_REFRESH_INTERVAL_MS)
-
-    return () => window.clearInterval(timer)
-  }, [reloadSilently, timeRange, loadChartData])
-
-  const { stats, usageStats } = data
+  const { stats, usageStats, runtimeStatus } = data
   const total = stats?.total ?? 0
   const available = stats?.available ?? 0
   const rateLimited = stats?.rate_limited ?? 0
@@ -163,6 +159,7 @@ export default function Dashboard() {
         {usageStats && (
           <div className="space-y-6">
             <UsageStatsSummary stats={usageStats} />
+            <ActiveRequestsPanel requests={runtimeStatus?.accounts.active_request_details ?? []} />
             <Suspense fallback={<ChartsSkeleton />}>
               <DashboardUsageCharts
                 chartData={chartData}

@@ -78,6 +78,13 @@ func TestRequestSizeLimiter(t *testing.T) {
 	r := gin.New()
 	r.Use(RequestSizeLimiter(100))
 	r.POST("/test", func(c *gin.Context) {
+		raw, exists := c.Get("raw_body")
+		if !exists {
+			t.Fatalf("raw_body missing")
+		}
+		if string(raw.([]byte)) != "small" {
+			t.Fatalf("raw_body = %q, want %q", string(raw.([]byte)), "small")
+		}
 		body, _ := c.GetRawData()
 		c.String(200, "Received %d bytes", len(body))
 	})

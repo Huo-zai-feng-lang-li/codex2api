@@ -16,6 +16,7 @@ import { BarChart3, RefreshCw } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { api } from '../api'
 import { getErrorMessage } from '../utils/error'
+import { chartInitialDimensions } from '../lib/chartDimensions'
 import type { AccountRow } from '../types'
 
 type QuotaWindow = '5h' | '7d'
@@ -190,7 +191,11 @@ export default function AccountQuotaDistributionChart({
         <div className={compact ? 'flex min-h-0 flex-1 flex-col gap-3' : 'grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]'}>
           <div className={`${compact ? 'min-h-0 flex-1' : 'h-[260px]'} min-w-0`}>
             {hasChartData ? (
-              <ResponsiveContainer width="100%" height="100%">
+              <ResponsiveContainer
+                width="100%"
+                height="100%"
+                initialDimension={compact ? chartInitialDimensions.accountCompact : chartInitialDimensions.account}
+              >
                 <ComposedChart data={distribution.buckets} margin={chartMargin}>
                   <CartesianGrid vertical={false} stroke={gridColor} strokeDasharray="4 4" />
                   <XAxis

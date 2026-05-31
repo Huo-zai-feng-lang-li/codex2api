@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useVisiblePolling } from './useVisiblePolling'
 
 const GITHUB_API = 'https://api.github.com/repos/james-6-23/codex2api/releases/latest'
 const CACHE_KEY = 'codex2api_latest_version'
@@ -87,9 +88,8 @@ export function useVersionCheck(triggerKey?: string) {
 
   useEffect(() => {
     void check()
-    const timer = setInterval(() => void check(), POLL_INTERVAL)
-    return () => clearInterval(timer)
   }, [check])
+  useVisiblePolling(() => check(), POLL_INTERVAL, { immediateOnVisible: false })
 
   useEffect(() => {
     if (triggerKey === undefined) return
@@ -99,7 +99,7 @@ export function useVersionCheck(triggerKey?: string) {
     }
     if (lastTriggerRef.current === triggerKey) return
     lastTriggerRef.current = triggerKey
-    void check(true)
+    void check()
   }, [check, triggerKey])
 
   return { hasUpdate, latestVersion }

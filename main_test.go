@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -54,5 +55,21 @@ func TestLoggerMiddlewareRedactsSensitiveContext(t *testing.T) {
 			t.Fatalf("log output missing %q: %s", expected, got)
 		}
 	}
+}
 
+func TestNewHTTPServerSetsReadAndIdleTimeouts(t *testing.T) {
+	server := newHTTPServer("127.0.0.1:0", http.NewServeMux())
+
+	if server.ReadHeaderTimeout <= 0 {
+		t.Fatalf("ReadHeaderTimeout = %v, want positive timeout", server.ReadHeaderTimeout)
+	}
+	if server.ReadTimeout <= server.ReadHeaderTimeout {
+		t.Fatalf("ReadTimeout = %v, want longer than ReadHeaderTimeout %v", server.ReadTimeout, server.ReadHeaderTimeout)
+	}
+	if server.IdleTimeout <= 0 {
+		t.Fatalf("IdleTimeout = %v, want positive timeout", server.IdleTimeout)
+	}
+	if server.WriteTimeout != 0*time.Second {
+		t.Fatalf("WriteTimeout = %v, want zero to preserve long streaming responses", server.WriteTimeout)
+	}
 }

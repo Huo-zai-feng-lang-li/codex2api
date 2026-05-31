@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/codex2api/proxy"
 	"github.com/gorilla/websocket"
@@ -190,5 +191,51 @@ func TestSendRequestWritesResponseCreatePayloadDirectly(t *testing.T) {
 	}
 	if gjson.GetBytes(got, "request_id").Exists() {
 		t.Fatalf("payload should not contain internal request_id wrapper: %s", got)
+	}
+}
+
+func TestWsResponseReadStreamFailsWhenWebSocketClosesBeforeTerminalEvent(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer conn.Close()
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.output_text.delta","delta":"hi"}`)); err != nil {
+			t.Errorf("write websocket delta: %v", err)
+			return
+		}
+		msg := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")
+		_ = conn.WriteControl(websocket.CloseMessage, msg, time.Now().Add(time.Second))
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer conn.Close()
+
+	wsResp := &WsResponse{
+		conn:       NewWsConnection(conn, NewSession(1, nil), wsURL),
+		pendingReq: &PendingRequest{RequestID: "request-1"},
+		manager:    NewManager(),
+	}
+	wsResp.conn.httpResp = resp
+
+	var events []string
+	err = wsResp.ReadStream(func(data []byte) bool {
+		events = append(events, gjson.GetBytes(data, "type").String())
+		return true
+	})
+
+	if err == nil {
+		t.Fatalf("ReadStream returned nil after events %v, want missing terminal error", events)
+	}
+	if !strings.Contains(err.Error(), "before response.completed") {
+		t.Fatalf("ReadStream error = %v, want missing response.completed", err)
 	}
 }

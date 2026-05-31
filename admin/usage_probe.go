@@ -16,11 +16,14 @@ import (
 // ProbeUsageSnapshot 主动刷新账号用量。
 //
 // 优先尝试 /backend-api/wham/usage（零额度成本的结构化端点）；
-// 失败时（4xx/5xx/网络）回退到给 /backend-api/codex/responses 发一个最小请求
-// （会真实计入用量但保证向下兼容）。
+// 只有拿到 HTTP 响应但 wham 不可用时，才回退到 /backend-api/codex/responses
+// 最小探针。网络/代理层不可达时不回退，避免无收益的真实请求。
 func (h *Handler) ProbeUsageSnapshot(ctx context.Context, account *auth.Account) error {
 	if account == nil {
 		return nil
+	}
+	if account.IsOpenAIResponsesAPI() {
+		return h.probeOpenAIResponsesAPI(ctx, account)
 	}
 
 	account.Mu().RLock()
@@ -31,9 +34,12 @@ func (h *Handler) ProbeUsageSnapshot(ctx context.Context, account *auth.Account)
 	}
 
 	// 1) 优先用 wham（零成本）
-	if err := h.probeUsageViaWham(ctx, account); err == nil {
+	if resp, err := h.probeUsageViaWham(ctx, account); err == nil {
 		return nil
 	} else {
+		if !shouldFallbackUsageProbeAfterWhamFailure(resp, err) {
+			return err
+		}
 		log.Printf("[账号 %d] wham 用量探测失败，回退到 /responses 探针: %v", account.DBID, err)
 	}
 
@@ -41,9 +47,48 @@ func (h *Handler) ProbeUsageSnapshot(ctx context.Context, account *auth.Account)
 	return h.probeUsageViaResponses(ctx, account)
 }
 
+func (h *Handler) probeOpenAIResponsesAPI(ctx context.Context, account *auth.Account) error {
+	model, err := h.connectionTestModelForAccount(ctx, account, "")
+	if err != nil {
+		return err
+	}
+	payload := buildTestPayload(model)
+	resp, err := proxy.ExecuteOpenAIResponsesRequest(ctx, account, payload, h.store.ResolveProxyForAccount(account), nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	switch resp.StatusCode {
+	case http.StatusOK:
+		h.store.ReportRequestSuccess(account, 0)
+		return nil
+	case http.StatusUnauthorized:
+		h.store.ReportRequestFailure(account, "client", 0)
+		h.store.MarkCooldownWithError(account, 24*time.Hour, "unauthorized", fmt.Sprintf("OpenAI Responses 探针上游返回 %d: %s", resp.StatusCode, truncate(string(body), 300)))
+		return nil
+	case http.StatusTooManyRequests:
+		h.store.ReportRequestFailure(account, "client", 0)
+		proxy.Apply429Cooldown(h.store, account, body, resp, model)
+		return nil
+	default:
+		if shouldMarkUsageProbeAccountError(resp.StatusCode, body) {
+			h.store.MarkError(account, fmt.Sprintf("OpenAI Responses 探针上游返回 %d: %s", resp.StatusCode, truncate(string(body), 300)))
+			return nil
+		}
+		if resp.StatusCode >= 500 {
+			h.store.ReportRequestFailure(account, "server", 0)
+		} else if resp.StatusCode >= 400 {
+			h.store.ReportRequestFailure(account, "client", 0)
+		}
+		return fmt.Errorf("OpenAI Responses 探针返回状态 %d", resp.StatusCode)
+	}
+}
+
 // probeUsageViaWham 通过 /backend-api/wham/usage 拉取用量，
 // 不消耗任何 token 额度。
-func (h *Handler) probeUsageViaWham(ctx context.Context, account *auth.Account) error {
+func (h *Handler) probeUsageViaWham(ctx context.Context, account *auth.Account) (*http.Response, error) {
 	usage, resp, err := proxy.QueryWhamUsage(ctx, account, h.store.ResolveProxyForAccount(account))
 	if resp != nil {
 		// QueryWhamUsage 在非 200 时不会读 body；这里读取一小段用于账号错误详情。
@@ -58,10 +103,10 @@ func (h *Handler) probeUsageViaWham(ctx context.Context, account *auth.Account) 
 		}
 	}
 	if err != nil {
-		return err
+		return resp, err
 	}
 	if usage == nil {
-		return fmt.Errorf("wham returned empty body")
+		return resp, fmt.Errorf("wham returned empty body")
 	}
 
 	state := proxy.ApplyWhamUsage(h.store, account, usage)
@@ -70,7 +115,11 @@ func (h *Handler) probeUsageViaWham(ctx context.Context, account *auth.Account) 
 	if !state.Premium5hRateLimited && (!state.HasUsage7d || state.UsagePct7d < 100) {
 		h.store.ClearCooldown(account)
 	}
-	return nil
+	return resp, nil
+}
+
+func shouldFallbackUsageProbeAfterWhamFailure(resp *http.Response, err error) bool {
+	return err != nil && resp != nil
 }
 
 // probeUsageViaResponses 原有探针：发送最小 /responses 请求，

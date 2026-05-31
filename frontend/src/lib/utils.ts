@@ -20,3 +20,23 @@ export function formatCompactEmail(email?: string | null, fallback = '-'): strin
   const hiddenLevels = labels.length - 2
   return `${localPart}@${'*'.repeat(hiddenLevels)}.${labels.slice(-2).join('.')}`
 }
+
+export function formatAccountIdentity(account: {
+  account_name?: string | null
+  account_email?: string | null
+  account_id?: number | string | null
+}, fallback = '-'): string {
+  const name = account.account_name?.trim()
+  if (name && !isURLLike(name)) return formatCompactEmail(name) || name
+
+  const email = account.account_email?.trim()
+  if (email && !isURLLike(email)) return formatCompactEmail(email) || email
+
+  const id = account.account_id
+  if (id !== undefined && id !== null && `${id}`.trim() !== '') return `ID ${id}`
+  return fallback
+}
+
+function isURLLike(value: string): boolean {
+  return /^https?:\/\//i.test(value.trim())
+}

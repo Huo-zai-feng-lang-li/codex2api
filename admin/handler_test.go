@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1227,6 +1228,206 @@ func TestUpdateAccountSchedulerUpdatesRuntimeOverrides(t *testing.T) {
 	}
 }
 
+func TestAddOpenAIResponsesAccountPersistsTagsAndAPIGroup(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	store := auth.NewStore(db, cache.NewMemory(1), nil)
+	handler := &Handler{db: db, store: store}
+
+	body := `{
+		"name":"primary-api",
+		"base_url":"https://api.openai.com",
+		"api_key":"sk-test-openai-responses",
+		"models":["gpt-4.1"],
+		"tags":["prod","billing"],
+		"proxy_url":""
+	}`
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/openai-responses", strings.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.AddOpenAIResponsesAccount(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	var payload struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	row, err := db.GetAccountByID(context.Background(), payload.ID)
+	if err != nil {
+		t.Fatalf("GetAccountByID: %v", err)
+	}
+	if got := strings.Join(row.Tags, ","); got != "prod,billing" {
+		t.Fatalf("tags = %q, want prod,billing", got)
+	}
+	groups, err := db.ListAccountGroups(context.Background())
+	if err != nil {
+		t.Fatalf("ListAccountGroups: %v", err)
+	}
+	if len(groups) != 1 || groups[0].Name != "API" || groups[0].MemberCount != 1 {
+		t.Fatalf("groups = %+v, want one API group with one member", groups)
+	}
+	runtimeAccount := store.FindByID(payload.ID)
+	if runtimeAccount == nil {
+		t.Fatalf("runtime account %d not found", payload.ID)
+	}
+	runtimeAccount.Mu().RLock()
+	runtimeGroups := append([]int64(nil), runtimeAccount.GroupIDs...)
+	runtimeTags := append([]string(nil), runtimeAccount.Tags...)
+	runtimeAccount.Mu().RUnlock()
+	if len(runtimeGroups) != 1 || runtimeGroups[0] != groups[0].ID {
+		t.Fatalf("runtime groups = %v, want [%d]", runtimeGroups, groups[0].ID)
+	}
+	if got := strings.Join(runtimeTags, ","); got != "prod,billing" {
+		t.Fatalf("runtime tags = %q, want prod,billing", got)
+	}
+}
+
+func TestAddATAccountPersistsTagsAndFreeGroup(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	store := auth.NewStore(db, cache.NewMemory(1), nil)
+	handler := &Handler{db: db, store: store}
+	accessToken := testAccessToken(map[string]any{
+		"exp": time.Now().Add(time.Hour).Unix(),
+		"https://api.openai.com/profile": map[string]any{
+			"email": "free@example.com",
+		},
+		"https://api.openai.com/auth": map[string]any{
+			"chatgpt_account_id": "acc-free",
+			"chatgpt_plan_type":  "free",
+		},
+	})
+
+	body := fmt.Sprintf(`{"name":"free-user","access_token":%q,"tags":["trial","free"],"proxy_url":""}`, accessToken)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/at", strings.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.AddATAccount(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	rows, err := db.ListActive(context.Background())
+	if err != nil {
+		t.Fatalf("ListActive: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	if got := strings.Join(rows[0].Tags, ","); got != "trial,free" {
+		t.Fatalf("tags = %q, want trial,free", got)
+	}
+	groups, err := db.ListAccountGroups(context.Background())
+	if err != nil {
+		t.Fatalf("ListAccountGroups: %v", err)
+	}
+	if len(groups) != 1 || groups[0].Name != "FREE" || groups[0].MemberCount != 1 {
+		t.Fatalf("groups = %+v, want one FREE group with one member", groups)
+	}
+}
+
+func TestGetOpenAIResponsesAccountReturnsSavedAPIKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	id, err := db.InsertOpenAIResponsesAccount(context.Background(), "api-account", map[string]interface{}{
+		"upstream_type": auth.UpstreamOpenAIResponses,
+		"base_url":      "https://api.openai.com",
+		"api_key":       "sk-visible-in-editor",
+		"models":        []string{"gpt-4.1"},
+		"plan_type":     "api",
+		"email":         "https://api.openai.com",
+	}, "")
+	if err != nil {
+		t.Fatalf("insert openai responses account: %v", err)
+	}
+	handler := &Handler{db: db}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", id)}}
+	ctx.Request = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/admin/accounts/%d/openai-responses", id), nil)
+
+	handler.GetOpenAIResponsesAccount(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	var payload struct {
+		Name     string   `json:"name"`
+		BaseURL  string   `json:"base_url"`
+		APIKey   string   `json:"api_key"`
+		Models   []string `json:"models"`
+		ProxyURL string   `json:"proxy_url"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.APIKey != "sk-visible-in-editor" {
+		t.Fatalf("api_key = %q, want saved key", payload.APIKey)
+	}
+	if payload.BaseURL != "https://api.openai.com" || len(payload.Models) != 1 || payload.Models[0] != "gpt-4.1" {
+		t.Fatalf("payload = %+v, want saved account config", payload)
+	}
+}
+
+func TestUpdateOpenAIResponsesAccountPersistsTags(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	id, err := db.InsertOpenAIResponsesAccount(context.Background(), "api-account", map[string]interface{}{
+		"upstream_type": auth.UpstreamOpenAIResponses,
+		"base_url":      "https://api.openai.com",
+		"api_key":       "sk-existing",
+		"models":        []string{"gpt-4.1"},
+		"plan_type":     "api",
+		"email":         "https://api.openai.com",
+	}, "")
+	if err != nil {
+		t.Fatalf("insert openai responses account: %v", err)
+	}
+	handler := &Handler{db: db}
+
+	body := strings.NewReader(`{
+		"name": "api-account",
+		"base_url": "https://api.openai.com",
+		"models": ["gpt-4.1"],
+		"proxy_url": "",
+		"tags": ["team-a", "responses"]
+	}`)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", id)}}
+	ctx.Request = httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/api/admin/accounts/%d/openai-responses", id), body)
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.UpdateOpenAIResponsesAccount(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	rows, err := db.ListActive(context.Background())
+	if err != nil {
+		t.Fatalf("ListActive: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	if got := strings.Join(rows[0].Tags, ","); got != "team-a,responses" {
+		t.Fatalf("tags = %q, want team-a,responses", got)
+	}
+}
+
 // AT-only 账号(没有 refresh_token,只靠 access_token)是规避 Codex Plus "add
 // phone" 流程的常用形态。导出/迁移以前会因为 rt=="" 直接跳过这些账号,导致
 // issue #123 中的迁移丢号。下面两个测试保护已修好的过滤逻辑。
@@ -1367,6 +1568,11 @@ func insertTestAPIKey(t *testing.T, db *database.DB, name string) int64 {
 		t.Fatalf("insert api key: %v", err)
 	}
 	return id
+}
+
+func testAccessToken(claims map[string]any) string {
+	payload, _ := json.Marshal(claims)
+	return "test." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
 }
 
 func assertErrorMessage(t *testing.T, recorder *httptest.ResponseRecorder, want string) {

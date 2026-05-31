@@ -4,15 +4,17 @@ import { createPortal } from 'react-dom'
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip as RechartsTooltip } from 'recharts'
 import { api } from '../api'
 import { getTimeRangeISO, type TimeRangeKey } from '../lib/timeRange'
+import { chartInitialDimensions } from '../lib/chartDimensions'
 import PageHeader from '../components/PageHeader'
 import Pagination from '../components/Pagination'
 import StateShell from '../components/StateShell'
 import { useDataLoader } from '../hooks/useDataLoader'
+import { useVisiblePolling } from '../hooks/useVisiblePolling'
 import { useConfirmDialog } from '../hooks/useConfirmDialog'
 import { useToast } from '../hooks/useToast'
 import { DEFAULT_PAGE_SIZE_OPTIONS, usePersistedPageSize } from '../hooks/usePersistedPageSize'
 import type { APIKeyRow, SystemSettings, UsageAPIKeyStat, UsageEndpointStat, UsageFeatureStats, UsageLog, UsageModelStat, UsageStats } from '../types'
-import { formatCompactEmail } from '../lib/utils'
+import { formatAccountIdentity } from '../lib/utils'
 import { formatBeijingTime } from '../utils/time'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -366,7 +368,7 @@ function ModelSharePie({
         </div>
       </div>
       <div className="relative h-[150px] max-xl:h-[140px]">
-        <ResponsiveContainer width="100%" height="100%">
+        <ResponsiveContainer width="100%" height="100%" initialDimension={chartInitialDimensions.usagePie}>
           <PieChart>
             <Pie
               data={pieData}
@@ -946,17 +948,21 @@ export default function Usage() {
     }, 400)
   }, [])
 
-  // 仅加载轻量统计（秒级）—— 联动同页 timeRange,与下方请求记录的范围保持一致
-  const loadStats = useCallback(async () => {
+  const loadStatsOnly = useCallback(async () => {
     const { start, end } = resolveRangeISO(timeRange, customRange)
+    return api.getUsageStats({ start, end })
+  }, [timeRange, customRange])
+
+  // 统计按时间范围刷新；settings 是展示偏好，首次加载即可，避免 30 秒重复拉配置。
+  const loadStats = useCallback(async () => {
     const [stats, settings] = await Promise.all([
-      api.getUsageStats({ start, end }),
+      loadStatsOnly(),
       api.getSettings().catch((): SystemSettings | null => null),
     ])
     return { stats, settings }
-  }, [timeRange, customRange])
+  }, [loadStatsOnly])
 
-  const { data, loading, error, reload, reloadSilently } = useDataLoader<{
+  const { data, setData, loading, error, reload } = useDataLoader<{
     stats: UsageStats | null
     settings: SystemSettings | null
   }>({
@@ -1027,12 +1033,10 @@ export default function Usage() {
     }
   }, [])
 
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      void reloadSilently()
-    }, 30000)
-    return () => window.clearInterval(timer)
-  }, [reloadSilently])
+  useVisiblePolling(async () => {
+    const stats = await loadStatsOnly()
+    setData((current) => ({ ...current, stats }))
+  }, 30000)
 
   useEffect(() => {
     persistUsageVisibleColumns(visibleColumns)
@@ -1498,7 +1502,7 @@ export default function Usage() {
                           </div>
                         </TableCell>}
                         {visibleColumns.account && <TableCell className={`${usageTableTextClass} text-muted-foreground`}>
-                          {formatCompactEmail(log.account_email)}
+                          {formatAccountIdentity(log)}
                         </TableCell>}
                         {visibleColumns.apiKey && <TableCell className={`${usageTableTextClass} text-muted-foreground`}>
                           <span className="block max-w-[180px] truncate whitespace-nowrap font-mono text-[12px]" title={formatUsageAPIKeyLabel(log.api_key_name, log.api_key_masked) || t('usage.unknownApiKey')}>

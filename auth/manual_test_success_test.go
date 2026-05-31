@@ -49,3 +49,35 @@ func TestRecordManualTestSuccessRecoversReadyBannedAccount(t *testing.T) {
 		t.Fatal("account should be available after successful manual test")
 	}
 }
+
+func TestRecordManualTestSuccessDoesNotClearDispatchPaused(t *testing.T) {
+	store := NewStore(nil, nil, nil)
+	acc := &Account{
+		DBID:        1,
+		AccessToken: "at-test",
+		Status:      StatusError,
+		HealthTier:  HealthTierBanned,
+	}
+	atomic.StoreInt32(&acc.DispatchPaused, 1)
+	store.AddAccount(acc)
+
+	store.RecordManualTestSuccess(acc, 123*time.Millisecond)
+
+	acc.mu.RLock()
+	status := acc.Status
+	healthTier := acc.HealthTier
+	acc.mu.RUnlock()
+
+	if status != StatusReady {
+		t.Fatalf("Status = %v, want ready", status)
+	}
+	if healthTier == HealthTierBanned {
+		t.Fatal("HealthTier should recover from banned")
+	}
+	if atomic.LoadInt32(&acc.DispatchPaused) != 1 {
+		t.Fatal("manual test success should not clear DispatchPaused")
+	}
+	if acc.IsAvailable() {
+		t.Fatal("manually disabled account should remain unavailable after successful manual test")
+	}
+}

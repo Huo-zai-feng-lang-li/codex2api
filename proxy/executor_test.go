@@ -85,6 +85,20 @@ func TestClassifyStreamOutcome(t *testing.T) {
 	}
 }
 
+func TestClassifyStreamOutcomeTreatsMissingTerminalAfterCleanReadAsFailure(t *testing.T) {
+	outcome := classifyStreamOutcome(nil, nil, nil, false)
+
+	if outcome.logStatusCode != logStatusUpstreamStreamBreak {
+		t.Fatalf("status = %d, want %d", outcome.logStatusCode, logStatusUpstreamStreamBreak)
+	}
+	if outcome.failureKind != "transport" {
+		t.Fatalf("failure kind = %q, want transport", outcome.failureKind)
+	}
+	if !outcome.penalize {
+		t.Fatal("missing terminal event should penalize upstream account")
+	}
+}
+
 func TestClassifyResponseFailedOutcome(t *testing.T) {
 	payload := []byte(`{"type":"response.failed","response":{"error":{"code":"server_error","message":"An error occurred while processing your request. Please include the request ID req-123."}}}`)
 

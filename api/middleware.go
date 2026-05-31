@@ -181,6 +181,13 @@ func randInt() int {
 // BodyCacheMiddleware caches the request body for multiple reads
 func BodyCacheMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if body, exists := c.Get("raw_body"); exists {
+			if b, ok := body.([]byte); ok {
+				c.Request.Body = io.NopCloser(bytes.NewReader(b))
+			}
+			c.Next()
+			return
+		}
 		if c.Request.Body != nil && c.Request.Body != http.NoBody {
 			body, err := io.ReadAll(c.Request.Body)
 			if err != nil {
@@ -356,4 +363,25 @@ func GetRawBody(c *gin.Context) []byte {
 		}
 	}
 	return nil
+}
+
+// ReadRawBody returns the request body cached by middleware, falling back to a
+// single direct read for tests or routes mounted without the body cache.
+func ReadRawBody(c *gin.Context) ([]byte, error) {
+	if body := GetRawBody(c); body != nil {
+		return body, nil
+	}
+	if c.Request.Body == nil {
+		body := []byte{}
+		c.Set("raw_body", body)
+		c.Request.Body = http.NoBody
+		return body, nil
+	}
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		return nil, err
+	}
+	c.Set("raw_body", body)
+	c.Request.Body = io.NopCloser(bytes.NewReader(body))
+	return body, nil
 }

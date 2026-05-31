@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts'
 import Modal from './Modal'
 import { api } from '../api'
+import { chartInitialDimensions } from '../lib/chartDimensions'
 import type { AccountRow, AccountUsageDetail } from '../types'
 import { getErrorMessage } from '../utils/error'
 
@@ -77,7 +78,7 @@ export default function AccountUsageModal({ account, onClose }: Props) {
           <div className="shrink-0">
             <h4 className="text-sm font-semibold mb-2">{t('accounts.modelDistribution')}</h4>
             <div className="w-[200px] h-[200px]">
-              <ResponsiveContainer width="100%" height="100%">
+              <ResponsiveContainer width="100%" height="100%" initialDimension={chartInitialDimensions.modalPie}>
                 <PieChart>
                   <Pie
                     data={data.models}

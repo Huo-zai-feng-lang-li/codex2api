@@ -283,7 +283,45 @@ func (h *Handler) runtimeAccountsStatus() runtimeAccountsResponse {
 		resp.ActiveRequests += acc.GetActiveRequests()
 		resp.TotalRequests += acc.GetTotalRequests()
 	}
+	resp.ActiveRequestDetails = h.runtimeActiveRequestDetails(time.Now())
+	if detailsCount := int64(len(resp.ActiveRequestDetails)); detailsCount > resp.ActiveRequests {
+		resp.ActiveRequests = detailsCount
+	}
 	return resp
+}
+
+func (h *Handler) runtimeActiveRequestDetails(now time.Time) []runtimeActiveRequestResponse {
+	if h == nil || h.store == nil {
+		return nil
+	}
+	snapshots := h.store.ActiveRequestSnapshots(now)
+	if len(snapshots) == 0 {
+		return []runtimeActiveRequestResponse{}
+	}
+	out := make([]runtimeActiveRequestResponse, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		startedAt := ""
+		if !snapshot.StartedAt.IsZero() {
+			startedAt = snapshot.StartedAt.Format(time.RFC3339Nano)
+		}
+		out = append(out, runtimeActiveRequestResponse{
+			ID:               snapshot.ID,
+			AccountID:        snapshot.AccountID,
+			AccountName:      snapshot.AccountName,
+			AccountEmail:     snapshot.AccountEmail,
+			Endpoint:         snapshot.Endpoint,
+			UpstreamEndpoint: snapshot.UpstreamEndpoint,
+			Model:            snapshot.Model,
+			EffectiveModel:   snapshot.EffectiveModel,
+			APIKeyID:         snapshot.APIKeyID,
+			APIKeyName:       snapshot.APIKeyName,
+			APIKeyMasked:     snapshot.APIKeyMasked,
+			Stream:           snapshot.Stream,
+			StartedAt:        startedAt,
+			DurationMs:       snapshot.DurationMs,
+		})
+	}
+	return out
 }
 
 func (h *Handler) runtimeImageStorageStatus() runtimeImageStorageResponse {

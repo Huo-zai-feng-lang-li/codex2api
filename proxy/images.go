@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/codex2api/api"
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
@@ -603,7 +604,7 @@ func multipartFileToDataURL(fileHeader *multipart.FileHeader) (string, error) {
 }
 
 func (h *Handler) ImagesGenerations(c *gin.Context) {
-	rawBody, err := io.ReadAll(c.Request.Body)
+	rawBody, err := api.ReadRawBody(c)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: " + err.Error(), "type": "invalid_request_error"}})
 		return
@@ -775,7 +776,7 @@ func buildImagesEditToolFromForm(c *gin.Context, imageModel, maskDataURL string)
 }
 
 func (h *Handler) imagesEditsFromJSON(c *gin.Context) {
-	rawBody, err := io.ReadAll(c.Request.Body)
+	rawBody, err := api.ReadRawBody(c)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: " + err.Error(), "type": "invalid_request_error"}})
 		return
@@ -868,7 +869,7 @@ func (h *Handler) imagesEditsFromJSON(c *gin.Context) {
 }
 
 func buildImagesResponsesRequest(prompt string, images []string, toolJSON []byte) []byte {
-	req := []byte(`{"instructions":"","stream":true,"reasoning":{"effort":"medium","summary":"auto"},"parallel_tool_calls":true,"include":["reasoning.encrypted_content"],"model":"","store":false,"tool_choice":{"type":"image_generation"}}`)
+	req := []byte(`{"instructions":"","stream":true,"reasoning":{"effort":"medium","summary":"auto"},"parallel_tool_calls":true,"include":["reasoning.encrypted_content"],"model":"","store":false}`)
 	req, _ = sjson.SetBytes(req, "model", defaultImagesMainModel)
 
 	input := []byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`)
@@ -892,20 +893,33 @@ func buildImagesResponsesRequest(prompt string, images []string, toolJSON []byte
 	return req
 }
 
-func imagePreferredAccountFilter(account *auth.Account) bool {
+func imageResponsesAccountFilter(account *auth.Account) bool {
 	if account == nil {
+		return false
+	}
+	return account.IsOpenAIResponsesAPI() &&
+		account.SupportsOpenAIResponsesModel(defaultImagesMainModel)
+}
+
+func imagePreferredAccountFilter(account *auth.Account) bool {
+	if account == nil || account.IsOpenAIResponsesAPI() {
 		return false
 	}
 	return auth.IsPlusOrHigherPlan(account.GetPlanType())
 }
 
 func (h *Handler) nextImageAccount(apiKeyID int64, exclude map[int64]bool, model string) (*auth.Account, string) {
-	preferredFilter := h.withModelCooldownFilter(model, imagePreferredAccountFilter)
-	account, stickyProxyURL := h.nextAccountForSessionWithFilter("", apiKeyID, exclude, preferredFilter)
+	responsesFilter := h.withModelCooldownFilter(defaultImagesMainModel, imageResponsesAccountFilter)
+	account, stickyProxyURL := h.nextAccountForSessionWithFilter("", apiKeyID, exclude, responsesFilter)
 	if account != nil {
 		return account, stickyProxyURL
 	}
-	return h.nextAccountForSessionWithFilter("", apiKeyID, exclude, h.withModelCooldownFilter(model, nil))
+	preferredFilter := h.withModelCooldownFilter(model, imagePreferredAccountFilter)
+	account, stickyProxyURL = h.nextAccountForSessionWithFilter("", apiKeyID, exclude, preferredFilter)
+	if account != nil {
+		return account, stickyProxyURL
+	}
+	return h.nextAccountForSessionWithFilter("", apiKeyID, exclude, h.withModelCooldownFilter(model, accountFilterForModel(model)))
 }
 
 func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestModel string, responsesBody []byte, responseFormat, streamPrefix string, stream bool) {
@@ -922,8 +936,18 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 	var lastStatusCode int
 	var lastBody []byte
 	excludeAccounts := make(map[int64]bool)
+	var activeEnd func()
+	defer func() {
+		if activeEnd != nil {
+			activeEnd()
+		}
+	}()
 
 	for attempt := 0; attempt < maxImageAttempts; attempt++ {
+		if activeEnd != nil {
+			activeEnd()
+			activeEnd = nil
+		}
 		if err := c.Request.Context().Err(); err != nil {
 			return
 		}
@@ -948,7 +972,32 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 			deviceCfg = &DeviceProfileConfig{StabilizeDeviceProfile: false}
 		}
 
-		resp, reqErr := ExecuteRequest(c.Request.Context(), account, responsesBody, "", proxyURL, apiKey, deviceCfg, c.Request.Header.Clone(), h.shouldUseWebsocketForHTTP())
+		upstreamEndpoint := "/v1/responses"
+		var resp *http.Response
+		var reqErr error
+		if account.IsOpenAIResponsesAPI() {
+			baseURL, _ := account.OpenAIResponsesCredentials()
+			upstreamEndpoint = auth.OpenAIResponsesEndpoint(baseURL, "/v1/responses")
+			activeEnd = h.beginActiveProxyRequest(c, account, auth.ActiveRequestMeta{
+				Endpoint:         inboundEndpoint,
+				UpstreamEndpoint: upstreamEndpoint,
+				Model:            requestModel,
+				EffectiveModel:   requestModel,
+				Stream:           stream,
+				StartedAt:        start,
+			})
+			resp, reqErr = ExecuteOpenAIResponsesRequest(c.Request.Context(), account, responsesBody, proxyURL, c.Request.Header.Clone())
+		} else {
+			activeEnd = h.beginActiveProxyRequest(c, account, auth.ActiveRequestMeta{
+				Endpoint:         inboundEndpoint,
+				UpstreamEndpoint: upstreamEndpoint,
+				Model:            requestModel,
+				EffectiveModel:   requestModel,
+				Stream:           stream,
+				StartedAt:        start,
+			})
+			resp, reqErr = ExecuteRequest(c.Request.Context(), account, responsesBody, "", proxyURL, apiKey, deviceCfg, c.Request.Header.Clone(), h.shouldUseWebsocketForHTTP())
+		}
 		durationMs := int(time.Since(start).Milliseconds())
 		if reqErr != nil {
 			if kind := classifyTransportFailure(reqErr); kind != "" {
@@ -974,7 +1023,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 			if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
 				h.store.PersistUsageSnapshot(account, usagePct)
 			}
-			errBody, _ := io.ReadAll(resp.Body)
+			errBody, _ := readUpstreamErrorBody(resp)
 			resp.Body.Close()
 			h.store.Release(account)
 			excludeAccounts[account.ID()] = true
@@ -989,7 +1038,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 				StatusCode:        resp.StatusCode,
 				DurationMs:        durationMs,
 				InboundEndpoint:   inboundEndpoint,
-				UpstreamEndpoint:  "/v1/responses",
+				UpstreamEndpoint:  upstreamEndpoint,
 				Stream:            stream,
 				IsRetryAttempt:    shouldRetry,
 				AttemptIndex:      attempt + 1,
@@ -1036,9 +1085,9 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 				}
 				c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": readErr.Error(), "type": "upstream_error"}})
 				h.logUsageForRequest(c, &database.UsageLogInput{
-					AccountID: account.ID(),
-					Endpoint:  inboundEndpoint,
-					Model:     requestModel,
+					AccountID:  account.ID(),
+					Endpoint:   inboundEndpoint,
+					Model:      requestModel,
 					StatusCode: http.StatusBadGateway,
 				})
 				return
@@ -1066,9 +1115,9 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 				c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": readErr.Error(), "type": "upstream_error"}})
 			}
 			h.logUsageForRequest(c, &database.UsageLogInput{
-				AccountID: account.ID(),
-				Endpoint:  inboundEndpoint,
-				Model:     requestModel,
+				AccountID:  account.ID(),
+				Endpoint:   inboundEndpoint,
+				Model:      requestModel,
 				StatusCode: http.StatusBadGateway,
 			})
 			return
@@ -1081,7 +1130,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 			DurationMs:       int(time.Since(start).Milliseconds()),
 			FirstTokenMs:     firstTokenMs,
 			InboundEndpoint:  inboundEndpoint,
-			UpstreamEndpoint: "/v1/responses",
+			UpstreamEndpoint: upstreamEndpoint,
 			Stream:           stream,
 		}
 		if readErr != nil {
@@ -1105,7 +1154,9 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 		h.logUsageForRequest(c, logInput)
 
 		resp.Body.Close()
-		SyncCodexUsageState(h.store, account, resp)
+		if !account.IsOpenAIResponsesAPI() {
+			SyncCodexUsageState(h.store, account, resp)
+		}
 		if readErr != nil {
 			h.store.ReportRequestFailure(account, "transport", time.Duration(logInput.DurationMs)*time.Millisecond)
 		} else {

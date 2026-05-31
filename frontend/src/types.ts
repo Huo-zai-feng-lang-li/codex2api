@@ -110,12 +110,14 @@ export interface AddAccountRequest {
   refresh_token?: string
   session_token?: string
   proxy_url: string
+  tags?: string[]
 }
 
 export interface AddATAccountRequest {
   name?: string
   access_token: string
   proxy_url: string
+  tags?: string[]
 }
 
 export interface AddOpenAIResponsesAccountRequest {
@@ -124,12 +126,22 @@ export interface AddOpenAIResponsesAccountRequest {
   api_key: string
   models: string[]
   proxy_url: string
+  tags?: string[]
 }
 
 export interface UpdateOpenAIResponsesAccountRequest {
   name?: string
   base_url: string
   api_key?: string
+  models: string[]
+  proxy_url: string
+  tags?: string[]
+}
+
+export interface OpenAIResponsesAccountConfig {
+  name: string
+  base_url: string
+  api_key: string
   models: string[]
   proxy_url: string
 }
@@ -204,6 +216,10 @@ export interface AccountUsageDetail {
 
 export interface MessageResponse {
   message: string
+}
+
+export interface ShutdownResponse extends MessageResponse {
+  shutting: boolean
 }
 
 export interface CreateAccountResponse extends MessageResponse {
@@ -310,6 +326,23 @@ export interface RuntimeCheck {
   message: string
 }
 
+export interface RuntimeActiveRequest {
+  id: number
+  account_id: number
+  account_name: string
+  account_email: string
+  endpoint: string
+  upstream_endpoint: string
+  model: string
+  effective_model: string
+  api_key_id: number
+  api_key_name: string
+  api_key_masked: string
+  stream: boolean
+  started_at: ISODateString
+  duration_ms: number
+}
+
 export interface RuntimeStatusResponse {
   updated_at: ISODateString
   status: RuntimeHealthStatus
@@ -378,6 +411,7 @@ export interface RuntimeStatusResponse {
     active_requests: number
     total_requests: number
     status_counts: Record<string, number>
+    active_request_details: RuntimeActiveRequest[]
   }
   image_storage: {
     status: RuntimeHealthStatus
@@ -818,6 +852,7 @@ export interface UsageLog {
   image_bytes: number
   image_format: string
   image_size: string
+  account_name: string
   account_email: string
   created_at: ISODateString
   account_billed: number

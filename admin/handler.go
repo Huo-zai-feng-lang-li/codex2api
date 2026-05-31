@@ -57,6 +57,7 @@ type Handler struct {
 	cacheLabel             string
 	adminSecretEnv         string
 	imageProxy             *proxy.Handler
+	shutdownFunc           func(string) bool
 
 	// 图表聚合内存缓存（10秒 TTL）
 	chartCacheMu   sync.RWMutex
@@ -203,6 +204,19 @@ func (h *Handler) SetPoolSizes(pgMaxConns, redisPoolSize int) {
 	h.redisPoolSize = redisPoolSize
 }
 
+// SetShutdownFunc 注入服务关停触发器。main 包持有真正的 http.Server 生命周期。
+func (h *Handler) SetShutdownFunc(fn func(string) bool) {
+	h.shutdownFunc = fn
+}
+
+// RequestShutdown 请求服务优雅关闭。
+func (h *Handler) RequestShutdown(reason string) bool {
+	if h == nil || h.shutdownFunc == nil {
+		return false
+	}
+	return h.shutdownFunc(reason)
+}
+
 // RegisterRoutes 注册管理 API 路由
 func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	r.GET("/p/img/:id", h.GetSignedImageAssetFile)
@@ -223,6 +237,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/accounts/at", h.AddATAccount)
 	api.POST("/accounts/openai-responses", h.AddOpenAIResponsesAccount)
 	api.POST("/accounts/openai-responses/models", h.FetchOpenAIResponsesModels)
+	api.GET("/accounts/:id/openai-responses", h.GetOpenAIResponsesAccount)
 	api.PATCH("/accounts/:id/openai-responses", h.UpdateOpenAIResponsesAccount)
 	api.POST("/accounts/import", h.ImportAccounts)
 	api.POST("/accounts/sub2api/preview", h.PreviewSub2APIAccounts)
@@ -269,6 +284,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/ops/errors", h.GetOpsErrorLogs)
 	api.GET("/ops/errors/export", h.ExportOpsErrorLogs)
 	api.GET("/ops/errors/summary", h.GetOpsErrorSummary)
+	api.POST("/system/shutdown", h.ShutdownSystem)
 	api.GET("/reset-radar", h.GetResetRadar)
 	api.GET("/settings", h.GetSettings)
 	api.PUT("/settings", h.UpdateSettings)
@@ -524,9 +540,6 @@ type schedulerBreakdownResponse struct {
 func (h *Handler) ListAccounts(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
-
-	h.store.TriggerUsageProbeAsync()
-	h.store.TriggerRecoveryProbeAsync()
 
 	rows, err := h.db.ListActive(ctx)
 	if err != nil {
@@ -1176,10 +1189,11 @@ func (h *Handler) getAccountUsageWindows(ctx context.Context) (map[int64]*databa
 }
 
 type addAccountReq struct {
-	Name         string `json:"name"`
-	RefreshToken string `json:"refresh_token"`
-	SessionToken string `json:"session_token"`
-	ProxyURL     string `json:"proxy_url"`
+	Name         string          `json:"name"`
+	RefreshToken string          `json:"refresh_token"`
+	SessionToken string          `json:"session_token"`
+	ProxyURL     string          `json:"proxy_url"`
+	Tags         json.RawMessage `json:"tags"`
 }
 
 func splitAccountCredentialLines(raw string, sanitize bool) []string {
@@ -1229,6 +1243,11 @@ func (h *Handler) AddAccount(c *gin.Context) {
 	// 验证代理URL
 	if err := security.ValidateProxyURL(req.ProxyURL); err != nil {
 		writeError(c, http.StatusBadRequest, "代理URL无效")
+		return
+	}
+	tags, err := parseOptionalStringSliceField(req.Tags, "tags")
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -1291,11 +1310,19 @@ func (h *Handler) AddAccount(c *gin.Context) {
 			continue
 		}
 
-		successCount++
-		h.db.InsertAccountEventAsync(id, "added", "manual")
-
 		// 热加载：直接加入内存池
 		newAcc := accountFromCredentialSeed(id, req.ProxyURL, seed)
+		newAcc.Name = name
+		if tags.Set {
+			if _, err := h.applyAccountCreateMetadata(ctx, id, tags, ""); err != nil {
+				log.Printf("账号 %d 保存标签失败: %v", id, err)
+				failCount++
+				continue
+			}
+			newAcc.Tags = append([]string(nil), tags.Values...)
+		}
+		successCount++
+		h.db.InsertAccountEventAsync(id, "added", "manual")
 		h.store.AddAccount(newAcc)
 
 		if !h.store.GetLazyMode() {
@@ -1306,6 +1333,13 @@ func (h *Handler) AddAccount(c *gin.Context) {
 				if err := h.store.RefreshSingle(refreshCtx, accountID); err != nil {
 					log.Printf("新账号 %d 刷新失败: %v", accountID, err)
 				} else {
+					if acc := h.store.FindByID(accountID); acc != nil {
+						groupCtx, groupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+						if _, err := h.applyAccountCreateMetadata(groupCtx, accountID, optionalStringSlice{}, autoAccountGroupForPlan(acc.GetPlanType())); err != nil {
+							log.Printf("新账号 %d 自动分组失败: %v", accountID, err)
+						}
+						groupCancel()
+					}
 					log.Printf("新账号 %d 刷新成功，已加入号池", accountID)
 				}
 			}(id)
@@ -1329,9 +1363,10 @@ func (h *Handler) AddAccount(c *gin.Context) {
 
 // addATAccountReq AT 模式添加账号请求
 type addATAccountReq struct {
-	Name        string `json:"name"`
-	AccessToken string `json:"access_token"`
-	ProxyURL    string `json:"proxy_url"`
+	Name        string          `json:"name"`
+	AccessToken string          `json:"access_token"`
+	ProxyURL    string          `json:"proxy_url"`
+	Tags        json.RawMessage `json:"tags"`
 }
 
 // AddATAccount 添加 AT-only 账号（支持批量：access_token 按行分割）
@@ -1362,6 +1397,11 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 
 	if err := security.ValidateProxyURL(req.ProxyURL); err != nil {
 		writeError(c, http.StatusBadRequest, "代理URL无效")
+		return
+	}
+	tags, err := parseOptionalStringSliceField(req.Tags, "tags")
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -1406,15 +1446,13 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 			continue
 		}
 
-		successCount++
-		h.db.InsertAccountEventAsync(id, "added", "manual_at")
-
 		// 解析 AT JWT 提取账号信息（email、plan_type、account_id、过期时间）
 		atInfo := auth.ParseAccessToken(at)
 
 		// 热加载到内存池（AT-only，无 RT）
 		newAcc := &auth.Account{
 			DBID:        id,
+			Name:        name,
 			AccessToken: at,
 			ExpiresAt:   time.Now().Add(1 * time.Hour),
 			ProxyURL:    req.ProxyURL,
@@ -1430,8 +1468,6 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 				newAcc.SubscriptionExpiresAt = atInfo.SubscriptionExpiresAt
 			}
 		}
-		h.store.AddAccount(newAcc)
-
 		// 将解析到的信息持久化到数据库
 		if atInfo != nil {
 			creds := map[string]interface{}{
@@ -1447,6 +1483,19 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 				log.Printf("AT 账号 %d 更新 credentials 失败: %v", id, err)
 			}
 		}
+		groupIDs, err := h.applyAccountCreateMetadata(ctx, id, tags, autoAccountGroupForPlan(newAcc.PlanType))
+		if err != nil {
+			log.Printf("AT 账号 %d 保存标签/分组失败: %v", id, err)
+			failCount++
+			continue
+		}
+		if tags.Set {
+			newAcc.Tags = append([]string(nil), tags.Values...)
+		}
+		newAcc.GroupIDs = append([]int64(nil), groupIDs...)
+		successCount++
+		h.db.InsertAccountEventAsync(id, "added", "manual_at")
+		h.store.AddAccount(newAcc)
 		log.Printf("AT 账号 %d 已加入号池 (id=%d, email=%s)", i+1, id, newAcc.Email)
 	}
 
@@ -1465,6 +1514,15 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 }
 
 type addOpenAIResponsesAccountReq struct {
+	Name     string          `json:"name"`
+	BaseURL  string          `json:"base_url"`
+	APIKey   string          `json:"api_key"`
+	Models   []string        `json:"models"`
+	ProxyURL string          `json:"proxy_url"`
+	Tags     json.RawMessage `json:"tags"`
+}
+
+type openAIResponsesAccountResponse struct {
 	Name     string   `json:"name"`
 	BaseURL  string   `json:"base_url"`
 	APIKey   string   `json:"api_key"`
@@ -1516,6 +1574,11 @@ func (h *Handler) AddOpenAIResponsesAccount(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "代理URL无效")
 		return
 	}
+	tags, err := parseOptionalStringSliceField(req.Tags, "tags")
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	for _, model := range models {
 		if err := security.ValidateModelName(model); err != nil {
 			writeError(c, http.StatusBadRequest, fmt.Sprintf("模型名称无效: %s", model))
@@ -1555,8 +1618,15 @@ func (h *Handler) AddOpenAIResponsesAccount(c *gin.Context) {
 	}
 	h.db.InsertAccountEventAsync(id, "added", "manual_openai_responses")
 
-	h.store.AddAccount(&auth.Account{
+	groupIDs, err := h.applyAccountCreateMetadata(ctx, id, tags, autoAccountGroupAPI)
+	if err != nil {
+		writeInternalError(c, err)
+		return
+	}
+
+	newAcc := &auth.Account{
 		DBID:         id,
+		Name:         name,
 		ProxyURL:     req.ProxyURL,
 		HealthTier:   auth.HealthTierHealthy,
 		UpstreamType: auth.UpstreamOpenAIResponses,
@@ -1565,12 +1635,45 @@ func (h *Handler) AddOpenAIResponsesAccount(c *gin.Context) {
 		Models:       models,
 		Email:        baseURL,
 		PlanType:     "api",
-	})
+		Tags:         append([]string(nil), tags.Values...),
+		GroupIDs:     append([]int64(nil), groupIDs...),
+	}
+	h.store.AddAccount(newAcc)
 
 	security.SecurityAuditLog("OPENAI_RESPONSES_ACCOUNT_ADDED", fmt.Sprintf("account_id=%d models=%d ip=%s", id, len(models), c.ClientIP()))
 	c.JSON(http.StatusOK, gin.H{
 		"message": "成功添加 OpenAI Responses API 账号",
 		"id":      id,
+	})
+}
+
+func (h *Handler) GetOpenAIResponsesAccount(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "无效的账号 ID")
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+	row, err := h.db.GetAccountByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(c, http.StatusNotFound, "账号不存在")
+			return
+		}
+		writeInternalError(c, err)
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), auth.UpstreamOpenAIResponses) {
+		writeError(c, http.StatusBadRequest, "仅 OpenAI Responses API 账号支持账号设置")
+		return
+	}
+	c.JSON(http.StatusOK, openAIResponsesAccountResponse{
+		Name:     row.Name,
+		BaseURL:  row.GetCredential("base_url"),
+		APIKey:   row.GetCredential("api_key"),
+		Models:   auth.NormalizeOpenAIResponsesModels(row.GetCredentialStringSlice("models")),
+		ProxyURL: row.ProxyURL,
 	})
 }
 
@@ -1686,6 +1789,11 @@ func (h *Handler) UpdateOpenAIResponsesAccount(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "代理URL无效")
 		return
 	}
+	tags, err := parseOptionalStringSliceField(req.Tags, "tags")
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	for _, model := range models {
 		if err := security.ValidateModelName(model); err != nil {
 			writeError(c, http.StatusBadRequest, fmt.Sprintf("模型名称无效: %s", model))
@@ -1724,8 +1832,18 @@ func (h *Handler) UpdateOpenAIResponsesAccount(c *gin.Context) {
 		writeInternalError(c, err)
 		return
 	}
+	if tags.Set {
+		if err := h.db.UpdateAccountTags(ctx, id, tags.Values); err != nil {
+			writeInternalError(c, err)
+			return
+		}
+	}
 	if h.store != nil {
+		h.store.ApplyAccountName(id, name)
 		h.store.ApplyOpenAIResponsesConfig(id, baseURL, req.APIKey, models, req.ProxyURL)
+		if tags.Set {
+			h.store.ApplyAccountTags(id, tags.Values)
+		}
 	}
 	h.db.InsertAccountEventAsync(id, "updated", "manual_openai_responses")
 
@@ -2808,7 +2926,19 @@ func (h *Handler) refreshAccountByID(ctx context.Context, id int64) error {
 	if refreshFn == nil {
 		refreshFn = h.refreshSingleAccount
 	}
-	return refreshFn(refreshCtx, id)
+	if err := refreshFn(refreshCtx, id); err != nil {
+		return err
+	}
+	if h.store != nil {
+		if acc := h.store.FindByID(id); acc != nil {
+			groupCtx, groupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer groupCancel()
+			if _, err := h.applyAccountCreateMetadata(groupCtx, id, optionalStringSlice{}, autoAccountGroupForPlan(acc.GetPlanType())); err != nil {
+				return fmt.Errorf("刷新成功但自动分组失败: %w", err)
+			}
+		}
+	}
+	return nil
 }
 
 func (h *Handler) streamBatchRefreshAccounts(c *gin.Context, ids []int64) {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { useCallback, useState, type ReactNode } from 'react'
 import { Activity, Bell, Clock3, Copy, ExternalLink, FileJson, ListChecks, RefreshCw, Rss } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { api } from '../api'
@@ -6,6 +6,7 @@ import resetRadarSaintImage from '../assets/reset.jpeg'
 import PageHeader from '../components/PageHeader'
 import StateShell from '../components/StateShell'
 import { useDataLoader } from '../hooks/useDataLoader'
+import { useVisiblePolling } from '../hooks/useVisiblePolling'
 import type { ResetRadarResponse } from '../types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -22,14 +23,7 @@ export default function Subscriptions() {
     load: loadResetRadar,
   })
 
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      if (document.visibilityState !== 'visible') return
-      void reloadSilently()
-    }, REFRESH_INTERVAL_MS)
-
-    return () => window.clearInterval(timer)
-  }, [reloadSilently])
+  useVisiblePolling(() => reloadSilently(), REFRESH_INTERVAL_MS)
 
   const locale = i18n.language === 'zh' ? 'zh-CN' : 'en-US'
   const lastUpdated = data?.monitored_at || data?.checked_at || data?.fetched_at

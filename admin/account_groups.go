@@ -17,6 +17,8 @@ import (
 const (
 	maxAccountGroups            = 64
 	maxAccountGroupNameRuneSize = 80
+	autoAccountGroupFree        = "FREE"
+	autoAccountGroupAPI         = "API"
 )
 
 type accountGroupResponse struct {
@@ -276,4 +278,113 @@ func dedupeInt64(ids []int64) []int64 {
 		out = append(out, id)
 	}
 	return out
+}
+
+func (h *Handler) applyAccountCreateMetadata(ctx context.Context, accountID int64, tags optionalStringSlice, autoGroupName string) ([]int64, error) {
+	if h == nil || h.db == nil || accountID <= 0 {
+		return nil, nil
+	}
+	if tags.Set {
+		if err := h.db.UpdateAccountTags(ctx, accountID, tags.Values); err != nil {
+			return nil, err
+		}
+		if h.store != nil {
+			h.store.ApplyAccountTags(accountID, tags.Values)
+		}
+	}
+	if strings.TrimSpace(autoGroupName) == "" {
+		return h.db.GetAccountGroupIDs(ctx, accountID)
+	}
+	groupID, err := h.ensureAccountGroup(ctx, autoGroupName)
+	if err != nil {
+		return nil, err
+	}
+	groupIDs, err := h.db.GetAccountGroupIDs(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	if !containsInt64(groupIDs, groupID) {
+		groupIDs = append(groupIDs, groupID)
+		groupIDs = dedupeInt64(groupIDs)
+		if err := h.db.SetAccountGroups(ctx, accountID, groupIDs); err != nil {
+			return nil, err
+		}
+	}
+	if h.store != nil {
+		h.store.ApplyAccountGroups(accountID, groupIDs)
+	}
+	return groupIDs, nil
+}
+
+func (h *Handler) ensureAccountGroup(ctx context.Context, name string) (int64, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return 0, nil
+	}
+	groups, err := h.db.ListAccountGroups(ctx)
+	if err != nil {
+		return 0, err
+	}
+	for _, group := range groups {
+		if group.Name == name {
+			return group.ID, nil
+		}
+	}
+	id, err := h.db.CreateAccountGroup(ctx, name, autoAccountGroupDescription(name), autoAccountGroupColor(name), autoAccountGroupSortOrder(name))
+	if err == nil {
+		return id, nil
+	}
+	if !errors.Is(err, database.ErrDuplicateAccountGroupName) {
+		return 0, err
+	}
+	groups, err = h.db.ListAccountGroups(ctx)
+	if err != nil {
+		return 0, err
+	}
+	for _, group := range groups {
+		if group.Name == name {
+			return group.ID, nil
+		}
+	}
+	return 0, err
+}
+
+func autoAccountGroupForPlan(planType string) string {
+	if strings.EqualFold(strings.TrimSpace(planType), "free") {
+		return autoAccountGroupFree
+	}
+	return ""
+}
+
+func autoAccountGroupDescription(name string) string {
+	switch name {
+	case autoAccountGroupFree:
+		return "自动归类的 Free 账号"
+	case autoAccountGroupAPI:
+		return "自动归类的 API Key 账号"
+	default:
+		return ""
+	}
+}
+
+func autoAccountGroupColor(name string) string {
+	switch name {
+	case autoAccountGroupFree:
+		return "#16a34a"
+	case autoAccountGroupAPI:
+		return "#2563eb"
+	default:
+		return "#64748b"
+	}
+}
+
+func autoAccountGroupSortOrder(name string) int64 {
+	switch name {
+	case autoAccountGroupAPI:
+		return 10
+	case autoAccountGroupFree:
+		return 20
+	default:
+		return 100
+	}
 }

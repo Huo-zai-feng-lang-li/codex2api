@@ -19,6 +19,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import StateShell from './StateShell'
 import type { ChartAggregation } from '../types'
 import { TIME_RANGE_OPTIONS, getBucketConfig, type TimeRangeKey } from '../lib/timeRange'
+import { chartInitialDimensions } from '../lib/chartDimensions'
 
 interface DashboardUsageChartsProps {
   chartData: ChartAggregation | null
@@ -86,7 +87,7 @@ export default function DashboardUsageCharts({
     const totalRequests = serverData.timeline.reduce((sum, p) => sum + p.requests, 0)
 
     const timelineData: TimelinePoint[] = serverData.timeline.map((point) => {
-      const d = new Date(point.bucket)
+      const d = parseChartBucket(point.bucket)
       return {
         label: useFullDate ? formatDateLabel(d, bucketMinutes) : formatMinuteLabel(d),
         fullLabel: formatFullLabel(d, bucketMinutes),
@@ -195,7 +196,7 @@ export default function DashboardUsageCharts({
       ) : (
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
           <ChartCard title={t('dashboard.requestTrend')} description={t('dashboard.requestTrendDesc')}>
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer width="100%" height="100%" initialDimension={chartInitialDimensions.dashboard}>
               <ComposedChart data={displayData.timelineData} margin={chartMargin}>
                 <defs>
                   <linearGradient id="dashboard-request-gradient" x1="0" y1="0" x2="0" y2="1">
@@ -247,7 +248,7 @@ export default function DashboardUsageCharts({
           </ChartCard>
 
           <ChartCard title={t('dashboard.latencyTrend')} description={t('dashboard.latencyTrendDesc')}>
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer width="100%" height="100%" initialDimension={chartInitialDimensions.dashboard}>
               <LineChart data={displayData.timelineData} margin={chartMargin}>
                 <CartesianGrid vertical={false} stroke={gridColor} strokeDasharray="4 4" />
                 <XAxis dataKey="label" tick={{ fill: axisColor, fontSize: 12 }} axisLine={{ stroke: gridColor }} tickLine={{ stroke: gridColor }} minTickGap={20} tickMargin={8} />
@@ -275,7 +276,7 @@ export default function DashboardUsageCharts({
           </ChartCard>
 
           <ChartCard title={t('dashboard.tokenBreakdown')} description={t('dashboard.tokenBreakdownDesc')}>
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer width="100%" height="100%" initialDimension={chartInitialDimensions.dashboard}>
               <BarChart data={displayData.timelineData} margin={chartMargin}>
                 <CartesianGrid vertical={false} stroke={gridColor} strokeDasharray="4 4" />
                 <XAxis dataKey="label" tick={{ fill: axisColor, fontSize: 12 }} axisLine={{ stroke: gridColor }} tickLine={{ stroke: gridColor }} minTickGap={20} tickMargin={8} />
@@ -300,7 +301,7 @@ export default function DashboardUsageCharts({
           </ChartCard>
 
           <ChartCard title={t('dashboard.modelRanking')} description={t('dashboard.modelRankingDesc')}>
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer width="100%" height="100%" initialDimension={chartInitialDimensions.dashboard}>
               <BarChart data={displayData.modelData} layout="vertical" margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
                 <CartesianGrid horizontal={false} stroke={gridColor} strokeDasharray="4 4" />
                 <XAxis type="number" tickFormatter={formatCompactNumber} tick={{ fill: axisColor, fontSize: 12 }} axisLine={{ stroke: gridColor }} tickLine={{ stroke: gridColor }} allowDecimals={false} />
@@ -341,6 +342,15 @@ function formatMinuteLabel(date: Date): string {
   const hours = String(date.getHours()).padStart(2, '0')
   const minutes = String(date.getMinutes()).padStart(2, '0')
   return `${hours}:${minutes}`
+}
+
+function parseChartBucket(bucket: string): Date {
+  const trimmed = bucket.trim()
+  if (!trimmed) return new Date(NaN)
+  if (/[zZ]|[+-]\d{2}:?\d{2}$/.test(trimmed)) {
+    return new Date(trimmed)
+  }
+  return new Date(`${trimmed}Z`)
 }
 
 function formatDateLabel(date: Date, bucketMinutes: number): string {

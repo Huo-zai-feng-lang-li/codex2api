@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 import { ADMIN_AUTH_REQUIRED_EVENT, api, getAdminKey, setAdminKey } from '../api'
 import { DEFAULT_SITE_LOGO, useBranding } from '../branding'
+import { useVisiblePolling } from '../hooks/useVisiblePolling'
 import type { SetupHintsResponse, SystemSettings } from '../types'
 
 type AuthStatus =
@@ -371,11 +372,9 @@ export default function AuthGate({ children }: PropsWithChildren) {
     void checkAuth()
   }, [checkAuth])
 
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      void checkAuth()
-    }, 30000)
+  useVisiblePolling(checkAuth, 30000)
 
+  useEffect(() => {
     const handleAuthRequired = () => {
       setError('')
       setInputKey('')
@@ -391,7 +390,6 @@ export default function AuthGate({ children }: PropsWithChildren) {
     window.addEventListener(ADMIN_AUTH_REQUIRED_EVENT, handleAuthRequired)
     window.addEventListener('storage', handleStorage)
     return () => {
-      window.clearInterval(timer)
       window.removeEventListener(ADMIN_AUTH_REQUIRED_EVENT, handleAuthRequired)
       window.removeEventListener('storage', handleStorage)
     }

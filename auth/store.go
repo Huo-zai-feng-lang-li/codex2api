@@ -47,6 +47,7 @@ const UpstreamOpenAIResponses = "openai_responses"
 type Account struct {
 	mu             sync.RWMutex
 	DBID           int64 // 数据库 ID
+	Name           string
 	RefreshToken   string
 	SessionToken   string
 	AccessToken    string
@@ -213,6 +214,16 @@ func (a *Account) hasDispatchCredentialLocked() bool {
 		return true
 	}
 	return strings.TrimSpace(a.AccessToken) != ""
+}
+
+func (a *Account) hasRecoveryProbeCredentialLocked() bool {
+	if a == nil {
+		return false
+	}
+	if a.isOpenAIResponsesAPILocked() {
+		return true
+	}
+	return strings.TrimSpace(a.RefreshToken) != ""
 }
 
 func (a *Account) IsOpenAIResponsesAPI() bool {
@@ -1444,10 +1455,11 @@ func (a *Account) NeedsRecoveryProbe(minInterval time.Duration) bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
-	if a.recoveryProbeInFlight || a.healthTierLocked() != HealthTierBanned {
+	recoverableState := a.healthTierLocked() == HealthTierBanned || a.Status == StatusError
+	if a.recoveryProbeInFlight || !recoverableState {
 		return false
 	}
-	if a.RefreshToken == "" {
+	if !a.hasRecoveryProbeCredentialLocked() {
 		return false
 	}
 	if a.Status == StatusCooldown && time.Now().Before(a.CooldownUtil) {
@@ -1552,6 +1564,43 @@ type Store struct {
 	promptFilterConfig   atomic.Value // promptfilter.Config
 	sessionMu            sync.RWMutex
 	sessionBindings      map[string]sessionAffinity
+	activeRequestSeq     int64
+	activeRequestsMu     sync.RWMutex
+	activeRequests       map[int64]ActiveRequestMeta
+}
+
+// ActiveRequestMeta 是单次上游请求的运行态元数据，只保留可展示的脱敏信息。
+type ActiveRequestMeta struct {
+	AccountID        int64
+	AccountName      string
+	AccountEmail     string
+	Endpoint         string
+	UpstreamEndpoint string
+	Model            string
+	EffectiveModel   string
+	APIKeyID         int64
+	APIKeyName       string
+	APIKeyMasked     string
+	Stream           bool
+	StartedAt        time.Time
+}
+
+// ActiveRequestSnapshot 是管理端可读的活跃请求快照。
+type ActiveRequestSnapshot struct {
+	ID               int64
+	AccountID        int64
+	AccountName      string
+	AccountEmail     string
+	Endpoint         string
+	UpstreamEndpoint string
+	Model            string
+	EffectiveModel   string
+	APIKeyID         int64
+	APIKeyName       string
+	APIKeyMasked     string
+	Stream           bool
+	StartedAt        time.Time
+	DurationMs       int64
 }
 
 // sessionAffinity 记录某个 sessionKey 当前粘附到哪个账号/代理。
@@ -1623,6 +1672,87 @@ func accountCooldownRuntimeKey(accountID int64) string {
 
 func modelCooldownRuntimeKey(accountID int64, model string) string {
 	return fmt.Sprintf("%d:%s", accountID, normalizeModelCooldownKey(model))
+}
+
+// BeginActiveRequest 登记一个正在访问上游的请求，返回用于清理的运行态 ID。
+func (s *Store) BeginActiveRequest(meta ActiveRequestMeta) int64 {
+	if s == nil {
+		return 0
+	}
+	if meta.StartedAt.IsZero() {
+		meta.StartedAt = time.Now()
+	}
+	meta.AccountEmail = strings.TrimSpace(meta.AccountEmail)
+	meta.AccountName = strings.TrimSpace(meta.AccountName)
+	meta.Endpoint = strings.TrimSpace(meta.Endpoint)
+	meta.UpstreamEndpoint = strings.TrimSpace(meta.UpstreamEndpoint)
+	meta.Model = strings.TrimSpace(meta.Model)
+	meta.EffectiveModel = strings.TrimSpace(meta.EffectiveModel)
+	meta.APIKeyName = strings.TrimSpace(meta.APIKeyName)
+	meta.APIKeyMasked = strings.TrimSpace(meta.APIKeyMasked)
+
+	id := atomic.AddInt64(&s.activeRequestSeq, 1)
+	s.activeRequestsMu.Lock()
+	if s.activeRequests == nil {
+		s.activeRequests = make(map[int64]ActiveRequestMeta)
+	}
+	s.activeRequests[id] = meta
+	s.activeRequestsMu.Unlock()
+	return id
+}
+
+// EndActiveRequest 清理 BeginActiveRequest 返回的运行态 ID。
+func (s *Store) EndActiveRequest(id int64) {
+	if s == nil || id == 0 {
+		return
+	}
+	s.activeRequestsMu.Lock()
+	delete(s.activeRequests, id)
+	s.activeRequestsMu.Unlock()
+}
+
+// ActiveRequestSnapshots 返回按开始时间排序的活跃请求快照。
+func (s *Store) ActiveRequestSnapshots(now time.Time) []ActiveRequestSnapshot {
+	if s == nil {
+		return nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	s.activeRequestsMu.RLock()
+	snapshots := make([]ActiveRequestSnapshot, 0, len(s.activeRequests))
+	for id, meta := range s.activeRequests {
+		durationMs := now.Sub(meta.StartedAt).Milliseconds()
+		if durationMs < 0 {
+			durationMs = 0
+		}
+		snapshots = append(snapshots, ActiveRequestSnapshot{
+			ID:               id,
+			AccountID:        meta.AccountID,
+			AccountName:      meta.AccountName,
+			AccountEmail:     meta.AccountEmail,
+			Endpoint:         meta.Endpoint,
+			UpstreamEndpoint: meta.UpstreamEndpoint,
+			Model:            meta.Model,
+			EffectiveModel:   meta.EffectiveModel,
+			APIKeyID:         meta.APIKeyID,
+			APIKeyName:       meta.APIKeyName,
+			APIKeyMasked:     meta.APIKeyMasked,
+			Stream:           meta.Stream,
+			StartedAt:        meta.StartedAt,
+			DurationMs:       durationMs,
+		})
+	}
+	s.activeRequestsMu.RUnlock()
+
+	sort.Slice(snapshots, func(i, j int) bool {
+		if snapshots[i].StartedAt.Equal(snapshots[j].StartedAt) {
+			return snapshots[i].ID < snapshots[j].ID
+		}
+		return snapshots[i].StartedAt.Before(snapshots[j].StartedAt)
+	})
+	return snapshots
 }
 
 func normalizeCooldownReason(reason string) string {
@@ -1937,6 +2067,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 		stopCh:                  make(chan struct{}),
 		proxyPoolEnabled:        settings.ProxyPoolEnabled,
 		sessionBindings:         make(map[string]sessionAffinity),
+		activeRequests:          make(map[int64]ActiveRequestMeta),
 	}
 	s.testModel.Store(settings.TestModel)
 	s.SetBackgroundRefreshInterval(time.Duration(settings.BackgroundRefreshIntervalMinutes) * time.Minute)
@@ -2398,6 +2529,7 @@ func (s *Store) loadFromDB(ctx context.Context) error {
 
 		account := &Account{
 			DBID:         row.ID,
+			Name:         strings.TrimSpace(row.Name),
 			RefreshToken: rt,
 			SessionToken: st,
 			ProxyURL:     strings.TrimSpace(row.ProxyURL),
@@ -3238,12 +3370,59 @@ func (s *Store) hasDispatchCandidateWithFilter(apiKeyID int64, exclude map[int64
 	return false
 }
 
+func (s *Store) recoveryProbeFuncConfigured() bool {
+	if s == nil {
+		return false
+	}
+	s.usageProbeMu.RLock()
+	defer s.usageProbeMu.RUnlock()
+	return s.usageProbe != nil
+}
+
+func (s *Store) hasRecoveryProbeCandidateWithFilter(apiKeyID int64, exclude map[int64]bool, filter AccountFilter) bool {
+	if s == nil || !s.recoveryProbeFuncConfigured() {
+		return false
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, acc := range s.accounts {
+		if acc == nil {
+			continue
+		}
+		if exclude != nil && exclude[acc.DBID] {
+			continue
+		}
+		if !s.accountAllowedForAPIKey(acc, apiKeyID) {
+			continue
+		}
+		if filter != nil && !filter(acc) {
+			continue
+		}
+		if acc.NeedsRecoveryProbe(s.GetRecoveryProbeInterval()) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Store) ensureRecoveryProbeForWait(apiKeyID int64, exclude map[int64]bool, filter AccountFilter) bool {
+	if s == nil {
+		return false
+	}
+	if s.hasRecoveryProbeCandidateWithFilter(apiKeyID, exclude, filter) {
+		return s.triggerRecoveryProbeAsync()
+	}
+	return s.RecoveryProbeRunning()
+}
+
 // WaitForSessionAvailableWithFilter waits for an account that satisfies the request-level filter.
 func (s *Store) WaitForSessionAvailableWithFilter(ctx context.Context, key string, timeout time.Duration, apiKeyID int64, exclude map[int64]bool, filter AccountFilter) (*Account, string) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if !s.hasDispatchCandidateWithFilter(apiKeyID, exclude, filter) {
+	if !s.hasDispatchCandidateWithFilter(apiKeyID, exclude, filter) && !s.ensureRecoveryProbeForWait(apiKeyID, exclude, filter) {
 		return nil, ""
 	}
 
@@ -3271,7 +3450,7 @@ func (s *Store) WaitForSessionAvailableWithFilter(ctx context.Context, key strin
 			if acc != nil {
 				return acc, proxyURL
 			}
-			if !s.hasDispatchCandidateWithFilter(apiKeyID, exclude, filter) {
+			if !s.hasDispatchCandidateWithFilter(apiKeyID, exclude, filter) && !s.ensureRecoveryProbeForWait(apiKeyID, exclude, filter) {
 				return nil, ""
 			}
 			// 等待一下再重试（指数退避，最大 500ms）
@@ -3742,6 +3921,17 @@ func (s *Store) ApplyOpenAIResponsesConfig(dbID int64, baseURL, apiKey string, m
 	acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
 	acc.mu.Unlock()
 	s.fastSchedulerUpdate(acc)
+	return true
+}
+
+func (s *Store) ApplyAccountName(dbID int64, name string) bool {
+	acc := s.FindByID(dbID)
+	if acc == nil {
+		return false
+	}
+	acc.mu.Lock()
+	acc.Name = strings.TrimSpace(name)
+	acc.mu.Unlock()
 	return true
 }
 
@@ -4261,17 +4451,25 @@ func (s *Store) TriggerUsageProbeAsync() {
 
 // TriggerRecoveryProbeAsync 异步触发一次封禁账号恢复探测
 func (s *Store) TriggerRecoveryProbeAsync() {
+	_ = s.triggerRecoveryProbeAsync()
+}
+
+func (s *Store) triggerRecoveryProbeAsync() bool {
+	if s == nil || !s.recoveryProbeFuncConfigured() {
+		return false
+	}
 	if s.GetLazyMode() {
-		return
+		return false
 	}
 	if !s.recoveryProbeBatch.CompareAndSwap(false, true) {
-		return
+		return true
 	}
 
 	go func() {
 		defer s.recoveryProbeBatch.Store(false)
 		s.parallelRecoveryProbe(context.Background())
 	}()
+	return true
 }
 
 // TriggerAutoCleanupAsync 异步触发一次自动清理巡检
@@ -4571,7 +4769,7 @@ func (s *Store) parallelRecoveryProbe(ctx context.Context) {
 			probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
 
-			if account.NeedsRefresh() {
+			if !account.IsOpenAIResponsesAPI() && account.NeedsRefresh() {
 				if err := s.refreshAccount(probeCtx, account); err != nil {
 					log.Printf("[账号 %d] 恢复探测前刷新失败: %v", account.DBID, err)
 				}
@@ -4589,26 +4787,34 @@ func (s *Store) parallelRecoveryProbe(ctx context.Context) {
 				} else {
 					// 探测成功：将账号从 banned 升级到 warm，给予重新调度的机会
 					atomic.StoreInt32(&account.Disabled, 0) // 清除原子禁用标志
+					now := time.Now()
 					account.mu.Lock()
-					if account.HealthTier == HealthTierBanned {
+					wasBanned := account.HealthTier == HealthTierBanned
+					wasCooling := account.Status == StatusCooldown
+					wasError := account.Status == StatusError
+					if wasBanned || wasCooling || wasError {
 						account.HealthTier = HealthTierWarm
 						account.SchedulerScore = 80
-						account.FailureStreak = 0
-						account.SuccessStreak = 1
-						account.LastSuccessAt = time.Now()
-						if account.Status == StatusCooldown {
-							account.Status = StatusReady
-							account.CooldownUtil = time.Time{}
-							account.CooldownReason = ""
-						}
-						account.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
+					}
+					if wasCooling || wasError {
+						account.Status = StatusReady
+						account.CooldownUtil = time.Time{}
+						account.CooldownReason = ""
+					}
+					account.ErrorMsg = ""
+					account.FailureStreak = 0
+					account.SuccessStreak = 1
+					account.LastSuccessAt = now
+					account.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
+					account.mu.Unlock()
+					s.fastSchedulerUpdate(account)
+					if wasBanned {
 						log.Printf("[账号 %d] 恢复探测成功！已从 banned 升级到 warm", account.DBID)
 					}
-					account.mu.Unlock()
 					// 清理数据库冷却状态
 					s.deleteCachedAccountCooldown(account.DBID)
 					if s.db != nil {
-						_ = s.db.ClearCooldown(context.Background(), account.DBID)
+						_ = s.db.ClearError(context.Background(), account.DBID)
 					}
 				}
 			}

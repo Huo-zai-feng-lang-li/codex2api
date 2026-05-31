@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/codex2api/database"
@@ -36,9 +37,27 @@ import (
 const defaultImageAssetDir = "/data/images"
 const maxInlineImageAssetCacheBytes = 64 * 1024 * 1024
 const defaultSignedImageThumbKB = 32
+const maxConcurrentImageStudioJobs = 2
 
 // thumbCache 跨请求复用缩略图。S3 后端读源图代价高，这里用 LRU 兜一下。
-var thumbCache = imagestore.NewThumbnailCache(0)
+var (
+	thumbCache          = imagestore.NewThumbnailCache(0)
+	imageStudioJobSlots = make(chan struct{}, maxConcurrentImageStudioJobs)
+)
+
+func tryAcquireImageStudioJobSlot() (func(), bool) {
+	select {
+	case imageStudioJobSlots <- struct{}{}:
+		var once sync.Once
+		return func() {
+			once.Do(func() {
+				<-imageStudioJobSlots
+			})
+		}, true
+	default:
+		return nil, false
+	}
+}
 
 type imagePromptTemplatePayload struct {
 	Name         *string  `json:"name"`
@@ -54,15 +73,15 @@ type imagePromptTemplatePayload struct {
 }
 
 type imageGenerationJobPayload struct {
-	Prompt       string `json:"prompt"`
-	Model        string `json:"model"`
-	Size         string `json:"size"`
-	Quality      string `json:"quality"`
-	OutputFormat string `json:"output_format"`
-	Background   string `json:"background"`
-	Style        string `json:"style"`
-	Upscale      string `json:"upscale"`
-	APIKeyID     int64  `json:"api_key_id"`
+	Prompt       string   `json:"prompt"`
+	Model        string   `json:"model"`
+	Size         string   `json:"size"`
+	Quality      string   `json:"quality"`
+	OutputFormat string   `json:"output_format"`
+	Background   string   `json:"background"`
+	Style        string   `json:"style"`
+	Upscale      string   `json:"upscale"`
+	APIKeyID     int64    `json:"api_key_id"`
 	TemplateID   int64    `json:"template_id"`
 	InputImages  []string `json:"input_images"`
 }
@@ -287,6 +306,11 @@ func (h *Handler) CreateImageGenerationJob(c *gin.Context) {
 	if h.inspectImageStudioPromptFilter(c, proxy.AppendImageStyleToPrompt(req.Prompt, req.Style), req.Model, keyID, keyName, keyMasked) {
 		return
 	}
+	releaseSlot, ok := tryAcquireImageStudioJobSlot()
+	if !ok {
+		writeError(c, http.StatusServiceUnavailable, "生图任务繁忙，请稍后再试")
+		return
+	}
 	jobID, err := h.db.InsertImageGenerationJob(ctx, database.ImageGenerationJobInput{
 		Prompt:       req.Prompt,
 		ParamsJSON:   string(paramsJSON),
@@ -295,6 +319,7 @@ func (h *Handler) CreateImageGenerationJob(c *gin.Context) {
 		APIKeyMasked: keyMasked,
 	})
 	if err != nil {
+		releaseSlot()
 		writeInternalError(c, err)
 		return
 	}
@@ -303,6 +328,7 @@ func (h *Handler) CreateImageGenerationJob(c *gin.Context) {
 	}
 	job, err := h.db.GetImageGenerationJob(ctx, jobID)
 	if err != nil {
+		releaseSlot()
 		writeInternalError(c, err)
 		return
 	}
@@ -319,7 +345,7 @@ func (h *Handler) CreateImageGenerationJob(c *gin.Context) {
 		req.TemplateID,
 		imageLogPromptPreview(req.Prompt),
 	)
-	go h.runImageGenerationJob(jobID, req, apiKey)
+	go h.runImageGenerationJobWithRelease(jobID, req, apiKey, releaseSlot)
 	c.JSON(http.StatusOK, imageJobResponse{Job: job})
 }
 
@@ -372,6 +398,11 @@ func (h *Handler) CreateImageEditJob(c *gin.Context) {
 	if h.inspectImageStudioPromptFilter(c, proxy.AppendImageStyleToPrompt(req.Prompt, req.Style), req.Model, keyID, keyName, keyMasked) {
 		return
 	}
+	releaseSlot, ok := tryAcquireImageStudioJobSlot()
+	if !ok {
+		writeError(c, http.StatusServiceUnavailable, "生图任务繁忙，请稍后再试")
+		return
+	}
 	jobID, err := h.db.InsertImageGenerationJob(ctx, database.ImageGenerationJobInput{
 		Prompt:       req.Prompt,
 		ParamsJSON:   string(paramsJSON),
@@ -380,6 +411,7 @@ func (h *Handler) CreateImageEditJob(c *gin.Context) {
 		APIKeyMasked: keyMasked,
 	})
 	if err != nil {
+		releaseSlot()
 		writeInternalError(c, err)
 		return
 	}
@@ -388,6 +420,7 @@ func (h *Handler) CreateImageEditJob(c *gin.Context) {
 	}
 	job, err := h.db.GetImageGenerationJob(ctx, jobID)
 	if err != nil {
+		releaseSlot()
 		writeInternalError(c, err)
 		return
 	}
@@ -402,7 +435,7 @@ func (h *Handler) CreateImageEditJob(c *gin.Context) {
 		req.TemplateID,
 		imageLogPromptPreview(req.Prompt),
 	)
-	go h.runImageEditJob(jobID, req, apiKey)
+	go h.runImageEditJobWithRelease(jobID, req, apiKey, releaseSlot)
 	c.JSON(http.StatusOK, imageJobResponse{Job: job})
 }
 
@@ -749,6 +782,13 @@ func (h *Handler) DeleteImageAsset(c *gin.Context) {
 	writeMessage(c, http.StatusOK, "已删除")
 }
 
+func (h *Handler) runImageGenerationJobWithRelease(jobID int64, req imageGenerationJobPayload, apiKey *database.APIKeyRow, release func()) {
+	if release != nil {
+		defer release()
+	}
+	h.runImageGenerationJob(jobID, req, apiKey)
+}
+
 func (h *Handler) runImageGenerationJob(jobID int64, req imageGenerationJobPayload, apiKey *database.APIKeyRow) {
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
 	defer cancel()
@@ -904,6 +944,13 @@ func buildAdminImageEditRequest(req imageGenerationJobPayload) ([]byte, error) {
 		body["background"] = req.Background
 	}
 	return json.Marshal(body)
+}
+
+func (h *Handler) runImageEditJobWithRelease(jobID int64, req imageGenerationJobPayload, apiKey *database.APIKeyRow, release func()) {
+	if release != nil {
+		defer release()
+	}
+	h.runImageEditJob(jobID, req, apiKey)
 }
 
 func (h *Handler) runImageEditJob(jobID int64, req imageGenerationJobPayload, apiKey *database.APIKeyRow) {

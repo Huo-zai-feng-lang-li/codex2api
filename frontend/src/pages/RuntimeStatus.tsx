@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from 'react'
+import { useCallback } from 'react'
 import type { ReactNode } from 'react'
 import {
   Activity,
@@ -17,7 +17,9 @@ import { api } from '../api'
 import OpsTabs from '../components/OpsTabs'
 import PageHeader from '../components/PageHeader'
 import StateShell from '../components/StateShell'
+import ActiveRequestsPanel from '../components/ActiveRequestsPanel'
 import { useDataLoader } from '../hooks/useDataLoader'
+import { useVisiblePolling } from '../hooks/useVisiblePolling'
 import type { RuntimeCheck, RuntimeHealthStatus, RuntimeStatusResponse } from '../types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -34,13 +36,7 @@ export default function RuntimeStatus() {
     load: loadRuntimeStatus,
   })
 
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      void reloadSilently()
-    }, 15000)
-
-    return () => window.clearInterval(timer)
-  }, [reloadSilently])
+  useVisiblePolling(() => reloadSilently(), 15000)
 
   const updatedLabel = status?.updated_at ? formatTimeLabel(status.updated_at) : '--:--:--'
 
@@ -96,6 +92,8 @@ export default function RuntimeStatus() {
                 </div>
               </CardContent>
             </Card>
+
+            <ActiveRequestsPanel className="mb-6" requests={status.accounts.active_request_details ?? []} />
 
             <div className="grid gap-4 lg:grid-cols-2">
               <StatusPanel

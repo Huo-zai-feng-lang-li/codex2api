@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/codex2api/api"
+	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 	"github.com/codex2api/security"
 	"github.com/gin-gonic/gin"
@@ -64,7 +65,7 @@ func mapHTTPStatusToAnthropicError(statusCode int) string {
 // Messages 处理 /v1/messages 请求（Anthropic Messages API → Codex Responses）
 func (h *Handler) Messages(c *gin.Context) {
 	// 1. 读取请求体
-	rawBody, err := io.ReadAll(c.Request.Body)
+	rawBody, err := api.ReadRawBody(c)
 	if err != nil {
 		sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "Failed to read request body")
 		return
@@ -138,13 +139,21 @@ func (h *Handler) Messages(c *gin.Context) {
 	retryExclusions := newRetryAccountExclusions()
 
 	var lastUpstreamCancel context.CancelFunc
+	var activeEnd func()
 	defer func() {
+		if activeEnd != nil {
+			activeEnd()
+		}
 		if lastUpstreamCancel != nil {
 			lastUpstreamCancel()
 		}
 	}()
 
 	for attempt := 0; ; attempt++ {
+		if activeEnd != nil {
+			activeEnd()
+			activeEnd = nil
+		}
 		account, stickyProxyURL := h.nextRetryAccountForSession(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter)
 		if account == nil {
 			if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
@@ -159,6 +168,14 @@ func (h *Handler) Messages(c *gin.Context) {
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
 		h.store.BindSessionAffinity(affinityKey, account, proxyURL)
 		useWebsocket := h.shouldUseWebsocketForHTTP()
+		activeEnd = h.beginActiveProxyRequest(c, account, auth.ActiveRequestMeta{
+			Endpoint:         "/v1/messages",
+			UpstreamEndpoint: "/v1/responses",
+			Model:            model,
+			EffectiveModel:   effectiveModel,
+			Stream:           isStream,
+			StartedAt:        start,
+		})
 
 		apiKey := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
 		apiKey = strings.TrimSpace(apiKey)
@@ -235,13 +252,13 @@ func (h *Handler) Messages(c *gin.Context) {
 			if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
 				h.store.PersistUsageSnapshot(account, usagePct)
 			}
-			errBody, _ := io.ReadAll(resp.Body)
+			errBody, _ := readUpstreamErrorBody(resp)
 			resp.Body.Close()
 			h.store.Release(account)
 			h.store.UnbindSessionAffinity(affinityKey, account.ID())
 			retryExclusions.MarkHard(account.ID())
 
-			log.Printf("上游返回错误 (attempt %d, status %d, /v1/messages): %s", attempt+1, resp.StatusCode, string(errBody))
+			log.Printf("上游返回错误 (attempt %d, status %d, /v1/messages): %s", attempt+1, resp.StatusCode, upstreamErrorLogBody(errBody))
 			logUpstreamError("/v1/messages", resp.StatusCode, model, account.ID(), errBody)
 			h.logUpstreamCyberPolicy(c, "/v1/messages", model, errBody)
 			decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, effectiveModel)

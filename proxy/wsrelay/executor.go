@@ -276,11 +276,15 @@ func (r *WsResponse) ReadStream(callback func(data []byte) bool) error {
 		return fmt.Errorf("websocket connection is not available")
 	}
 
+	gotTerminal := false
 	for {
 		msgType, payload, err := r.conn.ReadMessage()
 		if err != nil {
 			// 检查是否是正常关闭
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+				if !gotTerminal {
+					return fmt.Errorf("stream disconnected before completion: websocket closed by server before response.completed")
+				}
 				return nil
 			}
 			return fmt.Errorf("websocket read error: %w", err)
@@ -301,7 +305,11 @@ func (r *WsResponse) ReadStream(callback func(data []byte) bool) error {
 		}
 
 		// 解析并处理消息
-		if err := r.handleMessage(payload, callback); err != nil {
+		terminal, err := r.handleMessage(payload, callback)
+		if terminal {
+			gotTerminal = true
+		}
+		if err != nil {
 			if err == io.EOF {
 				return nil
 			}
@@ -311,27 +319,28 @@ func (r *WsResponse) ReadStream(callback func(data []byte) bool) error {
 }
 
 // handleMessage 处理单条 WebSocket 消息
-func (r *WsResponse) handleMessage(payload []byte, callback func(data []byte) bool) error {
+func (r *WsResponse) handleMessage(payload []byte, callback func(data []byte) bool) (bool, error) {
 	// 检查是否是错误消息
 	if err := r.checkError(payload); err != nil {
-		return err
+		return false, err
 	}
 
 	// 标准化完成事件类型
 	payload = normalizeCompletionEvent(payload)
+	eventType := gjson.GetBytes(payload, "type").String()
+	terminal := eventType == "response.completed" || eventType == "response.failed"
 
 	// 调用回调
 	if !callback(payload) {
-		return io.EOF
+		return terminal, io.EOF
 	}
 
 	// 检查是否是终止事件
-	eventType := gjson.GetBytes(payload, "type").String()
-	if eventType == "response.completed" || eventType == "response.failed" {
-		return io.EOF
+	if terminal {
+		return true, io.EOF
 	}
 
-	return nil
+	return false, nil
 }
 
 // checkError 检查并返回 WebSocket 错误

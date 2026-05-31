@@ -32,6 +32,14 @@ USAGE_WINDOW_LOGIC.md
 .claude/settings.local.json
 scripts
 
+# Local runtime state
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/backups/
+data/images/
+data/backgrounds/
+
 # Logs
 logs/
 AGMENT.md

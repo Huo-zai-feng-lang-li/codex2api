@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -224,6 +226,15 @@ func main() {
 	// 全局 RPM 限流器
 	rateLimiter := proxy.NewRateLimiter(settings.GlobalRPM)
 	adminHandler := admin.NewHandler(store, db, tc, rateLimiter, cfg.AdminSecret)
+	shutdownRequests := make(chan string, 1)
+	var shutdownRequested atomic.Bool
+	adminHandler.SetShutdownFunc(func(reason string) bool {
+		if !shutdownRequested.CompareAndSwap(false, true) {
+			return false
+		}
+		shutdownRequests <- reason
+		return true
+	})
 	// 初始化 admin handler 的连接池设置跟踪
 	adminHandler.SetPoolSizes(settings.PgMaxConns, settings.RedisPoolSize)
 	store.SetUsageProbeFunc(adminHandler.ProbeUsageSnapshot)
@@ -338,18 +349,32 @@ func main() {
 	log.Printf("  API:    GET  /v1/models")
 	log.Println("==========================================")
 
+	server := newHTTPServer(addr, r)
+
 	// 优雅关闭
 	go func() {
-		if err := r.Run(addr); err != nil {
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("HTTP 服务启动失败: %v", err)
 		}
 	}()
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	go func() {
+		sig := <-quit
+		if sig != nil {
+			adminHandler.RequestShutdown("signal:" + sig.String())
+		}
+	}()
 
-	log.Println("正在关闭...")
+	reason := <-shutdownRequests
+
+	log.Printf("正在关闭... reason=%s", security.SanitizeLog(reason))
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("HTTP 服务优雅关闭失败: %v", err)
+	}
 	store.Stop()
 	wsrelay.ShutdownExecutor()
 	proxy.CloseErrorLogger()
@@ -487,4 +512,14 @@ func shouldSkipAccessLog(method string, path string, status int) bool {
 		return true
 	}
 	return false
+}
+
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       5 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
+	}
 }

@@ -69,6 +69,8 @@ import {
   ChevronDown,
   Copy,
   Cookie,
+  Eye,
+  EyeOff,
   Power,
   PowerOff,
   Hourglass,
@@ -88,6 +90,8 @@ const ACCOUNT_BATCH_CONCURRENCY = 6;
 const OPERATION_PROGRESS_FLUSH_INTERVAL_MS = 200;
 const ACCOUNT_ANALYSIS_VISIBILITY_KEY = "codex2api:accounts:analysis-visible";
 const ACCOUNT_VISIBLE_COLUMNS_KEY = "codex2api:accounts:visible-columns";
+const ACCOUNT_VISIBLE_COLUMNS_VERSION_KEY =
+  "codex2api:accounts:visible-columns:v2";
 const ACCOUNT_TABLE_COLUMNS = [
   "sequence",
   "email",
@@ -126,7 +130,7 @@ function getDefaultAccountVisibleColumns(): Record<
   return Object.fromEntries(
     ACCOUNT_TABLE_COLUMNS.map((column) => [
       column,
-      column !== "tags" && column !== "groups",
+      column !== "groups",
     ]),
   ) as Record<AccountTableColumn, boolean>;
 }
@@ -142,14 +146,30 @@ function getInitialAccountVisibleColumns(): Record<
     const parsed = JSON.parse(raw) as Partial<
       Record<AccountTableColumn, boolean>
     >;
-    return Object.fromEntries(
+    const migrated =
+      window.localStorage.getItem(ACCOUNT_VISIBLE_COLUMNS_VERSION_KEY) ===
+      "tags-default-visible";
+    const columns = Object.fromEntries(
       ACCOUNT_TABLE_COLUMNS.map((column) => [
         column,
-        column === "tags" || column === "groups"
+        column === "groups"
           ? parsed[column] === true
+          : column === "tags" && !migrated
+            ? true
           : parsed[column] !== false,
       ]),
     ) as Record<AccountTableColumn, boolean>;
+    if (!migrated) {
+      window.localStorage.setItem(
+        ACCOUNT_VISIBLE_COLUMNS_KEY,
+        JSON.stringify(columns),
+      );
+      window.localStorage.setItem(
+        ACCOUNT_VISIBLE_COLUMNS_VERSION_KEY,
+        "tags-default-visible",
+      );
+    }
+    return columns;
   } catch {
     return fallback;
   }
@@ -162,6 +182,10 @@ function persistAccountVisibleColumns(
     window.localStorage.setItem(
       ACCOUNT_VISIBLE_COLUMNS_KEY,
       JSON.stringify(columns),
+    );
+    window.localStorage.setItem(
+      ACCOUNT_VISIBLE_COLUMNS_VERSION_KEY,
+      "tags-default-visible",
     );
   } catch {
     // Keep the in-memory preference working when localStorage is unavailable.
@@ -419,6 +443,7 @@ export default function Accounts() {
     session_token: "",
     proxy_url: "",
   });
+  const [addTags, setAddTags] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [refreshingIds, setRefreshingIds] = useState<Set<number>>(new Set());
@@ -474,6 +499,8 @@ export default function Accounts() {
   const [openAIModelDraft, setOpenAIModelDraft] = useState("");
   const [editOpenAIModelDraft, setEditOpenAIModelDraft] = useState("");
   const [editOpenAIModelsLoading, setEditOpenAIModelsLoading] = useState(false);
+  const [editOpenAIConfigLoading, setEditOpenAIConfigLoading] = useState(false);
+  const [showEditOpenAIAPIKey, setShowEditOpenAIAPIKey] = useState(false);
   const [importing, setImporting] = useState(false);
   const [showImportPicker, setShowImportPicker] = useState(false);
   const [showSub2APIImport, setShowSub2APIImport] = useState(false);
@@ -1069,8 +1096,8 @@ export default function Accounts() {
   const handleAdd = async (credential: "rt" | "st" = "rt") => {
     const payload: AddAccountRequest =
       credential === "st"
-        ? { ...addForm, refresh_token: "" }
-        : { ...addForm, session_token: "" };
+        ? { ...addForm, refresh_token: "", tags: addTags }
+        : { ...addForm, session_token: "", tags: addTags };
     if (
       !payload.refresh_token?.trim() &&
       !payload.session_token?.trim()
@@ -1083,6 +1110,7 @@ export default function Accounts() {
       showToast(t("accounts.addSuccess"));
       setShowAdd(false);
       setAddForm({ refresh_token: "", session_token: "", proxy_url: "" });
+      setAddTags([]);
       void reload();
     } catch (error) {
       showToast(
@@ -1098,10 +1126,11 @@ export default function Accounts() {
     if (!atForm.access_token.trim()) return;
     setSubmitting(true);
     try {
-      await api.addATAccount(atForm);
+      await api.addATAccount({ ...atForm, tags: addTags });
       showToast(t("accounts.addSuccess"));
       setShowAdd(false);
       setAtForm({ access_token: "", proxy_url: "" });
+      setAddTags([]);
       void reload();
     } catch (error) {
       showToast(
@@ -1182,7 +1211,7 @@ export default function Accounts() {
     if (!openAIForm.api_key.trim() || models.length === 0) return;
     setSubmitting(true);
     try {
-      await api.addOpenAIResponsesAccount({ ...openAIForm, models });
+      await api.addOpenAIResponsesAccount({ ...openAIForm, models, tags: addTags });
       showToast(t("accounts.addSuccess"));
       setShowAdd(false);
       setOpenAIForm({
@@ -1191,6 +1220,7 @@ export default function Accounts() {
         models: [],
         proxy_url: "",
       });
+      setAddTags([]);
       setOpenAIModelDraft("");
       void reload();
     } catch (error) {
@@ -1245,6 +1275,7 @@ export default function Accounts() {
       await api.updateOpenAIResponsesAccount(editingAccount.id, {
         ...editOpenAIForm,
         api_key: editOpenAIForm.api_key?.trim() || undefined,
+        tags: editTags,
       });
       showToast(t("accounts.openaiAccountSaveSuccess"));
       await reload();
@@ -1264,7 +1295,7 @@ export default function Accounts() {
   const handleOAuthGenerate = async () => {
     setOauthGenerating(true);
     try {
-      const result = await api.generateOAuthURL({ proxy_url: oauthProxyUrl });
+      const result = await api.generateOAuthURL({ proxy_url: oauthProxyUrl, tags: addTags });
       setOauthSession(result);
       setOauthStep("exchange");
     } catch (error) {
@@ -1304,6 +1335,7 @@ export default function Accounts() {
         state,
         name: oauthName.trim() || undefined,
         proxy_url: oauthProxyUrl.trim() || undefined,
+        tags: addTags,
       });
       showToast(
         result.email
@@ -1316,6 +1348,7 @@ export default function Accounts() {
       setOauthSession(null);
       setOauthCallbackUrl("");
       setOauthName("");
+      setAddTags([]);
       void reload();
     } catch (error) {
       showToast(
@@ -2166,6 +2199,7 @@ export default function Accounts() {
       models: account.models ?? [],
       proxy_url: account.proxy_url ?? "",
     });
+    setShowEditOpenAIAPIKey(false);
     setEditOpenAIModelDraft("");
   };
 
@@ -2189,8 +2223,43 @@ export default function Accounts() {
       models: [],
       proxy_url: "",
     });
+    setShowEditOpenAIAPIKey(false);
     setEditOpenAIModelDraft("");
   };
+
+  useEffect(() => {
+    if (!editingAccount?.openai_responses_api) return;
+    let active = true;
+    setEditOpenAIConfigLoading(true);
+    api
+      .getOpenAIResponsesAccount(editingAccount.id)
+      .then((config) => {
+        if (!active) return;
+        setEditOpenAIForm((form) => ({
+          ...form,
+          name: config.name ?? form.name,
+          base_url: config.base_url || form.base_url,
+          api_key: config.api_key ?? "",
+          models: config.models ?? form.models,
+          proxy_url: config.proxy_url ?? form.proxy_url,
+        }));
+      })
+      .catch((error) => {
+        if (!active) return;
+        showToast(
+          t("accounts.openaiAccountLoadFailed", {
+            error: getErrorMessage(error),
+          }),
+          "error",
+        );
+      })
+      .finally(() => {
+        if (active) setEditOpenAIConfigLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [editingAccount?.id, editingAccount?.openai_responses_api, showToast, t]);
 
   const parsedScoreBias =
     scoreMode === "custom" ? parseIntegerInput(scoreInput) : null;
@@ -2987,7 +3056,7 @@ export default function Accounts() {
                   <div
                     className={
                       viewMode === "grid"
-                        ? "grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5"
+                        ? "grid gap-3 grid-cols-[repeat(auto-fill,minmax(min(100%,360px),420px))]"
                         : "grid gap-3 lg:hidden"
                     }
                   >
@@ -3527,6 +3596,7 @@ export default function Accounts() {
               setOauthSession(null);
               setOauthCallbackUrl("");
               setOauthName("");
+              setAddTags([]);
               setOpenAIForm({
                 base_url: "https://api.openai.com",
                 api_key: "",
@@ -3546,6 +3616,7 @@ export default function Accounts() {
                     setOauthSession(null);
                     setOauthCallbackUrl("");
                     setOauthName("");
+                    setAddTags([]);
                     setOpenAIForm({
                       base_url: "https://api.openai.com",
                       api_key: "",
@@ -4005,6 +4076,21 @@ export default function Accounts() {
                 )}
               </div>
             )}
+            <div className="mt-5 rounded-xl border border-border p-4">
+              <div className="text-sm font-semibold text-foreground">
+                {t("accounts.tagsLabel")}
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                {t("accounts.tagsHint")}
+              </div>
+              <ChipInput
+                className="mt-3"
+                value={addTags}
+                onChange={setAddTags}
+                placeholder={t("accounts.tagsPlaceholder")}
+                maxVisible={4}
+              />
+            </div>
           </Modal>
 
           <Modal
@@ -4433,17 +4519,47 @@ export default function Accounts() {
                       <label className="block mb-2 text-sm font-semibold text-muted-foreground">
                         {t("accounts.openaiApiKey")}
                       </label>
-                      <Input
-                        type="password"
-                        placeholder={t("accounts.openaiApiKeyKeepPlaceholder")}
-                        value={editOpenAIForm.api_key ?? ""}
-                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                          setEditOpenAIForm((form) => ({
-                            ...form,
-                            api_key: event.target.value,
-                          }))
-                        }
-                      />
+                      <div className="relative">
+                        <Input
+                          className="pr-10"
+                          type={showEditOpenAIAPIKey ? "text" : "password"}
+                          placeholder={t(
+                            editOpenAIConfigLoading
+                              ? "accounts.openaiApiKeyLoading"
+                              : "accounts.openaiApiKeyKeepPlaceholder",
+                          )}
+                          value={editOpenAIForm.api_key ?? ""}
+                          onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                            setEditOpenAIForm((form) => ({
+                              ...form,
+                              api_key: event.target.value,
+                            }))
+                          }
+                        />
+                        <button
+                          type="button"
+                          className="absolute right-2 top-1/2 inline-flex size-7 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+                          onClick={() =>
+                            setShowEditOpenAIAPIKey((current) => !current)
+                          }
+                          title={t(
+                            showEditOpenAIAPIKey
+                              ? "accounts.openaiApiKeyHide"
+                              : "accounts.openaiApiKeyShow",
+                          )}
+                          aria-label={t(
+                            showEditOpenAIAPIKey
+                              ? "accounts.openaiApiKeyHide"
+                              : "accounts.openaiApiKeyShow",
+                          )}
+                        >
+                          {showEditOpenAIAPIKey ? (
+                            <EyeOff className="size-4" />
+                          ) : (
+                            <Eye className="size-4" />
+                          )}
+                        </button>
+                      </div>
                     </div>
                     <div>
                       <div className="mb-2 flex items-center justify-between gap-2">
@@ -6303,23 +6419,23 @@ function AccountMobileCard({
 
   return (
     <article
-      className={`min-w-0 rounded-lg border bg-card p-3 shadow-sm ${
-        selected ? "border-primary/35 bg-primary/5" : "border-border"
+      className={`group min-w-0 overflow-hidden rounded-lg border bg-card shadow-sm transition-[border-color,box-shadow,transform] hover:-translate-y-0.5 hover:border-primary/25 hover:shadow-md ${
+        selected ? "border-primary/40 bg-primary/5 shadow-md" : "border-border"
       }`}
     >
-      <div className="flex min-w-0 items-start gap-3">
-        <input
-          type="checkbox"
-          className="mt-1 size-4 shrink-0 cursor-pointer accent-primary"
-          checked={selected}
-          onChange={onToggleSelect}
-          aria-label={fullName}
-        />
-        <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 items-start justify-between gap-2">
-            <div className="min-w-0 flex-1">
-              <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-                <span className="rounded-md bg-muted px-1.5 py-0.5 text-[11px] font-mono font-semibold text-muted-foreground">
+      <div className="border-b border-border/80 bg-muted/20 px-3 py-2.5">
+        <div className="flex min-w-0 items-start justify-between gap-3">
+          <div className="flex min-w-0 items-start gap-2.5">
+            <input
+              type="checkbox"
+              className="mt-1 size-4 shrink-0 cursor-pointer accent-primary"
+              checked={selected}
+              onChange={onToggleSelect}
+              aria-label={fullName}
+            />
+            <div className="min-w-0">
+              <div className="flex min-w-0 items-center gap-1.5">
+                <span className="rounded-md bg-background px-1.5 py-0.5 text-[11px] font-mono font-semibold text-muted-foreground ring-1 ring-inset ring-border">
                   #{sequence}
                 </span>
                 <PlanBadge planType={account.plan_type} />
@@ -6329,22 +6445,21 @@ function AccountMobileCard({
                 />
               </div>
               <div
-                className="mt-1 truncate text-[15px] font-semibold leading-tight text-foreground"
+                className="mt-1.5 truncate text-[15px] font-semibold leading-tight text-foreground"
                 title={fullName}
               >
                 {displayName}
               </div>
             </div>
-            <div className="shrink-0">
-              <StatusBadge
-                status={account.status}
-                detail={getAccountRateLimitWindow(account) ?? undefined}
-                errorMessage={account.error_message}
-              />
-            </div>
           </div>
+          <StatusBadge
+            status={account.status}
+            detail={getAccountRateLimitWindow(account) ?? undefined}
+            errorMessage={account.error_message}
+          />
+        </div>
 
-          <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
+        <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5 pl-6">
             {account.at_only && (
               <span className="inline-flex items-center rounded-md bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20 dark:bg-amber-950 dark:text-amber-400 dark:ring-amber-400/20">
                 AT
@@ -6368,35 +6483,36 @@ function AccountMobileCard({
               </span>
             )}
             <AccountStatusCountdown account={account} />
-          </div>
+        </div>
 
-          {account.status === "error" && account.error_message && (
-            <div
-              className="mt-2 line-clamp-3 break-words text-[11px] leading-tight text-red-500"
-              title={account.error_message}
-            >
-              {account.error_message}
-            </div>
-          )}
-          {(account.model_cooldowns?.length ?? 0) > 0 && (
-            <div className="mt-2 text-[11px] leading-tight text-amber-600">
-              model {account.model_cooldowns?.[0]?.model}
-              {(account.model_cooldowns?.length ?? 0) > 1
-                ? ` +${(account.model_cooldowns?.length ?? 1) - 1}`
-                : ""}
-            </div>
-          )}
-          <div className="mt-1 text-[11px] text-muted-foreground">
-            {t("accounts.healthSummary", {
-              health: formatHealthTier(account.health_tier, t),
-              score: Math.round(getDispatchScore(account)),
-              concurrency: account.dynamic_concurrency_limit ?? "-",
-            })}
-          </div>
+        <div className="mt-2 pl-6 text-[11px] text-muted-foreground">
+          {t("accounts.healthSummary", {
+            health: formatHealthTier(account.health_tier, t),
+            score: Math.round(getDispatchScore(account)),
+            concurrency: account.dynamic_concurrency_limit ?? "-",
+          })}
         </div>
       </div>
 
-      <div className="mt-3 grid min-w-0 grid-cols-2 gap-2 max-[380px]:grid-cols-1">
+      <div className="p-3">
+        {account.status === "error" && account.error_message && (
+          <div
+            className="mb-2 rounded-md border border-red-500/20 bg-red-500/8 px-2 py-1.5 text-[11px] leading-snug text-red-600 dark:text-red-300"
+            title={account.error_message}
+          >
+            {account.error_message}
+          </div>
+        )}
+        {(account.model_cooldowns?.length ?? 0) > 0 && (
+          <div className="mb-2 rounded-md border border-amber-500/20 bg-amber-500/10 px-2 py-1.5 text-[11px] leading-snug text-amber-700 dark:text-amber-300">
+            model {account.model_cooldowns?.[0]?.model}
+            {(account.model_cooldowns?.length ?? 0) > 1
+              ? ` +${(account.model_cooldowns?.length ?? 1) - 1}`
+              : ""}
+          </div>
+        )}
+
+      <div className="grid min-w-0 grid-cols-2 gap-2 max-[380px]:grid-cols-1">
         <AccountMobileMetric label={t("accounts.requests")}>
           <div className="flex items-center gap-2 text-[13px]">
             <span className="font-medium text-emerald-600">
@@ -6451,12 +6567,12 @@ function AccountMobileCard({
         </AccountMobileMetric>
       </div>
 
-      {((account.tags ?? []).length > 0 || groups.length > 0) && (
-        <div className="mt-3 space-y-1.5 border-t border-border pt-2">
-          <ChipList items={account.tags ?? []} tone="purple" />
-          <GroupChipList groups={groups} />
-        </div>
-      )}
+        {((account.tags ?? []).length > 0 || groups.length > 0) && (
+          <div className="mt-3 space-y-1.5 border-t border-border pt-2">
+            <ChipList items={account.tags ?? []} tone="purple" />
+            <GroupChipList groups={groups} />
+          </div>
+        )}
 
       <div className="mt-3 grid grid-cols-5 gap-1.5 max-[380px]:grid-cols-4">
         <AccountMobileActionButton
@@ -6539,6 +6655,7 @@ function AccountMobileCard({
           onClick={onDelete}
           icon={<Trash2 className="size-3.5" />}
         />
+        </div>
       </div>
     </article>
   );
@@ -6555,7 +6672,7 @@ function AccountMobileMetric({
 }) {
   return (
     <div
-      className={`min-w-0 rounded-lg border border-border bg-muted/20 p-2 ${className}`}
+      className={`min-w-0 rounded-md border border-border/80 bg-background/60 p-2 ${className}`}
     >
       <div className="mb-1 text-[11px] font-bold uppercase text-muted-foreground">
         {label}
@@ -6585,7 +6702,7 @@ function AccountMobileActionButton({
       type="button"
       variant={variant}
       size="icon-sm"
-      className="h-9 w-full"
+      className="h-8 w-full rounded-md"
       disabled={disabled}
       onClick={onClick}
       title={title}
@@ -7066,11 +7183,17 @@ function hasUsageWindowDetail(detail?: AccountRow["usage_5h_detail"]): boolean {
   );
 }
 
-// 用量进度条颜色
-function usageBarColor(pct: number): string {
-  if (pct >= 90) return "bg-red-500";
-  if (pct >= 70) return "bg-amber-500";
+// 用量条表达剩余额度: 数字显示已用比例,条体显示还能消耗多少。
+function usageRemainingBarColor(remainingPct: number): string {
+  if (remainingPct <= 10) return "bg-red-500";
+  if (remainingPct <= 30) return "bg-amber-500";
   return "bg-emerald-500";
+}
+
+function usageTrackColor(pct: number): string {
+  if (pct >= 90) return "bg-red-500/12";
+  if (pct >= 70) return "bg-amber-500/14";
+  return "bg-muted";
 }
 
 // 单行用量进度条
@@ -7090,16 +7213,18 @@ function UsageBar({
   const detailText = hasUsageWindowDetail(detail)
     ? `${formatCompactUsageNumber(detail?.requests)} ${t("accounts.usageReqUnit")} / ${formatCompactUsageNumber(detail?.tokens)} ${t("accounts.usageTokUnit")}`
     : "";
+  const clampedPct = Math.min(100, Math.max(0, pct));
+  const remainingPct = Math.max(0, 100 - clampedPct);
   return (
     <div>
       <div className="flex items-center gap-1.5">
         <span className="text-[11px] font-medium text-muted-foreground w-5 shrink-0">
           {label}
         </span>
-        <div className="flex-1 h-1.5 rounded-full bg-muted overflow-hidden min-w-[72px]">
+        <div className={`flex-1 h-1.5 rounded-full overflow-hidden min-w-[72px] ${usageTrackColor(clampedPct)}`}>
           <div
-            className={`h-full rounded-full transition-all ${usageBarColor(pct)}`}
-            style={{ width: `${Math.min(100, pct)}%` }}
+            className={`h-full rounded-full transition-all ${usageRemainingBarColor(remainingPct)}`}
+            style={{ width: `${remainingPct}%` }}
           />
         </div>
         <span className="text-[12px] font-semibold w-[42px] text-right shrink-0">

@@ -14,6 +14,7 @@ import {
 import { CircleHelp, TimerReset } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Tooltip as UITooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { chartInitialDimensions } from '../lib/chartDimensions'
 import type { AccountRow } from '../types'
 import { formatBeijingTime } from '../utils/time'
 
@@ -283,7 +284,11 @@ export default function AccountRateLimitRecoveryChart({ accounts, currentRpm = 0
 
         <div className={compact ? 'grid min-h-0 flex-1 grid-rows-[200px_auto] gap-3 lg:grid-rows-[minmax(116px,1fr)_94px]' : 'grid gap-3'}>
           <div className={compact ? 'min-h-0' : 'h-[260px]'}>
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer
+              width="100%"
+              height="100%"
+              initialDimension={compact ? chartInitialDimensions.accountCompact : chartInitialDimensions.account}
+            >
               <ComposedChart data={chartPoints} margin={viewMode === 'reset' ? resetChartMargin : chartMargin}>
                 <CartesianGrid vertical={false} stroke={gridColor} strokeDasharray="4 4" />
                 <XAxis

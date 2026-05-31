@@ -11,6 +11,8 @@ import {
   YAxis,
 } from 'recharts'
 import { api } from '../api'
+import { useVisiblePolling } from '../hooks/useVisiblePolling'
+import { chartInitialDimensions } from '../lib/chartDimensions'
 import { Card, CardContent } from '@/components/ui/card'
 import type { AccountEventTrendPoint } from '../types'
 
@@ -77,11 +79,7 @@ export default function AccountTrendChart() {
 
   useEffect(() => { void fetchData() }, [fetchData])
 
-  // 15 秒自动刷新，与运维页一致
-  useEffect(() => {
-    const timer = setInterval(() => { void fetchData() }, 15_000)
-    return () => clearInterval(timer)
-  }, [fetchData])
+  useVisiblePolling(fetchData, range === '24h' ? 30_000 : 60_000)
 
   const { bucketMinutes } = getRangeConfig(range)
 
@@ -155,7 +153,7 @@ export default function AccountTrendChart() {
               {t('ops.accountTrendEmpty')}
             </div>
           ) : (
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer width="100%" height="100%" initialDimension={chartInitialDimensions.accountTrend}>
               <LineChart data={displayData} margin={chartMargin}>
                 <CartesianGrid vertical={false} stroke={gridColor} strokeDasharray="4 4" />
                 <XAxis

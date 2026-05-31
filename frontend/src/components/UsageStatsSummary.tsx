@@ -12,6 +12,7 @@ interface UsageStatsSummaryProps {
 export default function UsageStatsSummary({ stats, className = '' }: UsageStatsSummaryProps) {
   const { t, i18n } = useTranslation()
   const locale = i18n.language
+  const tokenCountUnit = t('dashboard.tokenCountUnit')
 
   return (
     <Card className={`py-0 ${className}`}>
@@ -26,7 +27,11 @@ export default function UsageStatsSummary({ stats, className = '' }: UsageStatsS
             primaryValue={formatInteger(stats.today_requests, locale)}
           >
             <MetricLine label={t('dashboard.totalRequests')} value={formatInteger(stats.total_requests, locale)} />
-            <MetricLine label={t('dashboard.rpmTpm')} value={`${formatInteger(stats.rpm, locale)} / ${formatInteger(stats.tpm, locale)}`} />
+            <MetricLine
+              label={t('dashboard.rpmTpm')}
+              value={`${formatInteger(stats.rpm, locale)} / ${formatTokenCount(stats.tpm, locale, tokenCountUnit)}`}
+              title={`${formatInteger(stats.rpm, locale)} / ${formatInteger(stats.tpm, locale)}`}
+            />
           </MetricGroup>
 
           <MetricGroup
@@ -34,9 +39,14 @@ export default function UsageStatsSummary({ stats, className = '' }: UsageStatsS
             iconBg="bg-purple-500/10 text-purple-500"
             title={t('dashboard.tokenGroup')}
             primaryLabel={t('dashboard.todayTokens')}
-            primaryValue={formatInteger(stats.today_tokens, locale)}
+            primaryValue={formatTokenCount(stats.today_tokens, locale, tokenCountUnit)}
+            primaryTitle={formatInteger(stats.today_tokens, locale)}
           >
-            <MetricLine label={t('dashboard.totalTokens')} value={formatInteger(stats.total_tokens, locale)} />
+            <MetricLine
+              label={t('dashboard.totalTokens')}
+              value={formatTokenCount(stats.total_tokens, locale, tokenCountUnit)}
+              title={formatInteger(stats.total_tokens, locale)}
+            />
             <MetricLine label={t('dashboard.billing')} value={`${t('usage.todayCost')}: ${formatMoney(stats.today_user_billed)} / ${t('dashboard.totalCostShort')}: ${formatMoney(stats.total_user_billed)}`} />
           </MetricGroup>
 
@@ -47,7 +57,11 @@ export default function UsageStatsSummary({ stats, className = '' }: UsageStatsS
             primaryLabel={t('dashboard.todayCacheHitRate')}
             primaryValue={formatPercent(stats.today_cache_rate ?? 0)}
           >
-            <MetricLine label={t('dashboard.todayCachedTokens')} value={formatInteger(stats.today_cached_tokens ?? 0, locale)} />
+            <MetricLine
+              label={t('dashboard.todayCachedTokens')}
+              value={formatTokenCount(stats.today_cached_tokens ?? 0, locale, tokenCountUnit)}
+              title={formatInteger(stats.today_cached_tokens ?? 0, locale)}
+            />
             <MetricLine label={t('dashboard.totalCacheHitRate')} value={formatPercent(stats.total_cache_rate ?? 0)} />
           </MetricGroup>
 
@@ -73,6 +87,7 @@ function MetricGroup({
   title,
   primaryLabel,
   primaryValue,
+  primaryTitle,
   children,
 }: {
   icon: ReactNode
@@ -80,6 +95,7 @@ function MetricGroup({
   title: string
   primaryLabel: string
   primaryValue: string
+  primaryTitle?: string
   children: ReactNode
 }) {
   return (
@@ -93,7 +109,7 @@ function MetricGroup({
           <div className="truncate text-xs text-muted-foreground" title={primaryLabel}>{primaryLabel}</div>
         </div>
       </div>
-      <div className="truncate text-[26px] font-bold leading-none tabular-nums text-foreground" title={primaryValue}>
+      <div className="truncate text-[26px] font-bold leading-none tabular-nums text-foreground" title={primaryTitle ?? primaryValue}>
         {primaryValue}
       </div>
       <div className="mt-2.5 space-y-1.5 border-t border-border/60 pt-2">
@@ -103,11 +119,11 @@ function MetricGroup({
   )
 }
 
-function MetricLine({ label, value, tone = 'default' }: { label: string; value: string; tone?: 'default' | 'danger' }) {
+function MetricLine({ label, value, title, tone = 'default' }: { label: string; value: string; title?: string; tone?: 'default' | 'danger' }) {
   return (
     <div className="flex min-w-0 items-center justify-between gap-3 text-sm">
       <span className="truncate text-muted-foreground" title={label}>{label}</span>
-      <span className={`shrink-0 font-semibold tabular-nums ${tone === 'danger' ? 'text-destructive' : 'text-foreground'}`} title={value}>
+      <span className={`shrink-0 font-semibold tabular-nums ${tone === 'danger' ? 'text-destructive' : 'text-foreground'}`} title={title ?? value}>
         {value}
       </span>
     </div>
@@ -116,6 +132,45 @@ function MetricLine({ label, value, tone = 'default' }: { label: string; value: 
 
 function formatInteger(value: number, locale: string): string {
   return Math.round(value).toLocaleString(locale)
+}
+
+function formatTokenCount(value: number, locale: string, unitLabel: string): string {
+  const roundedValue = normalizeMetricNumber(value)
+  const compactValue = isChineseLocale(locale)
+    ? formatChineseCompactCount(roundedValue, locale)
+    : formatIntlCompactCount(roundedValue, locale)
+  return isChineseLocale(locale) ? `${compactValue}${unitLabel}` : `${compactValue} ${unitLabel}`.trim()
+}
+
+function normalizeMetricNumber(value: number): number {
+  if (!Number.isFinite(value)) return 0
+  return Math.round(value)
+}
+
+function isChineseLocale(locale: string): boolean {
+  return locale.toLowerCase().startsWith('zh')
+}
+
+function formatChineseCompactCount(value: number, locale: string): string {
+  const absValue = Math.abs(value)
+  const unit = [
+    { value: 1_0000_0000_0000, suffix: '万亿' },
+    { value: 1_0000_0000, suffix: '亿' },
+    { value: 1_0000, suffix: '万' },
+  ].find((item) => absValue >= item.value)
+
+  if (!unit) return value.toLocaleString(locale)
+
+  const scaled = value / unit.value
+  const maximumFractionDigits = Math.abs(scaled) >= 100 ? 0 : Math.abs(scaled) >= 10 ? 1 : 2
+  return `${scaled.toLocaleString(locale, { maximumFractionDigits })}${unit.suffix}`
+}
+
+function formatIntlCompactCount(value: number, locale: string): string {
+  return new Intl.NumberFormat(locale, {
+    notation: 'compact',
+    maximumFractionDigits: 1,
+  }).format(value)
 }
 
 function formatPercent(value: number): string {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from 'react'
+import { useCallback, useState } from 'react'
 import {
   Activity,
   AlertTriangle,
@@ -7,6 +7,7 @@ import {
   Cpu,
   Database,
   HardDrive,
+  Power,
   RefreshCw,
   Server,
   Users,
@@ -17,7 +18,10 @@ import { api } from '../api'
 import PageHeader from '../components/PageHeader'
 import OpsTabs from '../components/OpsTabs'
 import StateShell from '../components/StateShell'
+import { useConfirmDialog } from '../hooks/useConfirmDialog'
 import { useDataLoader } from '../hooks/useDataLoader'
+import { useVisiblePolling } from '../hooks/useVisiblePolling'
+import { useToast } from '../hooks/useToast'
 import type { OpsOverviewResponse } from '../types'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -26,6 +30,9 @@ type MetricTone = 'normal' | 'warning' | 'danger' | 'info'
 
 export default function Operations() {
   const { t } = useTranslation()
+  const { showToast } = useToast()
+  const { confirm, confirmDialog } = useConfirmDialog()
+  const [shutdownLoading, setShutdownLoading] = useState(false)
   const loadOperationsData = useCallback(() => api.getOpsOverview(), [])
 
   const { data: overview, loading, error, reload, reloadSilently } = useDataLoader<OpsOverviewResponse | null>({
@@ -33,15 +40,34 @@ export default function Operations() {
     load: loadOperationsData,
   })
 
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      void reloadSilently()
-    }, 15000)
-
-    return () => window.clearInterval(timer)
-  }, [reloadSilently])
+  useVisiblePolling(() => reloadSilently(), 15000)
 
   const updatedLabel = overview?.updated_at ? formatTimeLabel(overview.updated_at) : '--:--:--'
+
+  const handleShutdown = async () => {
+    const confirmed = await confirm({
+      title: t('ops.shutdownConfirmTitle'),
+      description: t('ops.shutdownConfirmDesc'),
+      confirmText: t('ops.shutdownConfirm'),
+      tone: 'destructive',
+      confirmVariant: 'destructive',
+      icon: <Power className="size-5" />,
+    })
+    if (!confirmed) return
+
+    setShutdownLoading(true)
+    try {
+      await api.shutdownSystem()
+      showToast(t('ops.shutdownStarted'), 'success', 8000)
+      window.setTimeout(() => {
+        window.close()
+      }, 1200)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      showToast(`${t('ops.shutdownFailed')}: ${message}`, 'error')
+      setShutdownLoading(false)
+    }
+  }
 
   return (
     <StateShell
@@ -63,6 +89,10 @@ export default function Operations() {
               <Button variant="outline" onClick={() => void reload()}>
                 <RefreshCw className="size-3.5" />
                 {t('common.refresh')}
+              </Button>
+              <Button variant="destructive" onClick={() => void handleShutdown()} disabled={shutdownLoading}>
+                <Power className="size-3.5" />
+                {shutdownLoading ? t('ops.shutdownStopping') : t('ops.shutdown')}
               </Button>
             </div>
           }
@@ -173,6 +203,7 @@ export default function Operations() {
             </Card>
           </>
         ) : null}
+        {confirmDialog}
       </>
     </StateShell>
   )

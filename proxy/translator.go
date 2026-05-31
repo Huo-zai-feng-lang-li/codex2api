@@ -2591,7 +2591,10 @@ func TranslateCompactResponse(responseData []byte, model string, id string) []by
 		})
 	}
 
-	usage := extractUsage(responseData)
+	usage := extractUsageFromResult(gjson.GetBytes(responseData, "usage"))
+	if usage == nil {
+		usage = extractUsage(responseData)
+	}
 
 	msg := compactMessage{
 		Role:    "assistant",
