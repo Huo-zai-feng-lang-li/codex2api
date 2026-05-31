@@ -8,6 +8,7 @@ import StateShell from "../components/StateShell";
 import StatusBadge from "../components/StatusBadge";
 import { useDataLoader, type LoadOptions } from "../hooks/useDataLoader";
 import { useConfirmDialog } from "../hooks/useConfirmDialog";
+import { useVisiblePolling } from "../hooks/useVisiblePolling";
 import {
   DEFAULT_PAGE_SIZE_OPTIONS,
   usePersistedPageSize,
@@ -88,6 +89,7 @@ import ChipInput from "../components/ChipInput";
 
 const ACCOUNT_BATCH_CONCURRENCY = 6;
 const OPERATION_PROGRESS_FLUSH_INTERVAL_MS = 200;
+const ACCOUNTS_VISIBLE_REFRESH_INTERVAL_MS = 15_000;
 const ACCOUNT_ANALYSIS_VISIBILITY_KEY = "codex2api:accounts:analysis-visible";
 const ACCOUNT_VISIBLE_COLUMNS_KEY = "codex2api:accounts:visible-columns";
 const ACCOUNT_VISIBLE_COLUMNS_VERSION_KEY =
@@ -431,6 +433,7 @@ export default function Accounts() {
     | "locked"
   >("all");
   const [searchQuery, setSearchQuery] = useState("");
+  const [lastPageRefreshAt, setLastPageRefreshAt] = useState<Date | null>(null);
   const [planFilter, setPlanFilter] = useState<
     "all" | "pro" | "prolite" | "plus" | "team" | "free"
   >("all");
@@ -748,6 +751,7 @@ export default function Accounts() {
       lazyModeRef.current = settings.lazy_mode;
     }
     setAllGroups(groupsResponse.groups ?? []);
+    setLastPageRefreshAt(new Date());
     return {
       accounts: accountsResponse.accounts ?? [],
       apiKeys: apiKeysResponse.keys ?? [],
@@ -775,6 +779,11 @@ export default function Accounts() {
   const opsOverview = data.opsOverview;
   const lazyMode = data.lazyMode;
   const usageReloadAttemptsRef = useRef<Map<number, number>>(new Map());
+  const lastPageRefreshLabel = lastPageRefreshAt
+    ? formatPageRefreshTime(lastPageRefreshAt)
+    : "--:--:--";
+
+  useVisiblePolling(() => reloadSilently(), ACCOUNTS_VISIBLE_REFRESH_INTERVAL_MS);
 
   useEffect(() => {
     persistAnalysisVisibility(showAnalysisCharts);
@@ -2491,6 +2500,9 @@ export default function Accounts() {
             title={t("accounts.title")}
             description={t("accounts.description")}
             onRefresh={() => void reload()}
+            actionMeta={t("accounts.pageRefreshedAt", {
+              time: lastPageRefreshLabel,
+            })}
             actions={
               <div className="flex flex-wrap items-center justify-end gap-1.5">
                 <Button
@@ -6106,6 +6118,15 @@ function getPreviewHealthTier(
 ): string | undefined {
   if (skipWarmTier && account.health_tier === "warm") return "healthy";
   return account.health_tier;
+}
+
+function formatPageRefreshTime(date: Date): string {
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
 }
 
 function computePreviewDynamicConcurrency(

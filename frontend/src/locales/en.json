@@ -282,6 +282,7 @@
   "accounts": {
     "title": "Accounts",
     "description": "Manage Codex proxy accounts (Refresh Tokens)",
+    "pageRefreshedAt": "Page refresh: {{time}}",
     "loadingTitle": "Loading Accounts",
     "loadingDesc": "Syncing the account pool and live status.",
     "errorTitle": "Failed to load accounts",

@@ -1,5 +1,14 @@
 # 最新接续状态 (2026-05-31 13:25)
 
+## 账号池状态刷新口径取证 (2026-05-31)
+- 管理台账号页状态来自 `/api/admin/accounts`，后端在 `admin/handler.go` 的 `ListAccounts` 合并内存账号后用 `acc.RuntimeStatus()` 覆盖 DB 状态；前端 `Accounts.tsx` 只按接口返回做统计和筛选。
+- `封禁` 对应运行态 `unauthorized`，不是 DB 原始状态；`auth/store.go` 的 `RuntimeStatus()` 在 `health_tier=banned` 时直接返回 `unauthorized`。
+- `可用` 计数来自 `Store.AvailableCount()`，只统计当前可调度账号；表格筛选里的“正常/可用”主要看 `status=active|ready` 且非限流、非错误、非禁用。
+- 状态变更触发点：真实请求/测试连接遇到上游 401 会进入 unauthorized/banned，429 会进入限流冷却，402/非停用 403 会进入 payment_required；成功请求只更新调度评分，手动测试成功或恢复探针成功才会清错误/封禁并降回 warm/ready。
+- 后台刷新周期到点会执行 token 刷新、用量探针、恢复探针；恢复探针默认按系统设置 `recovery_probe_interval_minutes` 控制，默认值 30 分钟，惰性模式会暂停主动探针。
+- 前端账号页初次加载会拉一次账号列表；只有存在 `refreshing` 状态时才每 2 秒静默刷新。其他状态变化需要页面手动刷新、操作后 reload，或重新进入页面才能看到。
+- 已给账号页接入现有 `useVisiblePolling`：页面可见/聚焦时每 15 秒静默刷新账号列表与运营概览，只读调用 `/api/admin/accounts`、`/api/admin/ops/overview`、`/api/admin/account-groups`，不触发测试连接或上游探测；页面隐藏时暂停，恢复可见时立即刷新一次。页头文案使用“页面刷新：HH:mm:ss”，避免和表格列“更新时间”（账号记录/用量更新时间）语义冲突。
+
 ## 当前阶段：payment_required 额度受限闭环
 - 本轮已把上游 `402 Payment Required` / 非停用工作区 `403 Forbidden` 统一沉淀为账号运行态 `payment_required`，避免额度不足被误归成普通限流或只停留在探针日志里。
 - 修复点：`proxy/handler.go` 新增 `ApplyUpstreamAccountFailure` 作为上游账号失败状态唯一写入口，统一处理 `429`、`401`、`402`、`403`；错误消息会带上上游 `error/detail/code`，便于页面和日志定位。

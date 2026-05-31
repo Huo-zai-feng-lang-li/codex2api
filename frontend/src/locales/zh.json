@@ -282,6 +282,7 @@
   "accounts": {
     "title": "账号管理",
     "description": "管理 Codex 反代账号（Refresh Token）",
+    "pageRefreshedAt": "页面刷新：{{time}}",
     "loadingTitle": "正在加载账号",
     "loadingDesc": "账号池和实时状态正在同步。",
     "errorTitle": "账号页加载失败",
