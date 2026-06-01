@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -64,4 +65,18 @@ func firstTokenTimeoutOutcome(timeout time.Duration) streamOutcome {
 
 func firstTokenTimeoutError(timeout time.Duration) error {
 	return ErrUpstreamTimeout(fmt.Errorf("first token timeout after %s", timeout.Round(time.Millisecond)))
+}
+
+func firstTokenTimeoutForReasoningEffort(reasoningEffort string) time.Duration {
+	base := currentFirstTokenTimeout()
+	if base <= 0 {
+		return 0
+	}
+	switch strings.ToLower(strings.TrimSpace(reasoningEffort)) {
+	case "high", "xhigh":
+		if base < 15*time.Second {
+			return 15 * time.Second
+		}
+	}
+	return base
 }

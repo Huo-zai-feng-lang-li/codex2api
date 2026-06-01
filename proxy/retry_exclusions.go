@@ -3,14 +3,18 @@ package proxy
 import (
 	"context"
 	"log"
+	"math"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/codex2api/auth"
 )
 
 type retryAccountExclusions struct {
-	hard map[int64]bool
-	soft map[int64]bool
+	hard               map[int64]bool
+	soft               map[int64]bool
+	firstTokenTimeouts int
 }
 
 func newRetryAccountExclusions() *retryAccountExclusions {
@@ -28,14 +32,19 @@ func (r *retryAccountExclusions) MarkHard(accountID int64) {
 	delete(r.soft, accountID)
 }
 
-func (r *retryAccountExclusions) MarkSoftFirstTokenTimeout(accountID int64) {
+func (r *retryAccountExclusions) MarkSoftFirstTokenTimeout(accountID int64) bool {
 	if r == nil || accountID == 0 {
-		return
+		return false
+	}
+	if r.firstTokenTimeouts >= maxFirstTokenTimeoutAccountAttempts() {
+		return false
 	}
 	if r.hard[accountID] {
-		return
+		return false
 	}
 	r.soft[accountID] = true
+	r.firstTokenTimeouts++
+	return true
 }
 
 func (r *retryAccountExclusions) ResetSoft() bool {
@@ -60,22 +69,71 @@ func (r *retryAccountExclusions) ForSelection() map[int64]bool {
 	return exclude
 }
 
+func (r *retryAccountExclusions) ShouldResetSoftForPool(poolTotal int) bool {
+	if r == nil || poolTotal > 2 || poolTotal <= 0 {
+		return false
+	}
+	return len(r.soft) >= poolTotal
+}
+
+func (r *retryAccountExclusions) FirstTokenTimeoutAttempts() int {
+	if r == nil {
+		return 0
+	}
+	return r.firstTokenTimeouts
+}
+
+func maxFirstTokenTimeoutAccountAttempts() int {
+	return 1
+}
+
+type retryAccountPick struct {
+	account      *auth.Account
+	proxyURL     string
+	poolSnapshot auth.DispatchPoolSnapshot
+	queueWait    time.Duration
+	queueFull    bool
+}
+
+func (p retryAccountPick) QueueWaitMs() int64 {
+	return int64(math.Round(float64(p.queueWait.Milliseconds())))
+}
+
 func (h *Handler) nextRetryAccountForSession(ctx context.Context, affinityKey string, apiKeyID int64, exclusions *retryAccountExclusions, filter auth.AccountFilter) (*auth.Account, string) {
+	pick := h.nextRetryAccountPickForSession(ctx, affinityKey, apiKeyID, exclusions, filter)
+	return pick.account, pick.proxyURL
+}
+
+func (h *Handler) nextRetryAccountPickForSession(ctx context.Context, affinityKey string, apiKeyID int64, exclusions *retryAccountExclusions, filter auth.AccountFilter) retryAccountPick {
 	if h == nil || h.store == nil {
-		return nil, ""
+		return retryAccountPick{}
 	}
 	for {
 		exclude := exclusions.ForSelection()
+		snapshot := h.store.DispatchPoolSnapshotWithFilter(apiKeyID, exclude, filter)
+		if exclusions.ShouldResetSoftForPool(snapshot.Total) {
+			exclusions.ResetSoft()
+			exclude = exclusions.ForSelection()
+			snapshot = h.store.DispatchPoolSnapshotWithFilter(apiKeyID, exclude, filter)
+			log.Printf("小账号池首字超时软排除已试完，清空本次请求软排除: pool_total=%d pool_excluded=%d", snapshot.Total, snapshot.Excluded)
+		}
 		account, stickyProxyURL := h.nextAccountForSessionWithFilter(affinityKey, apiKeyID, exclude, filter)
 		if account != nil {
-			return account, stickyProxyURL
+			return retryAccountPick{account: account, proxyURL: stickyProxyURL, poolSnapshot: snapshot}
 		}
+		releaseQueue, ok := h.store.TryEnterDispatchQueue(snapshot.Total)
+		if !ok {
+			return retryAccountPick{poolSnapshot: snapshot, queueFull: true}
+		}
+		waitStart := time.Now()
 		account, stickyProxyURL = h.store.WaitForSessionAvailableWithFilter(ctx, affinityKey, 30*time.Second, apiKeyID, exclude, filter)
+		queueWait := time.Since(waitStart)
+		releaseQueue()
 		if account != nil {
-			return account, stickyProxyURL
+			return retryAccountPick{account: account, proxyURL: stickyProxyURL, poolSnapshot: snapshot, queueWait: queueWait}
 		}
 		if !exclusions.ResetSoft() {
-			return nil, ""
+			return retryAccountPick{poolSnapshot: snapshot, queueWait: queueWait}
 		}
 		log.Printf("首字超时账号池已试完，清空本次请求软排除并进入下一轮重试")
 	}
@@ -83,4 +141,17 @@ func (h *Handler) nextRetryAccountForSession(ctx context.Context, affinityKey st
 
 func isFirstTokenTimeoutOutcome(outcome streamOutcome) bool {
 	return outcome.failureKind == "timeout"
+}
+
+func websocketFallbackHTTPEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CODEX_WS_FALLBACK_HTTP"))) {
+	case "0", "false", "no", "n", "off":
+		return false
+	default:
+		return true
+	}
+}
+
+func isWebsocketMissingTerminalOutcome(outcome streamOutcome) bool {
+	return outcome.failureKind == "websocket_missing_terminal"
 }

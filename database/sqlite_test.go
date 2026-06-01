@@ -599,7 +599,7 @@ func TestSQLiteUsageStatsBaselineHasBillingColumns(t *testing.T) {
 	}
 }
 
-func TestSQLiteSystemSettingsPersistsFirstTokenTimeoutSeconds(t *testing.T) {
+func TestSQLiteSystemSettingsPersistsRuntimeQueueSettings(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
 
 	db, err := New("sqlite", dbPath)
@@ -639,6 +639,7 @@ func TestSQLiteSystemSettingsPersistsFirstTokenTimeoutSeconds(t *testing.T) {
 		StreamFlushPolicy:                "immediate",
 		StreamFlushIntervalMS:            20,
 		FirstTokenTimeoutSeconds:         17,
+		DispatchQueueLimit:               12,
 		ImageStorageConfig:               "{}",
 		SchedulerMode:                    "round_robin",
 		AffinityMode:                     "bounded",
@@ -657,6 +658,9 @@ func TestSQLiteSystemSettingsPersistsFirstTokenTimeoutSeconds(t *testing.T) {
 	}
 	if settings.FirstTokenTimeoutSeconds != 17 {
 		t.Fatalf("FirstTokenTimeoutSeconds = %d, want 17", settings.FirstTokenTimeoutSeconds)
+	}
+	if settings.DispatchQueueLimit != 12 {
+		t.Fatalf("DispatchQueueLimit = %d, want 12", settings.DispatchQueueLimit)
 	}
 	if !settings.ShowFullUsageNumbers {
 		t.Fatal("ShowFullUsageNumbers = false, want true")

@@ -417,6 +417,10 @@ func (m *Manager) createConnection(
 	dialer := &websocket.Dialer{
 		HandshakeTimeout:  m.dialer.HandshakeTimeout,
 		EnableCompression: m.dialer.EnableCompression,
+		NetDialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
 	}
 
 	// 配置代理（Resin 反代模式下跳过，URL 已包含 Resin 地址）

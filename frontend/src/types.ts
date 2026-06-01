@@ -566,6 +566,7 @@ export interface SystemSettings {
   affinity_mode?: string
   max_retries: number
   max_rate_limit_retries: number
+  dispatch_queue_limit: number
   allow_remote_migration: boolean
   database_driver: string
   database_label: string

@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -179,6 +180,7 @@ func TestResponsesWebSocketForwardsResponsesEvents(t *testing.T) {
 	t.Cleanup(func() {
 		WebsocketExecuteFunc = previousExec
 	})
+	t.Setenv("CODEX_WS_FALLBACK_HTTP", "false")
 
 	bodyCh := make(chan []byte, 2)
 	WebsocketExecuteFunc = func(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header) (*http.Response, error) {
@@ -332,6 +334,170 @@ func TestResponsesWebSocketRetriesBeforeFirstTokenWithoutClientError(t *testing.
 	}
 }
 
+func TestResponsesWebSocketFallsBackToHTTPAfterUpstreamWebsocketMissingTerminal(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	previousExec := WebsocketExecuteFunc
+	t.Cleanup(func() {
+		WebsocketExecuteFunc = previousExec
+	})
+
+	var attempts int
+	WebsocketExecuteFunc = func(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header) (*http.Response, error) {
+		attempts++
+		if attempts != 1 {
+			t.Fatalf("WebsocketExecuteFunc called after fallback, attempt=%d", attempts)
+		}
+		sse := `data: {"type":"response.created","response":{"id":"resp_retry"}}` + "\n\n"
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       &errorAfterReader{Reader: strings.NewReader(sse), err: errors.New("stream disconnected before completion: websocket closed by server before response.completed")},
+		}, nil
+	}
+
+	var httpCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		httpCalls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(
+			`data: {"type":"response.output_text.delta","delta":"ok"}` + "\n\n" +
+				`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"service_tier":"default"}}` + "\n\n",
+		))
+	}))
+	defer upstream.Close()
+
+	SetResinConfig(&ResinConfig{BaseURL: upstream.URL, PlatformName: "codex2api"})
+	t.Cleanup(func() { SetResinConfig(nil) })
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4", MaxRetries: 2})
+	store.AddAccount(&auth.Account{DBID: 1, AccessToken: "at", PlanType: "plus", AccountID: "acct-1"})
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true, UseWebsocket: true}, nil)
+
+	router := gin.New()
+	handler.RegisterRoutes(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		if resp != nil {
+			t.Fatalf("dial websocket failed: %v status=%d", err, resp.StatusCode)
+		}
+		t.Fatalf("dial websocket failed: %v", err)
+	}
+	defer conn.Close()
+
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"model":"gpt-5.4","input":"hello"}`)); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, first, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read first downstream event: %v", err)
+	}
+	if eventType := gjson.GetBytes(first, "type").String(); eventType != "response.output_text.delta" {
+		t.Fatalf("first downstream event = %q body=%s, want fallback delta", eventType, first)
+	}
+	_, second, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read terminal event: %v", err)
+	}
+	if eventType := gjson.GetBytes(second, "type").String(); eventType != "response.completed" {
+		t.Fatalf("terminal event type = %q body=%s", eventType, second)
+	}
+	if attempts != 1 {
+		t.Fatalf("websocket attempts = %d, want 1", attempts)
+	}
+	if httpCalls.Load() != 1 {
+		t.Fatalf("http fallback calls = %d, want 1", httpCalls.Load())
+	}
+}
+
+func TestResponsesWebSocketFallbackToHTTPIgnoresMaxRetriesBudget(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	previousExec := WebsocketExecuteFunc
+	t.Cleanup(func() {
+		WebsocketExecuteFunc = previousExec
+	})
+
+	var attempts int
+	WebsocketExecuteFunc = func(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header) (*http.Response, error) {
+		attempts++
+		if attempts != 1 {
+			t.Fatalf("WebsocketExecuteFunc called after fallback, attempt=%d", attempts)
+		}
+		sse := `data: {"type":"response.created","response":{"id":"resp_retry"}}` + "\n\n"
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       &errorAfterReader{Reader: strings.NewReader(sse), err: errors.New("stream disconnected before completion: websocket closed by server before response.completed")},
+		}, nil
+	}
+
+	var httpCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		httpCalls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(
+			`data: {"type":"response.output_text.delta","delta":"ok"}` + "\n\n" +
+				`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"service_tier":"default"}}` + "\n\n",
+		))
+	}))
+	defer upstream.Close()
+
+	SetResinConfig(&ResinConfig{BaseURL: upstream.URL, PlatformName: "codex2api"})
+	t.Cleanup(func() { SetResinConfig(nil) })
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4", MaxRetries: 0})
+	store.AddAccount(&auth.Account{DBID: 1, AccessToken: "at", PlanType: "plus", AccountID: "acct-1"})
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true, UseWebsocket: true}, nil)
+
+	router := gin.New()
+	handler.RegisterRoutes(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		if resp != nil {
+			t.Fatalf("dial websocket failed: %v status=%d", err, resp.StatusCode)
+		}
+		t.Fatalf("dial websocket failed: %v", err)
+	}
+	defer conn.Close()
+
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"model":"gpt-5.4","input":"hello"}`)); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, first, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read first downstream event: %v", err)
+	}
+	if eventType := gjson.GetBytes(first, "type").String(); eventType != "response.output_text.delta" {
+		t.Fatalf("first downstream event = %q body=%s, want fallback delta", eventType, first)
+	}
+	_, second, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read terminal event: %v", err)
+	}
+	if eventType := gjson.GetBytes(second, "type").String(); eventType != "response.completed" {
+		t.Fatalf("terminal event type = %q body=%s", eventType, second)
+	}
+	if attempts != 1 {
+		t.Fatalf("websocket attempts = %d, want 1", attempts)
+	}
+	if httpCalls.Load() != 1 {
+		t.Fatalf("http fallback calls = %d, want 1", httpCalls.Load())
+	}
+}
+
 func TestResponsesWebSocketSendsResponseFailedWhenStreamBreaksAfterFirstToken(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -444,6 +610,340 @@ func TestResponsesStreamSendsResponseFailedWhenStreamBreaksAfterFirstToken(t *te
 	}
 }
 
+func TestOpenAIResponsesStreamSingleAccountDoesNotApplyFirstTokenTimeout(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var upstreamCalls int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&upstreamCalls, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"type":"response.created","response":{"id":"resp_timeout"}}` + "\n\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		time.Sleep(1200 * time.Millisecond)
+		_, _ = w.Write([]byte(`data: {"type":"response.output_text.delta","delta":"real"}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"service_tier":"default"}}` + "\n\n"))
+	}))
+	defer upstream.Close()
+
+	settings := &database.SystemSettings{
+		MaxConcurrency:           2,
+		TestConcurrency:          1,
+		TestModel:                "gpt-5.4",
+		MaxRetries:               2,
+		FirstTokenTimeoutSeconds: 1,
+	}
+	store := auth.NewStore(nil, nil, settings)
+	store.AddAccount(&auth.Account{
+		DBID:         1,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      upstream.URL,
+		APIKey:       "sk-test",
+		Models:       []string{"gpt-5.4"},
+	})
+	previousSettings := CurrentRuntimeSettings()
+	ApplyRuntimeSettings(RuntimeSettings{FirstTokenTimeoutSec: 1})
+	t.Cleanup(func() { ApplyRuntimeSettings(previousSettings) })
+
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+	router := gin.New()
+	handler.RegisterRoutes(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	reqBody := strings.NewReader(`{"model":"gpt-5.4","input":"hello","stream":true}`)
+	resp, err := http.Post(server.URL+"/v1/responses", "application/json", reqBody)
+	if err != nil {
+		t.Fatalf("post responses: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+	if calls := atomic.LoadInt32(&upstreamCalls); calls != 1 {
+		t.Fatalf("upstream calls = %d, want 1; body=%s", calls, body)
+	}
+	if !strings.Contains(string(body), `"type":"response.output_text.delta"`) {
+		t.Fatalf("delta event missing: %s", body)
+	}
+	if !strings.Contains(string(body), `"type":"response.completed"`) {
+		t.Fatalf("completed event missing: %s", body)
+	}
+	if strings.Contains(string(body), `"type":"response.failed"`) || strings.Contains(string(body), "上游首字超时") {
+		t.Fatalf("single account should not expose first-token timeout: %s", body)
+	}
+}
+
+func TestOpenAIResponsesStreamClientCancelDoesNotRetryAsNoAvailableAccount(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var upstreamCalls int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&upstreamCalls, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		time.Sleep(6 * time.Second)
+	}))
+	defer upstream.Close()
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency:  1,
+		TestConcurrency: 1,
+		TestModel:       "gpt-5.4",
+		MaxRetries:      2,
+	})
+	store.AddAccount(&auth.Account{
+		DBID:         1,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      upstream.URL,
+		APIKey:       "sk-test",
+		Models:       []string{"gpt-5.4"},
+	})
+
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+	router := gin.New()
+	handler.RegisterRoutes(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/v1/responses", strings.NewReader(`{"model":"gpt-5.4","input":"hello","stream":true}`))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err == nil {
+		resp.Body.Close()
+		t.Fatalf("client request unexpectedly completed with status %d", resp.StatusCode)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	if calls := atomic.LoadInt32(&upstreamCalls); calls != 1 {
+		t.Fatalf("upstream calls = %d, want 1; client cancellation must not retry into no_available_account", calls)
+	}
+}
+
+func TestOpenAIResponsesStreamFirstTokenTimeoutSwitchesOnlyOnceThenWaitsSecondAccount(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var upstreamCalls int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := atomic.AddInt32(&upstreamCalls, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"type":"response.created","response":{"id":"resp_timeout"}}` + "\n\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		if call == 2 {
+			time.Sleep(1200 * time.Millisecond)
+			_, _ = w.Write([]byte(`data: {"type":"response.output_text.delta","delta":"late second account"}` + "\n\n"))
+			_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3},"service_tier":"default"}}` + "\n\n"))
+			return
+		}
+		time.Sleep(1500 * time.Millisecond)
+	}))
+	defer upstream.Close()
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency:           1,
+		TestConcurrency:          1,
+		TestModel:                "gpt-5.4",
+		MaxRetries:               5,
+		FirstTokenTimeoutSeconds: 1,
+	})
+	store.AddAccount(&auth.Account{
+		DBID:         1,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      upstream.URL,
+		APIKey:       "sk-test-1",
+		Models:       []string{"gpt-5.4"},
+	})
+	store.AddAccount(&auth.Account{
+		DBID:         2,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      upstream.URL,
+		APIKey:       "sk-test-2",
+		Models:       []string{"gpt-5.4"},
+	})
+	previousSettings := CurrentRuntimeSettings()
+	ApplyRuntimeSettings(RuntimeSettings{FirstTokenTimeoutSec: 1})
+	t.Cleanup(func() { ApplyRuntimeSettings(previousSettings) })
+
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+	router := gin.New()
+	handler.RegisterRoutes(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	reqBody := strings.NewReader(`{"model":"gpt-5.4","input":"hello","stream":true}`)
+	resp, err := http.Post(server.URL+"/v1/responses", "application/json", reqBody)
+	if err != nil {
+		t.Fatalf("post responses: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+	if calls := atomic.LoadInt32(&upstreamCalls); calls != 2 {
+		t.Fatalf("upstream calls = %d, want 2; body=%s", calls, body)
+	}
+	if !strings.Contains(string(body), `"type":"response.output_text.delta"`) || !strings.Contains(string(body), `"type":"response.completed"`) {
+		t.Fatalf("second slow account should continue instead of failing: %s", body)
+	}
+}
+
+func TestOpenAIResponsesStreamFirstTokenSwitchUsesSecondSlowAccountInsteadOfRetryingAgain(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var upstreamCalls int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := atomic.AddInt32(&upstreamCalls, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
+		switch authHeader {
+		case "Bearer 1":
+			_, _ = w.Write([]byte(`data: {"type":"response.created","response":{"id":"resp_slow_1"}}` + "\n\n"))
+		case "Bearer 2":
+			_, _ = w.Write([]byte(`data: {"type":"response.created","response":{"id":"resp_slow_2"}}` + "\n\n"))
+		default:
+			t.Fatalf("unexpected Authorization %q", authHeader)
+		}
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		if call == 1 {
+			time.Sleep(1500 * time.Millisecond)
+			return
+		}
+		time.Sleep(1200 * time.Millisecond)
+		_, _ = w.Write([]byte(`data: {"type":"response.output_text.delta","delta":"late but valid"}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3},"service_tier":"default"}}` + "\n\n"))
+	}))
+	defer upstream.Close()
+
+	settings := &database.SystemSettings{
+		MaxConcurrency:           1,
+		TestConcurrency:          1,
+		TestModel:                "gpt-5.4",
+		MaxRetries:               5,
+		FirstTokenTimeoutSeconds: 1,
+	}
+	store := auth.NewStore(nil, nil, settings)
+	store.AddAccount(&auth.Account{
+		DBID:         1,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      upstream.URL,
+		APIKey:       "1",
+		Models:       []string{"gpt-5.4"},
+	})
+	store.AddAccount(&auth.Account{
+		DBID:         2,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      upstream.URL,
+		APIKey:       "2",
+		Models:       []string{"gpt-5.4"},
+	})
+	previousSettings := CurrentRuntimeSettings()
+	ApplyRuntimeSettings(RuntimeSettings{FirstTokenTimeoutSec: 1})
+	t.Cleanup(func() { ApplyRuntimeSettings(previousSettings) })
+
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+	router := gin.New()
+	handler.RegisterRoutes(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	reqBody := strings.NewReader(`{"model":"gpt-5.4","input":"hello","stream":true}`)
+	resp, err := http.Post(server.URL+"/v1/responses", "application/json", reqBody)
+	if err != nil {
+		t.Fatalf("post responses: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+	if strings.Contains(string(body), "无可用账号") {
+		t.Fatalf("slow-account fallback should not emit no_available_account: %s", body)
+	}
+	if !strings.Contains(string(body), `"type":"response.output_text.delta"`) || !strings.Contains(string(body), `"type":"response.completed"`) {
+		t.Fatalf("slow-account fallback should complete successfully: %s", body)
+	}
+	if calls := atomic.LoadInt32(&upstreamCalls); calls != 2 {
+		t.Fatalf("upstream calls = %d, want exactly 2 because slow path should switch once only", calls)
+	}
+}
+
+func TestResponsesWebSocketSendsResponseFailedWhenRetriesExhaustBeforeFirstMessage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	previousExec := WebsocketExecuteFunc
+	t.Cleanup(func() {
+		WebsocketExecuteFunc = previousExec
+	})
+
+	WebsocketExecuteFunc = func(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header) (*http.Response, error) {
+		sse := `data: {"type":"response.created","response":{"id":"resp_retry"}}` + "\n\n"
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       &errorAfterReader{Reader: strings.NewReader(sse), err: errors.New("stream disconnected before completion: websocket closed by server before response.completed")},
+		}, nil
+	}
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4", MaxRetries: 0})
+	store.SetMaxRetries(0)
+	store.AddAccount(&auth.Account{DBID: 1, AccessToken: "at", PlanType: "plus", AccountID: "acct-1"})
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true, UseWebsocket: true}, nil)
+
+	router := gin.New()
+	handler.RegisterRoutes(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		if resp != nil {
+			t.Fatalf("dial websocket failed: %v status=%d", err, resp.StatusCode)
+		}
+		t.Fatalf("dial websocket failed: %v", err)
+	}
+	defer conn.Close()
+
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"model":"gpt-5.4","input":"hello"}`)); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, terminal, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read terminal failure event: %v", err)
+	}
+	if eventType := gjson.GetBytes(terminal, "type").String(); eventType != "response.failed" {
+		t.Fatalf("terminal event type = %q body=%s, want response.failed", eventType, terminal)
+	}
+	if message := gjson.GetBytes(terminal, "response.error.message").String(); !strings.Contains(message, "before response.completed") {
+		t.Fatalf("terminal error message = %q body=%s", message, terminal)
+	}
+}
+
 func TestResponsesWebSocketRetriesResponseFailedBeforeFirstToken(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -514,6 +1014,236 @@ func TestResponsesWebSocketRetriesResponseFailedBeforeFirstToken(t *testing.T) {
 	}
 	if attempts != 2 {
 		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
+func TestResponsesWebSocketRetriesNoAvailableAccountBeforeFirstToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	previousExec := WebsocketExecuteFunc
+	t.Cleanup(func() {
+		WebsocketExecuteFunc = previousExec
+	})
+
+	var attempts int
+	WebsocketExecuteFunc = func(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header) (*http.Response, error) {
+		attempts++
+		if attempts == 1 {
+			sse := `data: {"type":"response.failed","response":{"status_code":503,"error":{"code":"no_available_account","message":"无可用账号，请稍后重试"}}}` + "\n\n"
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(sse)),
+			}, nil
+		}
+		sse := "" +
+			`data: {"type":"response.output_text.delta","delta":"ok"}` + "\n\n" +
+			`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"service_tier":"default"}}` + "\n\n"
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(sse)),
+		}, nil
+	}
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4", MaxRetries: 2})
+	store.AddAccount(&auth.Account{DBID: 1, AccessToken: "first", PlanType: "plus", AccountID: "acct-1"})
+	store.AddAccount(&auth.Account{DBID: 2, AccessToken: "second", PlanType: "plus", AccountID: "acct-2"})
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+
+	router := gin.New()
+	handler.RegisterRoutes(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		if resp != nil {
+			t.Fatalf("dial websocket failed: %v status=%d", err, resp.StatusCode)
+		}
+		t.Fatalf("dial websocket failed: %v", err)
+	}
+	defer conn.Close()
+
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"model":"gpt-5.4","input":"hello"}`)); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, first, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read first downstream event: %v", err)
+	}
+	if eventType := gjson.GetBytes(first, "type").String(); eventType != "response.output_text.delta" {
+		t.Fatalf("first downstream event = %q body=%s, want retry result delta", eventType, first)
+	}
+	_, second, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read terminal event: %v", err)
+	}
+	if eventType := gjson.GetBytes(second, "type").String(); eventType != "response.completed" {
+		t.Fatalf("terminal event type = %q body=%s", eventType, second)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
+func TestResponsesWebSocketRetriesWrappedNoAvailableAccountStreamBreak(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	previousExec := WebsocketExecuteFunc
+	t.Cleanup(func() {
+		WebsocketExecuteFunc = previousExec
+	})
+
+	var attempts int
+	WebsocketExecuteFunc = func(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header) (*http.Response, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, errors.New("stream disconnected before completion: 无可用账号，请稍后重试")
+		}
+		sse := "" +
+			`data: {"type":"response.output_text.delta","delta":"ok"}` + "\n\n" +
+			`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"service_tier":"default"}}` + "\n\n"
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(sse)),
+		}, nil
+	}
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4", MaxRetries: 2})
+	store.AddAccount(&auth.Account{DBID: 1, AccessToken: "first", PlanType: "plus", AccountID: "acct-1"})
+	store.AddAccount(&auth.Account{DBID: 2, AccessToken: "second", PlanType: "plus", AccountID: "acct-2"})
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+
+	router := gin.New()
+	handler.RegisterRoutes(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		if resp != nil {
+			t.Fatalf("dial websocket failed: %v status=%d", err, resp.StatusCode)
+		}
+		t.Fatalf("dial websocket failed: %v", err)
+	}
+	defer conn.Close()
+
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"model":"gpt-5.4","input":"hello"}`)); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, first, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read first downstream event: %v", err)
+	}
+	if body := string(first); strings.Contains(body, "无可用账号") || strings.Contains(body, "no_available_account") {
+		t.Fatalf("wrapped no_available_account leaked downstream: %s", body)
+	}
+	if eventType := gjson.GetBytes(first, "type").String(); eventType != "response.output_text.delta" {
+		t.Fatalf("first downstream event = %q body=%s, want retry result delta", eventType, first)
+	}
+	_, second, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read terminal event: %v", err)
+	}
+	if eventType := gjson.GetBytes(second, "type").String(); eventType != "response.completed" {
+		t.Fatalf("terminal event type = %q body=%s", eventType, second)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
+func TestResponsesWebSocketUsesDirectOpenAIResponsesAccount(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstreamRequests := make(chan []byte, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			t.Fatalf("upstream path = %q, want /v1/responses", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer upstream-key" {
+			t.Fatalf("upstream Authorization = %q, want Bearer upstream-key", got)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read upstream request body: %v", err)
+		}
+		upstreamRequests <- append([]byte(nil), body...)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(
+			`data: {"type":"response.output_text.delta","delta":"ok"}` + "\n\n" +
+				`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"service_tier":"default"}}` + "\n\n",
+		))
+	}))
+	defer upstream.Close()
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency: 2,
+		TestModel:      "gpt-5.4",
+		MaxRetries:     2,
+	})
+	store.AddAccount(&auth.Account{
+		DBID:         1,
+		Name:         "direct-openai-responses",
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      upstream.URL,
+		APIKey:       "upstream-key",
+		Models:       []string{"gpt-5.4"},
+	})
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+
+	router := gin.New()
+	handler.RegisterRoutes(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		if resp != nil {
+			t.Fatalf("dial websocket failed: %v status=%d", err, resp.StatusCode)
+		}
+		t.Fatalf("dial websocket failed: %v", err)
+	}
+	defer conn.Close()
+
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"model":"gpt-5.4","input":"hello"}`)); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, first, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read first downstream event: %v", err)
+	}
+	if eventType := gjson.GetBytes(first, "type").String(); eventType != "response.output_text.delta" {
+		t.Fatalf("first downstream event = %q body=%s", eventType, first)
+	}
+	_, second, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read terminal event: %v", err)
+	}
+	if eventType := gjson.GetBytes(second, "type").String(); eventType != "response.completed" {
+		t.Fatalf("terminal event type = %q body=%s", eventType, second)
+	}
+	select {
+	case body := <-upstreamRequests:
+		if model := gjson.GetBytes(body, "model").String(); model != "gpt-5.4" {
+			t.Fatalf("upstream model = %q, want gpt-5.4; body=%s", model, body)
+		}
+		if gjson.GetBytes(body, "type").Exists() {
+			t.Fatalf("direct OpenAI Responses body should not include websocket envelope type: %s", body)
+		}
+	default:
+		t.Fatal("direct OpenAI Responses account did not receive websocket turn")
 	}
 }
 
@@ -1184,6 +1914,188 @@ func TestResponsesRequestTriggersRecoveryProbeWhenNoDispatchableAccount(t *testi
 	}
 	if failureStreak != 0 {
 		t.Fatalf("FailureStreak = %d, want 0", failureStreak)
+	}
+}
+
+func TestResponsesRetriesWhenPickedAccountLacksDispatchCredential(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	previousExec := WebsocketExecuteFunc
+	t.Cleanup(func() {
+		WebsocketExecuteFunc = previousExec
+	})
+
+	var attempts int32
+	var staleAttempts int32
+	WebsocketExecuteFunc = nil
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency:  1,
+		TestConcurrency: 1,
+		TestModel:       "gpt-5.4",
+		MaxRetries:      1,
+	})
+	store.AddAccount(&auth.Account{
+		DBID:        1,
+		Name:        "stale-empty-token",
+		PlanType:    "plus",
+		AccountID:   "acct-1",
+		AccessToken: "stale-token",
+	})
+	store.AddAccount(&auth.Account{
+		DBID:        2,
+		Name:        "healthy-token",
+		PlanType:    "plus",
+		AccountID:   "acct-2",
+		AccessToken: "healthy-token",
+	})
+
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+	originalExecute := ExecuteRequest
+	ExecuteRequest = func(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header, useWebsocket ...bool) (*http.Response, error) {
+		atomic.AddInt32(&attempts, 1)
+		if account.ID() == 1 {
+			atomic.AddInt32(&staleAttempts, 1)
+			return nil, ErrNoAvailableAccount()
+		}
+		sse := "" +
+			`data: {"type":"response.output_text.delta","delta":"ok"}` + "\n\n" +
+			`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"service_tier":"default"}}` + "\n\n"
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(sse)),
+		}, nil
+	}
+	t.Cleanup(func() {
+		ExecuteRequest = originalExecute
+	})
+
+	router := gin.New()
+	handler.RegisterRoutes(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"gpt-5.4","input":"hello","stream":true}`))
+	if err != nil {
+		t.Fatalf("post responses: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+	if strings.Contains(string(body), "无可用账号") {
+		t.Fatalf("picked-account credential miss leaked no_available_account: %s", body)
+	}
+	if !strings.Contains(string(body), `"type":"response.completed"`) {
+		t.Fatalf("retry success events missing: %s", body)
+	}
+	if got := atomic.LoadInt32(&staleAttempts); got > 1 {
+		t.Fatalf("stale account attempts = %d, want at most 1", got)
+	}
+	if got := atomic.LoadInt32(&attempts); got < 1 || got > 2 {
+		t.Fatalf("attempts = %d, want 1 or 2 depending scheduler order", got)
+	}
+}
+
+func TestResponsesWebSocketRetriesWhenPickedAccountLacksDispatchCredential(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	t.Setenv("CODEX_WS_FALLBACK_HTTP", "false")
+
+	previousExec := WebsocketExecuteFunc
+	t.Cleanup(func() {
+		WebsocketExecuteFunc = previousExec
+	})
+	WebsocketExecuteFunc = nil
+
+	var attempts int32
+	var staleAttempts int32
+	originalExecute := ExecuteRequest
+	ExecuteRequest = func(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header, useWebsocket ...bool) (*http.Response, error) {
+		atomic.AddInt32(&attempts, 1)
+		if account.ID() == 1 {
+			atomic.AddInt32(&staleAttempts, 1)
+			return nil, ErrNoAvailableAccount()
+		}
+		sse := "" +
+			`data: {"type":"response.output_text.delta","delta":"ok"}` + "\n\n" +
+			`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"service_tier":"default"}}` + "\n\n"
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(sse)),
+		}, nil
+	}
+	t.Cleanup(func() {
+		ExecuteRequest = originalExecute
+	})
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency:  1,
+		TestConcurrency: 1,
+		TestModel:       "gpt-5.4",
+		MaxRetries:      1,
+	})
+	store.AddAccount(&auth.Account{
+		DBID:        1,
+		Name:        "stale-token",
+		PlanType:    "plus",
+		AccountID:   "acct-1",
+		AccessToken: "stale-token",
+	})
+	store.AddAccount(&auth.Account{
+		DBID:        2,
+		Name:        "healthy-token",
+		PlanType:    "plus",
+		AccountID:   "acct-2",
+		AccessToken: "healthy-token",
+	})
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true, CodexUpstreamTransport: "http"}, nil)
+
+	router := gin.New()
+	handler.RegisterRoutes(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		if resp != nil {
+			t.Fatalf("dial websocket failed: %v status=%d", err, resp.StatusCode)
+		}
+		t.Fatalf("dial websocket failed: %v", err)
+	}
+	defer conn.Close()
+
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"model":"gpt-5.4","input":"hello"}`)); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, first, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read first downstream event: %v", err)
+	}
+	if eventType := gjson.GetBytes(first, "type").String(); eventType != "response.output_text.delta" {
+		t.Fatalf("first downstream event = %q body=%s, want retry result delta", eventType, first)
+	}
+	_, second, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read terminal event: %v", err)
+	}
+	if eventType := gjson.GetBytes(second, "type").String(); eventType != "response.completed" {
+		t.Fatalf("terminal event type = %q body=%s", eventType, second)
+	}
+	if got := atomic.LoadInt32(&staleAttempts); got > 1 {
+		t.Fatalf("stale account attempts = %d, want at most 1", got)
+	}
+	if got := atomic.LoadInt32(&attempts); got < 1 || got > 2 {
+		t.Fatalf("attempts = %d, want 1 or 2 depending scheduler order", got)
 	}
 }
 

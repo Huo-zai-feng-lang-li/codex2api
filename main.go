@@ -98,7 +98,8 @@ func main() {
 			UsageLogFlushIntervalSeconds:     5,
 			StreamFlushPolicy:                proxy.StreamFlushPolicyImmediate,
 			StreamFlushIntervalMS:            20,
-			FirstTokenTimeoutSeconds:         0,
+			FirstTokenTimeoutSeconds:         15,
+			DispatchQueueLimit:               0,
 			ImageStorageConfig:               "{}",
 		}
 		_ = db.UpdateSystemSettings(context.Background(), settings)
@@ -132,12 +133,20 @@ func main() {
 			UsageLogFlushIntervalSeconds:     5,
 			StreamFlushPolicy:                proxy.StreamFlushPolicyImmediate,
 			StreamFlushIntervalMS:            20,
-			FirstTokenTimeoutSeconds:         0,
+			FirstTokenTimeoutSeconds:         15,
 			ImageStorageConfig:               "{}",
 		}
 	} else {
 		log.Printf("已加载持久化业务设置: ProxyURL=%s, MaxConcurrency=%d, GlobalRPM=%d, PgMaxConns=%d, RedisPoolSize=%d",
 			settings.ProxyURL, settings.MaxConcurrency, settings.GlobalRPM, settings.PgMaxConns, settings.RedisPoolSize)
+	}
+	if settings.FirstTokenTimeoutSeconds == 0 {
+		settings.FirstTokenTimeoutSeconds = 15
+		if err := db.UpdateSystemSettings(context.Background(), settings); err != nil {
+			log.Printf("警告: 升级首字超时默认值失败: %v", err)
+		} else {
+			log.Printf("已升级首字超时默认值: first_token_timeout_seconds=15")
+		}
 	}
 
 	// 4. 初始化缓存（使用数据库中保存的连接池大小）
@@ -179,7 +188,7 @@ func main() {
 	}
 	db.SetUsageLogConfig(settings.UsageLogMode, settings.UsageLogBatchSize, settings.UsageLogFlushIntervalSeconds)
 	runtimeSettings := proxy.ApplyRuntimeSettingsFromSystem(settings)
-	log.Printf("运行时优化配置: client_compat=%s min_cli=%s usage_log=%s batch=%d flush=%ds stream_flush=%s/%dms first_token_timeout=%ds",
+	log.Printf("运行时优化配置: client_compat=%s min_cli=%s usage_log=%s batch=%d flush=%ds stream_flush=%s/%dms first_token_timeout=%ds dispatch_queue_limit=%d",
 		runtimeSettings.ClientCompatMode,
 		runtimeSettings.CodexMinCLIVersion,
 		db.GetUsageLogMode(),
@@ -188,6 +197,7 @@ func main() {
 		runtimeSettings.StreamFlushPolicy,
 		runtimeSettings.StreamFlushIntervalMS,
 		runtimeSettings.FirstTokenTimeoutSec,
+		settings.DispatchQueueLimit,
 	)
 
 	// 4b'. 应用图片存储后端配置

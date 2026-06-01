@@ -22,7 +22,7 @@ const (
 	defaultStreamFlushIntervalMS = 20
 	minStreamFlushIntervalMS     = 1
 	maxStreamFlushIntervalMS     = 1000
-	defaultFirstTokenTimeoutSec  = 0
+	defaultFirstTokenTimeoutSec  = 15
 	maxFirstTokenTimeoutSec      = 600
 )
 

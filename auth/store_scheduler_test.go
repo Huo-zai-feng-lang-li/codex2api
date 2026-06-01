@@ -506,6 +506,79 @@ func TestWaitForSessionAvailableTriggersRecoveryProbeForOnlyErroredBannedAccount
 	}
 }
 
+func TestDispatchPoolSnapshotClassifiesBusyFilteredAndExcluded(t *testing.T) {
+	store := NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1})
+	busy := &Account{DBID: 1, AccessToken: "tok-1", Status: StatusReady}
+	filtered := &Account{DBID: 2, AccessToken: "tok-2", Status: StatusReady, PlanType: "free"}
+	excluded := &Account{DBID: 3, AccessToken: "tok-3", Status: StatusReady}
+	store.AddAccount(busy)
+	store.AddAccount(filtered)
+	store.AddAccount(excluded)
+	atomic.StoreInt64(&busy.ActiveRequests, 1)
+
+	snapshot := store.DispatchPoolSnapshotWithFilter(0, map[int64]bool{3: true}, func(acc *Account) bool {
+		return acc.PlanType != "free"
+	})
+
+	if snapshot.Total != 3 {
+		t.Fatalf("Total = %d, want 3", snapshot.Total)
+	}
+	if snapshot.Busy != 1 {
+		t.Fatalf("Busy = %d, want 1", snapshot.Busy)
+	}
+	if snapshot.Filtered != 1 {
+		t.Fatalf("Filtered = %d, want 1", snapshot.Filtered)
+	}
+	if snapshot.Excluded != 1 {
+		t.Fatalf("Excluded = %d, want 1", snapshot.Excluded)
+	}
+	if snapshot.Available != 0 {
+		t.Fatalf("Available = %d, want 0", snapshot.Available)
+	}
+}
+
+func TestDispatchQueueCapacityAppliesBackpressure(t *testing.T) {
+	store := NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1})
+	store.AddAccount(&Account{DBID: 1, AccessToken: "tok-1", Status: StatusReady})
+
+	for i := 0; i < 3; i++ {
+		release, ok := store.TryEnterDispatchQueue(1)
+		if !ok {
+			t.Fatalf("queue entrant %d rejected before capacity", i+1)
+		}
+		defer release()
+	}
+	release, ok := store.TryEnterDispatchQueue(1)
+	if ok {
+		release()
+		t.Fatal("fourth queue entrant should be rejected at capacity 3")
+	}
+}
+
+func TestDispatchQueueCapacityUsesConfiguredLimit(t *testing.T) {
+	store := NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency:     1,
+		DispatchQueueLimit: 2,
+	})
+	store.AddAccount(&Account{DBID: 1, AccessToken: "tok-1", Status: StatusReady})
+
+	firstRelease, ok := store.TryEnterDispatchQueue(10)
+	if !ok {
+		t.Fatal("first queue entrant rejected")
+	}
+	defer firstRelease()
+	secondRelease, ok := store.TryEnterDispatchQueue(10)
+	if !ok {
+		t.Fatal("second queue entrant rejected")
+	}
+	defer secondRelease()
+	release, ok := store.TryEnterDispatchQueue(10)
+	if ok {
+		release()
+		t.Fatal("third queue entrant should be rejected by configured limit 2")
+	}
+}
+
 func TestWaitForSessionAvailableTriggersRecoveryProbeForOpenAIResponsesAccount(t *testing.T) {
 	store := NewStore(nil, nil, &database.SystemSettings{
 		MaxConcurrency:               1,
@@ -759,5 +832,39 @@ func TestStoreNextPrefersPremium5hResetSoonWithinTier(t *testing.T) {
 
 	if got.DBID != soon.DBID {
 		t.Fatalf("Next() picked dbID=%d, want reset-soon account %d", got.DBID, soon.DBID)
+	}
+}
+
+func TestStoreNextPrefersLowerTTFTWithinHealthyTier(t *testing.T) {
+	fast := &Account{
+		DBID:        1,
+		AccessToken: "token",
+		Status:      StatusReady,
+		PlanType:    "plus",
+	}
+	slow := &Account{
+		DBID:        2,
+		AccessToken: "token",
+		Status:      StatusReady,
+		PlanType:    "plus",
+	}
+	atomic.StoreInt64(&fast.TotalRequests, 20)
+	atomic.StoreInt64(&slow.TotalRequests, 20)
+
+	store := &Store{
+		accounts: []*Account{slow, fast},
+	}
+	store.SetMaxConcurrency(1)
+	store.ReportRequestSuccessTTFT(fast, 800*time.Millisecond, 1200*time.Millisecond)
+	store.ReportRequestSuccessTTFT(slow, 9*time.Second, 10*time.Second)
+
+	got := store.Next()
+	if got == nil {
+		t.Fatal("Next() returned nil")
+	}
+	defer store.Release(got)
+
+	if got.DBID != fast.DBID {
+		t.Fatalf("Next() picked dbID=%d, want lower-TTFT account %d", got.DBID, fast.DBID)
 	}
 }

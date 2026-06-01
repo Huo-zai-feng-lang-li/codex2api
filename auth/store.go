@@ -84,6 +84,7 @@ type Account struct {
 	BaseConcurrencyEffective int64
 	DynamicConcurrencyLimit  int64
 	LatencyEWMA              float64
+	FirstTokenEWMA           float64
 	SuccessStreak            int
 	FailureStreak            int
 	LastSuccessAt            time.Time
@@ -563,6 +564,21 @@ func (a *Account) recordLatencyLocked(latency time.Duration) {
 	a.LatencyEWMA = a.LatencyEWMA*0.8 + latencyMs*0.2
 }
 
+func (a *Account) recordFirstTokenLocked(ttft time.Duration) {
+	if ttft <= 0 {
+		return
+	}
+	ttftMs := float64(ttft.Milliseconds())
+	if ttftMs <= 0 {
+		return
+	}
+	if a.FirstTokenEWMA == 0 {
+		a.FirstTokenEWMA = ttftMs
+		return
+	}
+	a.FirstTokenEWMA = a.FirstTokenEWMA*0.75 + ttftMs*0.25
+}
+
 // recordResultLocked 记录一次请求结果到滑动窗口（必须持有锁）
 func (a *Account) recordResultLocked(success bool) {
 	if success {
@@ -653,6 +669,12 @@ func (a *Account) schedulerBreakdownLocked(now time.Time) SchedulerBreakdown {
 	}
 
 	switch {
+	case a.FirstTokenEWMA >= 12000:
+		breakdown.LatencyPenalty = 18
+	case a.FirstTokenEWMA >= 8000:
+		breakdown.LatencyPenalty = 12
+	case a.FirstTokenEWMA >= 4000:
+		breakdown.LatencyPenalty = 6
 	case a.LatencyEWMA >= 20000:
 		breakdown.LatencyPenalty = 15
 	case a.LatencyEWMA >= 10000:
@@ -1567,6 +1589,17 @@ type Store struct {
 	activeRequestSeq     int64
 	activeRequestsMu     sync.RWMutex
 	activeRequests       map[int64]ActiveRequestMeta
+	dispatchQueueDepth   int64
+	dispatchQueueLimit   int64
+}
+
+// DispatchPoolSnapshot 描述一次请求过滤条件下账号池为什么不能立即调度。
+type DispatchPoolSnapshot struct {
+	Total     int
+	Available int
+	Busy      int
+	Filtered  int
+	Excluded  int
 }
 
 // ActiveRequestMeta 是单次上游请求的运行态元数据，只保留可展示的脱敏信息。
@@ -2069,6 +2102,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 		sessionBindings:         make(map[string]sessionAffinity),
 		activeRequests:          make(map[int64]ActiveRequestMeta),
 	}
+	s.SetDispatchQueueLimit(settings.DispatchQueueLimit)
 	s.testModel.Store(settings.TestModel)
 	s.SetBackgroundRefreshInterval(time.Duration(settings.BackgroundRefreshIntervalMinutes) * time.Minute)
 	s.SetUsageProbeMaxAge(time.Duration(settings.UsageProbeMaxAgeMinutes) * time.Minute)
@@ -3370,6 +3404,87 @@ func (s *Store) hasDispatchCandidateWithFilter(apiKeyID int64, exclude map[int64
 	return false
 }
 
+func defaultDispatchQueueLimit(candidateCount int) int64 {
+	limit := candidateCount * 3
+	if limit < 3 {
+		limit = 3
+	}
+	return int64(limit)
+}
+
+// TryEnterDispatchQueue applies lightweight local backpressure while accounts are busy.
+func (s *Store) TryEnterDispatchQueue(candidateCount int) (func(), bool) {
+	if s == nil {
+		return func() {}, true
+	}
+	limit := defaultDispatchQueueLimit(candidateCount)
+	if configured := atomic.LoadInt64(&s.dispatchQueueLimit); configured > 0 {
+		limit = configured
+	}
+	depth := atomic.AddInt64(&s.dispatchQueueDepth, 1)
+	if depth > limit {
+		atomic.AddInt64(&s.dispatchQueueDepth, -1)
+		return nil, false
+	}
+	var released atomic.Bool
+	return func() {
+		if released.CompareAndSwap(false, true) {
+			atomic.AddInt64(&s.dispatchQueueDepth, -1)
+		}
+	}, true
+}
+
+// DispatchPoolSnapshotWithFilter reports how the current request-level filter sees the pool.
+func (s *Store) DispatchPoolSnapshotWithFilter(apiKeyID int64, exclude map[int64]bool, filter AccountFilter) DispatchPoolSnapshot {
+	if s == nil {
+		return DispatchPoolSnapshot{}
+	}
+	maxConcurrency := atomic.LoadInt64(&s.maxConcurrency)
+	now := time.Now()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var snapshot DispatchPoolSnapshot
+	for _, acc := range s.accounts {
+		if acc == nil {
+			continue
+		}
+		if s.GetLazyMode() {
+			if !s.accountLazySelectable(acc) {
+				continue
+			}
+		} else if !acc.IsAvailable() {
+			continue
+		}
+		if s.accountHasCachedCooldown(acc) {
+			continue
+		}
+		if !s.accountAllowedForAPIKey(acc, apiKeyID) {
+			continue
+		}
+		snapshot.Total++
+		if exclude != nil && exclude[acc.DBID] {
+			snapshot.Excluded++
+			continue
+		}
+		if filter != nil && !filter(acc) {
+			snapshot.Filtered++
+			continue
+		}
+		_, _, limit, _, available := acc.fastSchedulerSnapshot(maxConcurrency, now)
+		if !available || limit <= 0 {
+			snapshot.Filtered++
+			continue
+		}
+		if atomic.LoadInt64(&acc.ActiveRequests) >= limit {
+			snapshot.Busy++
+			continue
+		}
+		snapshot.Available++
+	}
+	return snapshot
+}
+
 func (s *Store) recoveryProbeFuncConfigured() bool {
 	if s == nil {
 		return false
@@ -3519,6 +3634,20 @@ func (s *Store) SetMaxRateLimitRetries(n int) {
 
 func (s *Store) GetMaxRateLimitRetries() int {
 	return int(atomic.LoadInt64(&s.maxRateLimitRetries))
+}
+
+func (s *Store) SetDispatchQueueLimit(n int) {
+	if n < 0 {
+		n = 0
+	}
+	if n > 10000 {
+		n = 10000
+	}
+	atomic.StoreInt64(&s.dispatchQueueLimit, int64(n))
+}
+
+func (s *Store) GetDispatchQueueLimit() int {
+	return int(atomic.LoadInt64(&s.dispatchQueueLimit))
 }
 
 // GetAllowRemoteMigration 获取是否允许远程迁移
@@ -4255,11 +4384,17 @@ func (s *Store) RecordManualTestSuccess(acc *Account, latency time.Duration) {
 
 // ReportRequestSuccess 记录一次成功请求，用于动态调度评分
 func (s *Store) ReportRequestSuccess(acc *Account, latency time.Duration) {
+	s.ReportRequestSuccessTTFT(acc, 0, latency)
+}
+
+// ReportRequestSuccessTTFT 记录成功请求，并优先把首字耗时纳入调度评分。
+func (s *Store) ReportRequestSuccessTTFT(acc *Account, firstToken time.Duration, latency time.Duration) {
 	if acc == nil {
 		return
 	}
 
 	acc.mu.Lock()
+	acc.recordFirstTokenLocked(firstToken)
 	acc.recordLatencyLocked(latency)
 	acc.recordResultLocked(true)
 	acc.LastSuccessAt = time.Now()

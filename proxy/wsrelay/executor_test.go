@@ -51,8 +51,8 @@ func TestPrepareWebsocketHeadersUsesConfiguredDefaultsAndBetaFeatures(t *testing
 	if got := headers.Get("Chatgpt-Account-Id"); got != "42" {
 		t.Fatalf("Chatgpt-Account-Id = %q", got)
 	}
-	if got := headers.Get("Conversation_id"); got != "session-123" {
-		t.Fatalf("Conversation_id = %q", got)
+	if got := headers.Get("Conversation_id"); got != "" {
+		t.Fatalf("Conversation_id = %q, want empty", got)
 	}
 	if got := headers.Get("Session_id"); got != "session-123" {
 		t.Fatalf("Session_id = %q", got)
@@ -87,8 +87,8 @@ func TestPrepareWebsocketHeadersOmitsUserAgentByDefault(t *testing.T) {
 	if got := headers.Get("Session_id"); got != "session-123" {
 		t.Fatalf("Session_id = %q", got)
 	}
-	if got := headers.Get("Conversation_id"); got != "session-123" {
-		t.Fatalf("Conversation_id = %q", got)
+	if got := headers.Get("Conversation_id"); got != "" {
+		t.Fatalf("Conversation_id = %q, want empty", got)
 	}
 }
 

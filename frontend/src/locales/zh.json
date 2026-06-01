@@ -1381,6 +1381,8 @@
     "maxRetriesRange": "传输错误、5xx、401 后自动换号重试的次数（0~10），0 = 不重试",
     "maxRateLimitRetries": "429 换号重试次数",
     "maxRateLimitRetriesRange": "429 限流后最多换几个账号重试（0~10），0 = 直接返回限流",
+    "dispatchQueueLimit": "调度队列上限",
+    "dispatchQueueLimitRange": "0 = 自动（可调度账号数 × 3，最小 3）；大于 0 = 固定排队上限",
     "testModelLabel": "测试连接模型",
     "testModelHint": "账号测试连接时使用的模型",
     "testConcurrencyRange": "批量测试连接时的并发数（范围 1~200）",

@@ -210,6 +210,10 @@ func accountFilterForResponsesModel(model string, allowCodexAccounts bool) auth.
 	}
 }
 
+func shouldGuardFirstTokenTimeout(pool auth.DispatchPoolSnapshot) bool {
+	return pool.Total > 1
+}
+
 func modelIDInList(model string, models []string) bool {
 	model = strings.TrimSpace(model)
 	if model == "" {
@@ -626,6 +630,9 @@ func classifyTransportFailure(err error) string {
 	}
 
 	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "before response.completed") || strings.Contains(msg, "missing response.completed") {
+		return "websocket_missing_terminal"
+	}
 	if strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline exceeded") {
 		return "timeout"
 	}
@@ -761,6 +768,9 @@ func shouldTransparentRetryStream(outcome streamOutcome, attempt int, maxRetries
 		return false
 	}
 	if !outcome.penalize {
+		return false
+	}
+	if isWebsocketMissingTerminalOutcome(outcome) && !websocketFallbackHTTPEnabled() {
 		return false
 	}
 	if wroteAnyBody || ctxErr != nil || writeErr != nil {
@@ -1333,6 +1343,8 @@ func (h *Handler) Responses(c *gin.Context) {
 	// defer 兜底确保函数退出时上游被释放。
 	var lastUpstreamCancel context.CancelFunc
 	var activeEnd func()
+	forceHTTPFallback := false
+	attemptedUpstream := false
 	defer func() {
 		if activeEnd != nil {
 			activeEnd()
@@ -1347,8 +1359,23 @@ func (h *Handler) Responses(c *gin.Context) {
 			activeEnd()
 			activeEnd = nil
 		}
-		account, stickyProxyURL := h.nextRetryAccountForSession(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter)
+		pick := h.nextRetryAccountPickForSession(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter)
+		account, stickyProxyURL := pick.account, pick.proxyURL
 		if account == nil {
+			if attemptedUpstream && c.Request.Context().Err() != nil {
+				return
+			}
+			if pick.queueFull {
+				c.Header("Retry-After", "5")
+				c.JSON(http.StatusTooManyRequests, gin.H{
+					"error": gin.H{
+						"message": "本地账号调度队列已满，请稍后重试",
+						"type":    ErrorTypeServerError,
+						"code":    "local_dispatch_queue_full",
+					},
+				})
+				return
+			}
 			if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
 				h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
 				return
@@ -1358,9 +1385,12 @@ func (h *Handler) Responses(c *gin.Context) {
 		}
 
 		start := time.Now()
+		firstTokenTimeout := firstTokenTimeoutForReasoningEffort(reasoningEffort)
+		guardFirstTokenTimeout := shouldGuardFirstTokenTimeout(pick.poolSnapshot) &&
+			retryExclusions.FirstTokenTimeoutAttempts() == 0
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
 		h.store.BindSessionAffinity(affinityKey, account, proxyURL)
-		useWebsocket := h.shouldUseWebsocketForHTTP()
+		useWebsocket := h.shouldUseWebsocketForHTTP() && !forceHTTPFallback
 		activeEnd = h.beginActiveProxyRequest(c, account, auth.ActiveRequestMeta{
 			Endpoint:         "/v1/responses",
 			UpstreamEndpoint: "/v1/responses",
@@ -1392,8 +1422,8 @@ func (h *Handler) Responses(c *gin.Context) {
 			upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
 			lastUpstreamCancel = upstreamCancel
 			ttftGuard := (*firstTokenTimeoutGuard)(nil)
-			if isStream {
-				ttftGuard = newFirstTokenTimeoutGuard(currentFirstTokenTimeout(), upstreamCancel)
+			if isStream && guardFirstTokenTimeout {
+				ttftGuard = newFirstTokenTimeoutGuard(firstTokenTimeout, upstreamCancel)
 			}
 			baseURL, _ := account.OpenAIResponsesCredentials()
 			upstreamEndpoint := auth.OpenAIResponsesEndpoint(baseURL, "/v1/responses")
@@ -1409,13 +1439,26 @@ func (h *Handler) Responses(c *gin.Context) {
 				StartedAt:        start,
 			})
 			resp, reqErr := ExecuteOpenAIResponsesRequest(upstreamCtx, account, openAIResponsesBody, proxyURL, downstreamHeaders)
+			attemptedUpstream = true
 			durationMs := int(time.Since(start).Milliseconds())
 
 			if reqErr != nil {
 				timedOut := ttftGuard.TimedOut()
 				ttftGuard.Stop()
+				if c.Request.Context().Err() != nil {
+					h.store.Release(account)
+					return
+				}
 				if timedOut {
-					reqErr = firstTokenTimeoutError(currentFirstTokenTimeout())
+					reqErr = firstTokenTimeoutError(firstTokenTimeout)
+				}
+				if IsNoAvailableAccountError(reqErr) {
+					h.store.Release(account)
+					h.store.UnbindSessionAffinity(affinityKey, account.ID())
+					retryExclusions.MarkHard(account.ID())
+					log.Printf("选中 OpenAI Responses 账号在执行前已无可用凭据，切换下一个账号重试 (attempt %d/%d, account %d, /v1/responses)", attempt+1, maxRetries+1, account.ID())
+					attemptedUpstream = false
+					continue
 				}
 				kind := classifyTransportFailure(reqErr)
 				retryable := IsRetryableError(reqErr) || kind != ""
@@ -1429,9 +1472,11 @@ func (h *Handler) Responses(c *gin.Context) {
 				h.store.Release(account)
 				h.store.UnbindSessionAffinity(affinityKey, account.ID())
 				if timedOut && shouldRetry {
-					retryExclusions.MarkSoftFirstTokenTimeout(account.ID())
-					log.Printf("OpenAI Responses 上游首字超时，断开并重试 (attempt %d/%d, account %d): %v", attempt+1, maxRetries+1, account.ID(), reqErr)
-					continue
+					if retryExclusions.MarkSoftFirstTokenTimeout(account.ID()) {
+						log.Printf("OpenAI Responses 上游首字超时，静默切换一次账号 (attempt %d/%d, account %d, pool_total=%d pool_busy=%d pool_excluded=%d queue_wait_ms=%d first_token_timeout_sec=%d timeout_attempts=%d): %v", attempt+1, maxRetries+1, account.ID(), pick.poolSnapshot.Total, pick.poolSnapshot.Busy, pick.poolSnapshot.Excluded, pick.QueueWaitMs(), int(firstTokenTimeout.Seconds()), retryExclusions.FirstTokenTimeoutAttempts(), reqErr)
+						continue
+					}
+					log.Printf("OpenAI Responses 上游首字超时切号预算已用完，继续按真实上游结果收口 (attempt %d/%d, account %d, pool_total=%d pool_busy=%d pool_excluded=%d queue_wait_ms=%d first_token_timeout_sec=%d): %v", attempt+1, maxRetries+1, account.ID(), pick.poolSnapshot.Total, pick.poolSnapshot.Busy, pick.poolSnapshot.Excluded, pick.QueueWaitMs(), int(firstTokenTimeout.Seconds()), reqErr)
 				}
 				if !timedOut {
 					retryExclusions.MarkHard(account.ID())
@@ -1628,7 +1673,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			totalDuration := int(time.Since(start).Milliseconds())
 			outcome := classifyStreamOutcome(c.Request.Context().Err(), readErr, writeErr, gotTerminal)
 			if ttftGuard.TimedOut() && !ttftRecorded && !gotTerminal {
-				outcome = firstTokenTimeoutOutcome(currentFirstTokenTimeout())
+				outcome = firstTokenTimeoutOutcome(firstTokenTimeout)
 			}
 			ttftGuard.Stop()
 			if len(terminalFailurePayload) > 0 {
@@ -1641,17 +1686,38 @@ func (h *Handler) Responses(c *gin.Context) {
 				}
 			}
 			if shouldTransparentRetryStream(outcome, attempt, maxRetries, wroteAnyBody, c.Request.Context().Err(), writeErr) {
-				log.Printf("OpenAI Responses 上游流在首包前断开，重置连接并重试 (attempt %d/%d, account %d): %s", attempt+1, maxRetries+1, account.ID(), outcome.failureMessage)
 				recyclePooledClient(account, proxyURL)
+				transparentRetryAllowed := true
 				if isFirstTokenTimeoutOutcome(outcome) {
-					retryExclusions.MarkSoftFirstTokenTimeout(account.ID())
+					if !retryExclusions.MarkSoftFirstTokenTimeout(account.ID()) {
+						transparentRetryAllowed = false
+						log.Printf("OpenAI Responses 上游流首字超时切号预算已用完，继续按真实上游结果收口 (attempt %d/%d, account %d, pool_total=%d pool_busy=%d pool_excluded=%d queue_wait_ms=%d first_token_timeout_sec=%d): %s", attempt+1, maxRetries+1, account.ID(), pick.poolSnapshot.Total, pick.poolSnapshot.Busy, pick.poolSnapshot.Excluded, pick.QueueWaitMs(), int(firstTokenTimeout.Seconds()), outcome.failureMessage)
+					} else {
+						log.Printf("OpenAI Responses 上游流首字超时，静默切换一次账号 (attempt %d/%d, account %d, pool_total=%d pool_busy=%d pool_excluded=%d queue_wait_ms=%d first_token_timeout_sec=%d): %s", attempt+1, maxRetries+1, account.ID(), pick.poolSnapshot.Total, pick.poolSnapshot.Busy, pick.poolSnapshot.Excluded, pick.QueueWaitMs(), int(firstTokenTimeout.Seconds()), outcome.failureMessage)
+						resp.Body.Close()
+						h.store.Release(account)
+						h.store.UnbindSessionAffinity(affinityKey, account.ID())
+						continue
+					}
+				} else if isWebsocketMissingTerminalOutcome(outcome) {
+					forceHTTPFallback = true
 				} else {
 					h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
+					log.Printf("OpenAI Responses 上游流在首包前断开，重置连接并重试 (attempt %d/%d, account %d, pool_total=%d pool_busy=%d pool_excluded=%d queue_wait_ms=%d first_token_timeout_sec=%d): %s", attempt+1, maxRetries+1, account.ID(), pick.poolSnapshot.Total, pick.poolSnapshot.Busy, pick.poolSnapshot.Excluded, pick.QueueWaitMs(), int(firstTokenTimeout.Seconds()), outcome.failureMessage)
+					resp.Body.Close()
+					h.store.Release(account)
+					h.store.UnbindSessionAffinity(affinityKey, account.ID())
+					continue
 				}
-				resp.Body.Close()
-				h.store.Release(account)
-				h.store.UnbindSessionAffinity(affinityKey, account.ID())
-				continue
+				if !transparentRetryAllowed {
+					// Fall through to the final response.failed path below.
+				} else {
+					log.Printf("OpenAI Responses 上游流在首包前断开，重置连接并重试 (attempt %d/%d, account %d, pool_total=%d pool_busy=%d pool_excluded=%d queue_wait_ms=%d first_token_timeout_sec=%d): %s", attempt+1, maxRetries+1, account.ID(), pick.poolSnapshot.Total, pick.poolSnapshot.Busy, pick.poolSnapshot.Excluded, pick.QueueWaitMs(), int(firstTokenTimeout.Seconds()), outcome.failureMessage)
+					resp.Body.Close()
+					h.store.Release(account)
+					h.store.UnbindSessionAffinity(affinityKey, account.ID())
+					continue
+				}
 			}
 			if !isStream && readErr != nil {
 				c.JSON(http.StatusBadGateway, gin.H{
@@ -1660,7 +1726,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			}
 			if outcome.logStatusCode != http.StatusOK {
 				log.Printf("OpenAI Responses 流异常结束 (account %d, status %d): %s，已转发约 %d 字符", account.ID(), outcome.logStatusCode, outcome.failureMessage, deltaCharCount)
-				if isStream && wroteAnyBody && writeErr == nil && c.Request.Context().Err() == nil {
+				if isStream && writeErr == nil && c.Request.Context().Err() == nil {
 					failedEvent := fmt.Sprintf("data: %s\n\n", buildResponseFailedEvent(outcome.logStatusCode, outcome.failureMessage))
 					if err := streamWriter.WriteString(failedEvent); err != nil {
 						writeErr = err
@@ -1721,7 +1787,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				h.store.UnbindSessionAffinity(affinityKey, account.ID())
 			} else if outcome.logStatusCode == http.StatusOK {
 				h.store.ClearModelCooldown(account, effectiveModel)
-				h.store.ReportRequestSuccess(account, time.Duration(totalDuration)*time.Millisecond)
+				h.store.ReportRequestSuccessTTFT(account, time.Duration(firstTokenMs)*time.Millisecond, time.Duration(totalDuration)*time.Millisecond)
 			}
 			h.store.Release(account)
 			return
@@ -1746,6 +1812,14 @@ func (h *Handler) Responses(c *gin.Context) {
 			ttftGuard.Stop()
 			if timedOut {
 				reqErr = firstTokenTimeoutError(currentFirstTokenTimeout())
+			}
+			if IsNoAvailableAccountError(reqErr) {
+				h.store.Release(account)
+				h.store.UnbindSessionAffinity(affinityKey, account.ID())
+				retryExclusions.MarkHard(account.ID())
+				log.Printf("选中账号在执行前已无可用凭据，切换下一个账号重试 (attempt %d/%d, account %d, /v1/responses)", attempt+1, maxRetries+1, account.ID())
+				attemptedUpstream = false
+				continue
 			}
 			kind := classifyTransportFailure(reqErr)
 			retryable := IsRetryableError(reqErr) || kind != ""
@@ -2032,6 +2106,8 @@ func (h *Handler) Responses(c *gin.Context) {
 			SyncCodexUsageState(h.store, account, resp)
 			if isFirstTokenTimeoutOutcome(outcome) {
 				retryExclusions.MarkSoftFirstTokenTimeout(account.ID())
+			} else if isWebsocketMissingTerminalOutcome(outcome) {
+				forceHTTPFallback = true
 			} else {
 				h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
 			}
@@ -2045,7 +2121,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		logStatusCode := outcome.logStatusCode
 		if outcome.logStatusCode != http.StatusOK {
 			log.Printf("流异常结束 (account %d, /v1/responses, status %d): %s，已转发约 %d 字符", account.ID(), outcome.logStatusCode, outcome.failureMessage, deltaCharCount)
-			if isStream && wroteAnyBody && writeErr == nil && c.Request.Context().Err() == nil {
+			if isStream && writeErr == nil && c.Request.Context().Err() == nil {
 				failedEvent := fmt.Sprintf("data: %s\n\n", buildResponseFailedEvent(outcome.logStatusCode, outcome.failureMessage))
 				if err := streamWriter.WriteString(failedEvent); err != nil {
 					writeErr = err
@@ -2121,7 +2197,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			h.store.UnbindSessionAffinity(affinityKey, account.ID())
 		} else if outcome.logStatusCode == http.StatusOK {
 			h.store.ClearModelCooldown(account, effectiveModel)
-			h.store.ReportRequestSuccess(account, time.Duration(totalDuration)*time.Millisecond)
+			h.store.ReportRequestSuccessTTFT(account, time.Duration(firstTokenMs)*time.Millisecond, time.Duration(totalDuration)*time.Millisecond)
 		}
 		h.store.Release(account)
 		return
@@ -3019,7 +3095,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			h.store.UnbindSessionAffinity(affinityKey, account.ID())
 		} else if outcome.logStatusCode == http.StatusOK {
 			h.store.ClearModelCooldown(account, effectiveModel)
-			h.store.ReportRequestSuccess(account, time.Duration(totalDuration)*time.Millisecond)
+			h.store.ReportRequestSuccessTTFT(account, time.Duration(firstTokenMs)*time.Millisecond, time.Duration(totalDuration)*time.Millisecond)
 		}
 		h.store.Release(account)
 		return

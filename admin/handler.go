@@ -1724,7 +1724,7 @@ func (h *Handler) FetchOpenAIResponsesModels(c *gin.Context) {
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
 	defer cancel()
-	models, err := fetchOpenAIResponsesModelIDs(ctx, baseURL, req.APIKey, req.ProxyURL)
+	models, err := fetchOpenAIResponsesModelIDs(ctx, baseURL, req.APIKey, h.resolveOpenAIResponsesModelsProxy(&req))
 	if err != nil {
 		writeError(c, http.StatusBadGateway, err.Error())
 		return
@@ -1850,9 +1850,27 @@ func (h *Handler) UpdateOpenAIResponsesAccount(c *gin.Context) {
 	writeMessage(c, http.StatusOK, "OpenAI Responses API 账号设置已更新")
 }
 
+func (h *Handler) resolveOpenAIResponsesModelsProxy(req *fetchOpenAIResponsesModelsReq) string {
+	if req != nil {
+		if proxyURL := strings.TrimSpace(req.ProxyURL); proxyURL != "" {
+			return proxyURL
+		}
+		if req.AccountID > 0 && h.store != nil {
+			if account := h.store.FindByID(req.AccountID); account != nil {
+				return h.store.ResolveProxyForAccount(account)
+			}
+		}
+	}
+	if h.store == nil {
+		return ""
+	}
+	return h.store.ResolveProxyForAccount(nil)
+}
+
 func fetchOpenAIResponsesModelIDs(ctx context.Context, baseURL, apiKey, proxyURL string) ([]string, error) {
 	endpoint := auth.OpenAIResponsesEndpoint(baseURL, "/v1/models")
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
 	baseDialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	transport.DialContext = baseDialer.DialContext
 	if err := auth.ConfigureTransportProxy(transport, proxyURL, baseDialer); err != nil {
@@ -4365,6 +4383,7 @@ type settingsResponse struct {
 	AffinityMode                     string `json:"affinity_mode"`
 	MaxRetries                       int    `json:"max_retries"`
 	MaxRateLimitRetries              int    `json:"max_rate_limit_retries"`
+	DispatchQueueLimit               int    `json:"dispatch_queue_limit"`
 	AllowRemoteMigration             bool   `json:"allow_remote_migration"`
 	DatabaseDriver                   string `json:"database_driver"`
 	DatabaseLabel                    string `json:"database_label"`
@@ -4434,6 +4453,7 @@ type updateSettingsReq struct {
 	AffinityMode                     *string `json:"affinity_mode"`
 	MaxRetries                       *int    `json:"max_retries"`
 	MaxRateLimitRetries              *int    `json:"max_rate_limit_retries"`
+	DispatchQueueLimit               *int    `json:"dispatch_queue_limit"`
 	AllowRemoteMigration             *bool   `json:"allow_remote_migration"`
 	ModelMapping                     *string `json:"model_mapping"`
 	ResinURL                         *string `json:"resin_url"`
@@ -4987,6 +5007,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		AffinityMode:                     h.store.GetAffinityMode(),
 		MaxRetries:                       h.store.GetMaxRetries(),
 		MaxRateLimitRetries:              h.store.GetMaxRateLimitRetries(),
+		DispatchQueueLimit:               h.store.GetDispatchQueueLimit(),
 		AllowRemoteMigration:             h.store.GetAllowRemoteMigration() && adminAuthSource != "disabled",
 		DatabaseDriver:                   h.databaseDriver,
 		DatabaseLabel:                    h.databaseLabel,
@@ -5299,6 +5320,18 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		log.Printf("设置已更新: max_rate_limit_retries = %d", v)
 	}
 
+	if req.DispatchQueueLimit != nil {
+		v := *req.DispatchQueueLimit
+		if v < 0 {
+			v = 0
+		}
+		if v > 10000 {
+			v = 10000
+		}
+		h.store.SetDispatchQueueLimit(v)
+		log.Printf("设置已更新: dispatch_queue_limit = %d", v)
+	}
+
 	if req.AllowRemoteMigration != nil {
 		if *req.AllowRemoteMigration && !hasAdminSecret {
 			writeError(c, http.StatusBadRequest, "请先设置管理密钥，再启用远程迁移")
@@ -5530,6 +5563,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		AffinityMode:                     h.store.GetAffinityMode(),
 		MaxRetries:                       h.store.GetMaxRetries(),
 		MaxRateLimitRetries:              h.store.GetMaxRateLimitRetries(),
+		DispatchQueueLimit:               h.store.GetDispatchQueueLimit(),
 		AllowRemoteMigration:             h.store.GetAllowRemoteMigration() && hasAdminSecret,
 		ModelMapping:                     h.store.GetModelMapping(),
 		ResinURL:                         resinURL,
@@ -5605,6 +5639,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		AffinityMode:                     h.store.GetAffinityMode(),
 		MaxRetries:                       h.store.GetMaxRetries(),
 		MaxRateLimitRetries:              h.store.GetMaxRateLimitRetries(),
+		DispatchQueueLimit:               h.store.GetDispatchQueueLimit(),
 		AllowRemoteMigration:             h.store.GetAllowRemoteMigration() && adminAuthSource != "disabled",
 		DatabaseDriver:                   h.databaseDriver,
 		DatabaseLabel:                    h.databaseLabel,

@@ -243,7 +243,7 @@ func (e *Executor) prepareWebsocketHeaders(accessToken, accountID, sessionID, ap
 	}
 	if sessionID = strings.TrimSpace(sessionID); sessionID != "" {
 		headers.Set("Session_id", sessionID)
-		headers.Set("Conversation_id", sessionID)
+		headers.Del("Conversation_id")
 	}
 
 	return headers

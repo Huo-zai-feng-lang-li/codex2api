@@ -426,6 +426,7 @@ export default function Settings() {
     affinity_mode: 'bounded',
     max_retries: 2,
     max_rate_limit_retries: 1,
+    dispatch_queue_limit: 0,
     allow_remote_migration: false,
     database_driver: 'postgres',
     database_label: 'PostgreSQL',
@@ -785,6 +786,15 @@ export default function Settings() {
                     max={10}
                     value={settingsForm.max_rate_limit_retries}
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, max_rate_limit_retries: parseInt(e.target.value) || 0 }))}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.dispatchQueueLimit')} description={t('settings.dispatchQueueLimitRange')}>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={10000}
+                    value={settingsForm.dispatch_queue_limit}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, dispatch_queue_limit: parseInt(e.target.value) || 0 }))}
                   />
                 </SettingField>
               </div>

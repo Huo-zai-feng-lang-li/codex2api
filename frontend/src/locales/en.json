@@ -1381,6 +1381,8 @@
     "maxRetriesRange": "Retry account switches for transport errors, 5xx, and 401 (0~10), 0 = no retry",
     "maxRateLimitRetries": "429 Retry Switches",
     "maxRateLimitRetriesRange": "Maximum account switches after a 429 rate limit (0~10), 0 = return the 429 directly",
+    "dispatchQueueLimit": "Dispatch Queue Limit",
+    "dispatchQueueLimitRange": "0 = auto (schedulable accounts x 3, minimum 3); greater than 0 = fixed queued request limit",
     "testModelLabel": "Test Connection Model",
     "testModelHint": "Model used for account connection testing",
     "testConcurrencyRange": "Concurrency for batch testing (1~200)",

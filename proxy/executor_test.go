@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -171,6 +172,29 @@ func TestShouldRecyclePooledClient(t *testing.T) {
 	}
 }
 
+func TestNewCodexStandardTransportIgnoresEnvironmentProxyWhenProxyURLBlank(t *testing.T) {
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:51081")
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:51081")
+	t.Setenv("http_proxy", "http://127.0.0.1:51081")
+	t.Setenv("https_proxy", "http://127.0.0.1:51081")
+
+	transport, ok := newCodexStandardTransport("").(*http.Transport)
+	if !ok {
+		t.Fatalf("newCodexStandardTransport() = %T, want *http.Transport", newCodexStandardTransport(""))
+	}
+	if transport.Proxy == nil {
+		return
+	}
+	req := &http.Request{URL: &url.URL{Scheme: "https", Host: "vip-sg.freemodel.dev"}}
+	proxyURL, err := transport.Proxy(req)
+	if err != nil {
+		t.Fatalf("transport.Proxy returned error: %v", err)
+	}
+	if proxyURL != nil {
+		t.Fatalf("blank proxyURL should ignore environment proxy, got %s", proxyURL)
+	}
+}
+
 func TestShouldTransparentRetryStream(t *testing.T) {
 	retryable := streamOutcome{
 		logStatusCode:  logStatusUpstreamStreamBreak,
@@ -190,6 +214,14 @@ func TestShouldTransparentRetryStream(t *testing.T) {
 	}
 	if shouldTransparentRetryStream(retryable, 0, 2, false, context.Canceled, nil) {
 		t.Fatal("expected retry to stop when downstream context is canceled")
+	}
+}
+
+func TestClassifyTransportFailureTreatsMissingWebsocketTerminalAsFallback(t *testing.T) {
+	err := errors.New("stream disconnected before completion: websocket closed by server before response.completed")
+
+	if got := classifyTransportFailure(err); got != "websocket_missing_terminal" {
+		t.Fatalf("classifyTransportFailure() = %q, want websocket_missing_terminal", got)
 	}
 }
 

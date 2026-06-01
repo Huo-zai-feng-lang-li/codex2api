@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -264,6 +265,20 @@ func IsRetryableError(err error) bool {
 
 	// For non-structured errors, check common retryable conditions
 	return false
+}
+
+func IsNoAvailableAccountError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var e *Error
+	if errors.As(err, &e) {
+		return e.Code == ErrorCodeNoAvailableAccount
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, ErrorCodeNoAvailableAccount) ||
+		strings.Contains(message, "无可用账号")
 }
 
 // StatusCodeFromError extracts the HTTP status code from an error

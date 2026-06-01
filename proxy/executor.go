@@ -121,6 +121,7 @@ func recyclePooledClientForAccount(account *auth.Account) {
 
 func newCodexStandardTransport(proxyURL string) http.RoundTripper {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
 	transport.MaxIdleConnsPerHost = 1
 	transport.IdleConnTimeout = 30 * time.Second
 	baseDialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
@@ -239,11 +240,13 @@ func IsolateCodexSessionID(apiKeyID int64, raw string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-// ExecuteRequest 向 Codex 上游发送请求
+var ExecuteRequest = executeRequest
+
+// executeRequest 向 Codex 上游发送请求
 // sessionID 可选，用于 prompt cache 会话绑定
 // useWebsocket 可选，如果为 true 则使用 WebSocket 连接
 // headers 下游请求头，用于设备指纹学习
-func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header, useWebsocket ...bool) (*http.Response, error) {
+func executeRequest(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header, useWebsocket ...bool) (*http.Response, error) {
 	// 检查是否使用 WebSocket
 	if len(useWebsocket) > 0 && useWebsocket[0] && WebsocketExecuteFunc != nil {
 		return WebsocketExecuteFunc(ctx, account, requestBody, sessionID, proxyOverride, apiKey, deviceCfg, headers)
