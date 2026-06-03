@@ -437,7 +437,7 @@ export default function Accounts() {
     | "error"
     | "disabled"
     | "locked"
-  >("all");
+  >("normal");
   const [searchQuery, setSearchQuery] = useState("");
   const [lastPageRefreshAt, setLastPageRefreshAt] = useState<Date | null>(null);
   const [planFilter, setPlanFilter] = useState<
@@ -448,6 +448,7 @@ export default function Accounts() {
   >(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [addForm, setAddForm] = useState<AddAccountRequest>({
+    name: "",
     refresh_token: "",
     session_token: "",
     proxy_url: "",
@@ -545,11 +546,13 @@ export default function Accounts() {
     "rt" | "st" | "at" | "openai" | "oauth"
   >("rt");
   const [atForm, setAtForm] = useState<AddATAccountRequest>({
+    name: "",
     access_token: "",
     proxy_url: "",
   });
   const [openAIForm, setOpenAIForm] =
     useState<AddOpenAIResponsesAccountRequest>({
+      name: "",
       base_url: "https://api.openai.com",
       api_key: "",
       models: [],
@@ -1125,17 +1128,22 @@ export default function Accounts() {
         ? { ...addForm, refresh_token: "", tags: addTags }
         : { ...addForm, session_token: "", tags: addTags };
     if (
-      !payload.refresh_token?.trim() &&
-      !payload.session_token?.trim()
+      !payload.name.trim() ||
+      (!payload.refresh_token?.trim() && !payload.session_token?.trim())
     ) {
       return;
     }
     setSubmitting(true);
     try {
-      await api.addAccount(payload);
+      await api.addAccount({ ...payload, name: payload.name.trim() });
       showToast(t("accounts.addSuccess"));
       setShowAdd(false);
-      setAddForm({ refresh_token: "", session_token: "", proxy_url: "" });
+      setAddForm({
+        name: "",
+        refresh_token: "",
+        session_token: "",
+        proxy_url: "",
+      });
       setAddTags([]);
       void reload();
     } catch (error) {
@@ -1149,13 +1157,17 @@ export default function Accounts() {
   };
 
   const handleAddAT = async () => {
-    if (!atForm.access_token.trim()) return;
+    if (!atForm.name.trim() || !atForm.access_token.trim()) return;
     setSubmitting(true);
     try {
-      await api.addATAccount({ ...atForm, tags: addTags });
+      await api.addATAccount({
+        ...atForm,
+        name: atForm.name.trim(),
+        tags: addTags,
+      });
       showToast(t("accounts.addSuccess"));
       setShowAdd(false);
-      setAtForm({ access_token: "", proxy_url: "" });
+      setAtForm({ name: "", access_token: "", proxy_url: "" });
       setAddTags([]);
       void reload();
     } catch (error) {
@@ -1234,13 +1246,19 @@ export default function Accounts() {
 
   const handleAddOpenAIResponses = async () => {
     const models = openAIForm.models;
-    if (!openAIForm.api_key.trim() || models.length === 0) return;
+    if (!openAIForm.name.trim() || !openAIForm.api_key.trim() || models.length === 0) return;
     setSubmitting(true);
     try {
-      await api.addOpenAIResponsesAccount({ ...openAIForm, models, tags: addTags });
+      await api.addOpenAIResponsesAccount({
+        ...openAIForm,
+        name: openAIForm.name.trim(),
+        models,
+        tags: addTags,
+      });
       showToast(t("accounts.addSuccess"));
       setShowAdd(false);
       setOpenAIForm({
+        name: "",
         base_url: "https://api.openai.com",
         api_key: "",
         models: [],
@@ -1292,7 +1310,7 @@ export default function Accounts() {
 
   const handleSaveOpenAIAccountSettings = async () => {
     if (!editingAccount?.openai_responses_api) return;
-    if (!editOpenAIForm.base_url.trim() || editOpenAIForm.models.length === 0) {
+    if (!editOpenAIForm.name.trim() || !editOpenAIForm.base_url.trim() || editOpenAIForm.models.length === 0) {
       showToast(t("accounts.openaiAccountInvalid"), "error");
       return;
     }
@@ -1300,6 +1318,7 @@ export default function Accounts() {
     try {
       await api.updateOpenAIResponsesAccount(editingAccount.id, {
         ...editOpenAIForm,
+        name: editOpenAIForm.name.trim(),
         api_key: editOpenAIForm.api_key?.trim() || undefined,
         tags: editTags,
       });
@@ -1319,9 +1338,14 @@ export default function Accounts() {
   };
 
   const handleOAuthGenerate = async () => {
+    if (!oauthName.trim()) return;
     setOauthGenerating(true);
     try {
-      const result = await api.generateOAuthURL({ proxy_url: oauthProxyUrl, tags: addTags });
+      const result = await api.generateOAuthURL({
+        name: oauthName.trim(),
+        proxy_url: oauthProxyUrl.trim() || undefined,
+        tags: addTags,
+      });
       setOauthSession(result);
       setOauthStep("exchange");
     } catch (error) {
@@ -1359,7 +1383,7 @@ export default function Accounts() {
         session_id: oauthSession.session_id,
         code,
         state,
-        name: oauthName.trim() || undefined,
+        name: oauthName.trim(),
         proxy_url: oauthProxyUrl.trim() || undefined,
         tags: addTags,
       });
@@ -2304,7 +2328,9 @@ export default function Accounts() {
   const openAIAccountInputInvalid = Boolean(
     editingAccount?.openai_responses_api &&
     editTab === "account" &&
-    (!editOpenAIForm.base_url.trim() || editOpenAIForm.models.length === 0),
+    (!editOpenAIForm.name.trim() ||
+      !editOpenAIForm.base_url.trim() ||
+      editOpenAIForm.models.length === 0),
   );
 
   const editPreview = useMemo(() => {
@@ -3581,7 +3607,15 @@ export default function Accounts() {
               setOauthCallbackUrl("");
               setOauthName("");
               setAddTags([]);
+              setAddForm({
+                name: "",
+                refresh_token: "",
+                session_token: "",
+                proxy_url: "",
+              });
+              setAtForm({ name: "", access_token: "", proxy_url: "" });
               setOpenAIForm({
+                name: "",
                 base_url: "https://api.openai.com",
                 api_key: "",
                 models: [],
@@ -3601,7 +3635,15 @@ export default function Accounts() {
                     setOauthCallbackUrl("");
                     setOauthName("");
                     setAddTags([]);
+                    setAddForm({
+                      name: "",
+                      refresh_token: "",
+                      session_token: "",
+                      proxy_url: "",
+                    });
+                    setAtForm({ name: "", access_token: "", proxy_url: "" });
                     setOpenAIForm({
+                      name: "",
                       base_url: "https://api.openai.com",
                       api_key: "",
                       models: [],
@@ -3615,21 +3657,33 @@ export default function Accounts() {
                 {addMethod === "rt" ? (
                   <Button
                     onClick={() => void handleAdd()}
-                    disabled={submitting || !addForm.refresh_token?.trim()}
+                    disabled={
+                      submitting ||
+                      !addForm.name.trim() ||
+                      !addForm.refresh_token?.trim()
+                    }
                   >
                     {submitting ? t("accounts.adding") : t("accounts.submit")}
                   </Button>
                 ) : addMethod === "st" ? (
                   <Button
                     onClick={() => void handleAdd("st")}
-                    disabled={submitting || !addForm.session_token?.trim()}
+                    disabled={
+                      submitting ||
+                      !addForm.name.trim() ||
+                      !addForm.session_token?.trim()
+                    }
                   >
                     {submitting ? t("accounts.adding") : t("accounts.submit")}
                   </Button>
                 ) : addMethod === "at" ? (
                   <Button
                     onClick={() => void handleAddAT()}
-                    disabled={submitting || !atForm.access_token.trim()}
+                    disabled={
+                      submitting ||
+                      !atForm.name.trim() ||
+                      !atForm.access_token.trim()
+                    }
                   >
                     {submitting ? t("accounts.adding") : t("accounts.submit")}
                   </Button>
@@ -3638,6 +3692,7 @@ export default function Accounts() {
                     onClick={() => void handleAddOpenAIResponses()}
                     disabled={
                       submitting ||
+                      !openAIForm.name.trim() ||
                       !openAIForm.api_key.trim() ||
                       openAIForm.models.length === 0
                     }
@@ -3647,7 +3702,7 @@ export default function Accounts() {
                 ) : oauthStep === "generate" ? (
                   <Button
                     onClick={() => void handleOAuthGenerate()}
-                    disabled={oauthGenerating}
+                    disabled={oauthGenerating || !oauthName.trim()}
                   >
                     {oauthGenerating
                       ? t("accounts.oauthGenerating")
@@ -3734,6 +3789,21 @@ export default function Accounts() {
               <div className="space-y-4">
                 <div>
                   <label className="block mb-2 text-sm font-semibold text-muted-foreground">
+                    {t("accounts.openaiNameLabel")} *
+                  </label>
+                  <Input
+                    placeholder={t("accounts.openaiNamePlaceholder")}
+                    value={addForm.name}
+                    onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                      setAddForm((form) => ({
+                        ...form,
+                        name: event.target.value,
+                      }))
+                    }
+                  />
+                </div>
+                <div>
+                  <label className="block mb-2 text-sm font-semibold text-muted-foreground">
                     {t("accounts.refreshTokenLabel")} *
                   </label>
                   <textarea
@@ -3767,6 +3837,21 @@ export default function Accounts() {
               </div>
             ) : addMethod === "st" ? (
               <div className="space-y-4">
+                <div>
+                  <label className="block mb-2 text-sm font-semibold text-muted-foreground">
+                    {t("accounts.openaiNameLabel")} *
+                  </label>
+                  <Input
+                    placeholder={t("accounts.openaiNamePlaceholder")}
+                    value={addForm.name}
+                    onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                      setAddForm((form) => ({
+                        ...form,
+                        name: event.target.value,
+                      }))
+                    }
+                  />
+                </div>
                 <div>
                   <label className="block mb-2 text-sm font-semibold text-muted-foreground">
                     {t("accounts.sessionTokenLabel")} *
@@ -3804,6 +3889,21 @@ export default function Accounts() {
               <div className="space-y-4">
                 <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300">
                   {t("accounts.atWarning")}
+                </div>
+                <div>
+                  <label className="block mb-2 text-sm font-semibold text-muted-foreground">
+                    {t("accounts.openaiNameLabel")} *
+                  </label>
+                  <Input
+                    placeholder={t("accounts.openaiNamePlaceholder")}
+                    value={atForm.name}
+                    onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                      setAtForm((form) => ({
+                        ...form,
+                        name: event.target.value,
+                      }))
+                    }
+                  />
                 </div>
                 <div>
                   <label className="block mb-2 text-sm font-semibold text-muted-foreground">
@@ -3848,7 +3948,7 @@ export default function Accounts() {
                 </div>
                 <div>
                   <label className="block mb-2 text-sm font-semibold text-muted-foreground">
-                    {t("accounts.openaiNameLabel")}
+                    {t("accounts.openaiNameLabel")} *
                   </label>
                   <Input
                     placeholder={t("accounts.openaiNamePlaceholder")}
@@ -3984,7 +4084,7 @@ export default function Accounts() {
                     </div>
                     <div>
                       <label className="block mb-2 text-sm font-semibold text-muted-foreground">
-                        {t("accounts.oauthNameLabel")}
+                        {t("accounts.oauthNameLabel")} *
                       </label>
                       <Input
                         placeholder={t("accounts.oauthNamePlaceholder")}
@@ -4471,7 +4571,7 @@ export default function Accounts() {
                   <div className="space-y-4">
                     <div>
                       <label className="block mb-2 text-sm font-semibold text-muted-foreground">
-                        {t("accounts.openaiNameLabel")}
+                        {t("accounts.openaiNameLabel")} *
                       </label>
                       <Input
                         placeholder={t("accounts.openaiNamePlaceholder")}
@@ -7221,14 +7321,14 @@ function requestHealthTone(successRate: number, errorCount: number): {
   bar: string;
   text: string;
 } {
-  if (errorCount > 0 && successRate < 90) {
+  if (errorCount > 0 && successRate < 60) {
     return {
       pill: "border-red-500/25 bg-red-500/10 text-red-600 dark:text-red-300",
       bar: "bg-red-500",
       text: "text-red-600 dark:text-red-300",
     };
   }
-  if (errorCount > 0 && successRate < 98) {
+  if (errorCount > 0 && successRate < 80) {
     return {
       pill: "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300",
       bar: "bg-amber-500",

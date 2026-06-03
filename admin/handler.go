@@ -1211,6 +1211,19 @@ func splitAccountCredentialLines(raw string, sanitize bool) []string {
 	return tokens
 }
 
+func validateManualAccountName(name string) error {
+	if name == "" {
+		return fmt.Errorf("账号名称是必填字段")
+	}
+	if security.ContainsXSS(name) || security.ContainsSQLInjection(name) {
+		return fmt.Errorf("名称包含非法字符")
+	}
+	if utf8.RuneCountInString(name) > 100 {
+		return fmt.Errorf("名称长度不能超过100字符")
+	}
+	return nil
+}
+
 // AddAccount 添加新账号（支持批量：refresh_token/session_token 按行分割）
 func (h *Handler) AddAccount(c *gin.Context) {
 	var req addAccountReq
@@ -1220,7 +1233,7 @@ func (h *Handler) AddAccount(c *gin.Context) {
 	}
 
 	// 输入验证和清理
-	req.Name = security.SanitizeInput(req.Name)
+	req.Name = strings.TrimSpace(security.SanitizeInput(req.Name))
 	req.ProxyURL = security.SanitizeInput(req.ProxyURL)
 
 	if strings.TrimSpace(req.RefreshToken) == "" && strings.TrimSpace(req.SessionToken) == "" {
@@ -1228,15 +1241,8 @@ func (h *Handler) AddAccount(c *gin.Context) {
 		return
 	}
 
-	// 检查XSS和SQL注入
-	if security.ContainsXSS(req.Name) || security.ContainsSQLInjection(req.Name) {
-		writeError(c, http.StatusBadRequest, "名称包含非法字符")
-		return
-	}
-
-	// 验证名称长度
-	if utf8.RuneCountInString(req.Name) > 100 {
-		writeError(c, http.StatusBadRequest, "名称长度不能超过100字符")
+	if err := validateManualAccountName(req.Name); err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -1297,9 +1303,7 @@ func (h *Handler) AddAccount(c *gin.Context) {
 
 	for i, seed := range seeds {
 		name := req.Name
-		if name == "" {
-			name = fmt.Sprintf("account-%d", i+1)
-		} else if len(seeds) > 1 {
+		if len(seeds) > 1 {
 			name = fmt.Sprintf("%s-%d", req.Name, i+1)
 		}
 
@@ -1377,7 +1381,7 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 		return
 	}
 
-	req.Name = security.SanitizeInput(req.Name)
+	req.Name = strings.TrimSpace(security.SanitizeInput(req.Name))
 	req.ProxyURL = security.SanitizeInput(req.ProxyURL)
 
 	if req.AccessToken == "" {
@@ -1385,13 +1389,8 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 		return
 	}
 
-	if security.ContainsXSS(req.Name) || security.ContainsSQLInjection(req.Name) {
-		writeError(c, http.StatusBadRequest, "名称包含非法字符")
-		return
-	}
-
-	if utf8.RuneCountInString(req.Name) > 100 {
-		writeError(c, http.StatusBadRequest, "名称长度不能超过100字符")
+	if err := validateManualAccountName(req.Name); err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -1433,9 +1432,7 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 
 	for i, at := range tokens {
 		name := req.Name
-		if name == "" {
-			name = fmt.Sprintf("at-account-%d", i+1)
-		} else if len(tokens) > 1 {
+		if len(tokens) > 1 {
 			name = fmt.Sprintf("%s-%d", req.Name, i+1)
 		}
 
@@ -1537,6 +1534,19 @@ type fetchOpenAIResponsesModelsReq struct {
 	ProxyURL  string `json:"proxy_url"`
 }
 
+func validateOpenAIResponsesAccountName(name string) error {
+	if name == "" {
+		return fmt.Errorf("账号名称是必填字段")
+	}
+	if security.ContainsXSS(name) || security.ContainsSQLInjection(name) {
+		return fmt.Errorf("名称包含非法字符")
+	}
+	if utf8.RuneCountInString(name) > 100 {
+		return fmt.Errorf("名称长度不能超过100字符")
+	}
+	return nil
+}
+
 func (h *Handler) AddOpenAIResponsesAccount(c *gin.Context) {
 	var req addOpenAIResponsesAccountReq
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -1544,7 +1554,7 @@ func (h *Handler) AddOpenAIResponsesAccount(c *gin.Context) {
 		return
 	}
 
-	req.Name = security.SanitizeInput(req.Name)
+	req.Name = strings.TrimSpace(security.SanitizeInput(req.Name))
 	req.ProxyURL = security.SanitizeInput(req.ProxyURL)
 	req.APIKey = strings.TrimSpace(req.APIKey)
 	baseURL, err := auth.NormalizeOpenAIResponsesBaseURL(req.BaseURL)
@@ -1562,12 +1572,8 @@ func (h *Handler) AddOpenAIResponsesAccount(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "至少需要添加一个模型")
 		return
 	}
-	if security.ContainsXSS(req.Name) || security.ContainsSQLInjection(req.Name) {
-		writeError(c, http.StatusBadRequest, "名称包含非法字符")
-		return
-	}
-	if utf8.RuneCountInString(req.Name) > 100 {
-		writeError(c, http.StatusBadRequest, "名称长度不能超过100字符")
+	if err := validateOpenAIResponsesAccountName(req.Name); err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := security.ValidateProxyURL(req.ProxyURL); err != nil {
@@ -1599,10 +1605,6 @@ func (h *Handler) AddOpenAIResponsesAccount(c *gin.Context) {
 		return
 	}
 
-	name := req.Name
-	if name == "" {
-		name = "openai-responses"
-	}
 	credentials := map[string]interface{}{
 		"upstream_type": auth.UpstreamOpenAIResponses,
 		"base_url":      baseURL,
@@ -1611,7 +1613,7 @@ func (h *Handler) AddOpenAIResponsesAccount(c *gin.Context) {
 		"plan_type":     "api",
 		"email":         baseURL,
 	}
-	id, err := h.db.InsertOpenAIResponsesAccount(ctx, name, credentials, req.ProxyURL)
+	id, err := h.db.InsertOpenAIResponsesAccount(ctx, req.Name, credentials, req.ProxyURL)
 	if err != nil {
 		writeInternalError(c, err)
 		return
@@ -1626,7 +1628,7 @@ func (h *Handler) AddOpenAIResponsesAccount(c *gin.Context) {
 
 	newAcc := &auth.Account{
 		DBID:         id,
-		Name:         name,
+		Name:         req.Name,
 		ProxyURL:     req.ProxyURL,
 		HealthTier:   auth.HealthTierHealthy,
 		UpstreamType: auth.UpstreamOpenAIResponses,
@@ -1747,7 +1749,7 @@ func (h *Handler) UpdateOpenAIResponsesAccount(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "请求格式错误")
 		return
 	}
-	req.Name = security.SanitizeInput(req.Name)
+	req.Name = strings.TrimSpace(security.SanitizeInput(req.Name))
 	req.ProxyURL = security.SanitizeInput(req.ProxyURL)
 	req.APIKey = strings.TrimSpace(req.APIKey)
 
@@ -1777,12 +1779,8 @@ func (h *Handler) UpdateOpenAIResponsesAccount(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "至少需要添加一个模型")
 		return
 	}
-	if security.ContainsXSS(req.Name) || security.ContainsSQLInjection(req.Name) {
-		writeError(c, http.StatusBadRequest, "名称包含非法字符")
-		return
-	}
-	if utf8.RuneCountInString(req.Name) > 100 {
-		writeError(c, http.StatusBadRequest, "名称长度不能超过100字符")
+	if err := validateOpenAIResponsesAccountName(req.Name); err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := security.ValidateProxyURL(req.ProxyURL); err != nil {
@@ -1801,14 +1799,6 @@ func (h *Handler) UpdateOpenAIResponsesAccount(c *gin.Context) {
 		}
 	}
 
-	name := req.Name
-	if name == "" {
-		name = row.Name
-	}
-	if name == "" {
-		name = "openai-responses"
-	}
-
 	credentials := map[string]interface{}{
 		"upstream_type": auth.UpstreamOpenAIResponses,
 		"base_url":      baseURL,
@@ -1824,7 +1814,7 @@ func (h *Handler) UpdateOpenAIResponsesAccount(c *gin.Context) {
 		return
 	}
 
-	if err := h.db.UpdateOpenAIResponsesAccount(ctx, id, name, credentials, req.ProxyURL); err != nil {
+	if err := h.db.UpdateOpenAIResponsesAccount(ctx, id, req.Name, credentials, req.ProxyURL); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(c, http.StatusNotFound, "账号不存在")
 			return
@@ -1839,7 +1829,7 @@ func (h *Handler) UpdateOpenAIResponsesAccount(c *gin.Context) {
 		}
 	}
 	if h.store != nil {
-		h.store.ApplyAccountName(id, name)
+		h.store.ApplyAccountName(id, req.Name)
 		h.store.ApplyOpenAIResponsesConfig(id, baseURL, req.APIKey, models, req.ProxyURL)
 		if tags.Set {
 			h.store.ApplyAccountTags(id, tags.Values)

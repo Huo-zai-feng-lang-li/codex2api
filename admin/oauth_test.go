@@ -46,6 +46,7 @@ func TestExchangeOAuthCodeSeedsAccessTokenFromExchangeResponse(t *testing.T) {
 		State:        "state-test",
 		CodeVerifier: "verifier-test",
 		RedirectURI:  oauthDefaultRedirectURI,
+		Name:         "oauth-primary",
 		CreatedAt:    time.Now(),
 	})
 	t.Cleanup(func() {
@@ -95,5 +96,54 @@ func TestExchangeOAuthCodeSeedsAccessTokenFromExchangeResponse(t *testing.T) {
 	}
 	if got := row.GetCredential("id_token"); got != "id-from-exchange" {
 		t.Fatalf("stored id_token = %q, want exchange id token", got)
+	}
+}
+
+func TestGenerateOAuthURLRejectsBlankName(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	handler := &Handler{}
+
+	body := `{"name":" "}`
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/oauth/generate-auth-url", strings.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.GenerateOAuthURL(ctx)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+}
+
+func TestExchangeOAuthCodeRejectsBlankName(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	store := auth.NewStore(db, cache.NewMemory(1), nil)
+	handler := &Handler{db: db, store: store}
+
+	sessionID := "oauth-blank-name-session"
+	globalOAuthStore.set(sessionID, &oauthSession{
+		State:        "state-test",
+		CodeVerifier: "verifier-test",
+		RedirectURI:  oauthDefaultRedirectURI,
+		CreatedAt:    time.Now(),
+	})
+	t.Cleanup(func() {
+		globalOAuthStore.delete(sessionID)
+	})
+
+	body := `{"session_id":"oauth-blank-name-session","code":"code-test","state":"state-test","name":" "}`
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/oauth/exchange-code", strings.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.ExchangeOAuthCode(ctx)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
 	}
 }

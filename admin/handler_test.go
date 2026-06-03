@@ -1289,6 +1289,75 @@ func TestAddOpenAIResponsesAccountPersistsTagsAndAPIGroup(t *testing.T) {
 	}
 }
 
+func TestAddAccountRejectsBlankName(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	store := auth.NewStore(db, cache.NewMemory(1), nil)
+	handler := &Handler{db: db, store: store}
+
+	body := `{"name":" ","refresh_token":"rt-test","session_token":"","proxy_url":""}`
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts", strings.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.AddAccount(ctx)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+}
+
+func TestAddATAccountRejectsBlankName(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	store := auth.NewStore(db, cache.NewMemory(1), nil)
+	handler := &Handler{db: db, store: store}
+
+	body := `{"name":" ","access_token":"at-test","proxy_url":""}`
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/at", strings.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.AddATAccount(ctx)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+}
+
+func TestAddOpenAIResponsesAccountRejectsBlankName(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	store := auth.NewStore(db, cache.NewMemory(1), nil)
+	handler := &Handler{db: db, store: store}
+
+	body := `{
+		"name":"   ",
+		"base_url":"https://api.openai.com",
+		"api_key":"sk-test-openai-responses",
+		"models":["gpt-4.1"],
+		"proxy_url":""
+	}`
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/openai-responses", strings.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.AddOpenAIResponsesAccount(ctx)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), "openai-responses") {
+		t.Fatalf("blank name fell back to generated account name: %s", recorder.Body.String())
+	}
+}
+
 func TestAddATAccountPersistsTagsAndFreeGroup(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -1425,6 +1494,49 @@ func TestUpdateOpenAIResponsesAccountPersistsTags(t *testing.T) {
 	}
 	if got := strings.Join(rows[0].Tags, ","); got != "team-a,responses" {
 		t.Fatalf("tags = %q, want team-a,responses", got)
+	}
+}
+
+func TestUpdateOpenAIResponsesAccountRejectsBlankName(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	id, err := db.InsertOpenAIResponsesAccount(context.Background(), "api-account", map[string]interface{}{
+		"upstream_type": auth.UpstreamOpenAIResponses,
+		"base_url":      "https://api.openai.com",
+		"api_key":       "sk-existing",
+		"models":        []string{"gpt-4.1"},
+		"plan_type":     "api",
+		"email":         "https://api.openai.com",
+	}, "")
+	if err != nil {
+		t.Fatalf("insert openai responses account: %v", err)
+	}
+	handler := &Handler{db: db}
+
+	body := strings.NewReader(`{
+		"name": " ",
+		"base_url": "https://api.openai.com",
+		"models": ["gpt-4.1"],
+		"proxy_url": ""
+	}`)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", id)}}
+	ctx.Request = httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/api/admin/accounts/%d/openai-responses", id), body)
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.UpdateOpenAIResponsesAccount(ctx)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+	row, err := db.GetAccountByID(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetAccountByID: %v", err)
+	}
+	if row.Name != "api-account" {
+		t.Fatalf("name = %q, want original api-account", row.Name)
 	}
 }
 

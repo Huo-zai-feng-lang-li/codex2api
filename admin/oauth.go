@@ -18,6 +18,7 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/proxy"
+	"github.com/codex2api/security"
 	"github.com/gin-gonic/gin"
 )
 
@@ -39,6 +40,7 @@ type oauthSession struct {
 	CodeVerifier string
 	RedirectURI  string
 	ProxyURL     string
+	Name         string
 	Tags         []string
 	CreatedAt    time.Time
 
@@ -139,11 +141,17 @@ func oauthCodeChallenge(verifier string) string {
 // POST /api/admin/oauth/generate-auth-url
 func (h *Handler) GenerateOAuthURL(c *gin.Context) {
 	var req struct {
+		Name        string          `json:"name"`
 		ProxyURL    string          `json:"proxy_url"`
 		RedirectURI string          `json:"redirect_uri"`
 		Tags        json.RawMessage `json:"tags"`
 	}
 	_ = c.ShouldBindJSON(&req)
+	name := strings.TrimSpace(security.SanitizeInput(req.Name))
+	if err := validateManualAccountName(name); err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	tags, err := parseOptionalStringSliceField(req.Tags, "tags")
 	if err != nil {
 		writeError(c, http.StatusBadRequest, err.Error())
@@ -178,6 +186,7 @@ func (h *Handler) GenerateOAuthURL(c *gin.Context) {
 		CodeVerifier: codeVerifier,
 		RedirectURI:  redirectURI,
 		ProxyURL:     strings.TrimSpace(req.ProxyURL),
+		Name:         name,
 		Tags:         append([]string(nil), tags.Values...),
 		CreatedAt:    time.Now(),
 	})
@@ -228,6 +237,14 @@ func (h *Handler) ExchangeOAuthCode(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "state 不匹配，请重新发起授权")
 		return
 	}
+	name := strings.TrimSpace(security.SanitizeInput(req.Name))
+	if name == "" {
+		name = sess.Name
+	}
+	if err := validateManualAccountName(name); err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	tags, err := parseOptionalStringSliceField(req.Tags, "tags")
 	if err != nil {
 		writeError(c, http.StatusBadRequest, err.Error())
@@ -264,14 +281,6 @@ func (h *Handler) ExchangeOAuthCode(c *gin.Context) {
 		idToken:      tokenResp.IDToken,
 		expiresIn:    tokenResp.ExpiresIn,
 	})
-
-	name := strings.TrimSpace(req.Name)
-	if name == "" && seed.email != "" {
-		name = seed.email
-	}
-	if name == "" {
-		name = "oauth-account"
-	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()

@@ -106,7 +106,7 @@ export interface AccountRow {
 export type AccountsResponse = ApiListResponse<'accounts', AccountRow>
 
 export interface AddAccountRequest {
-  name?: string
+  name: string
   refresh_token?: string
   session_token?: string
   proxy_url: string
@@ -114,14 +114,14 @@ export interface AddAccountRequest {
 }
 
 export interface AddATAccountRequest {
-  name?: string
+  name: string
   access_token: string
   proxy_url: string
   tags?: string[]
 }
 
 export interface AddOpenAIResponsesAccountRequest {
-  name?: string
+  name: string
   base_url: string
   api_key: string
   models: string[]
@@ -130,7 +130,7 @@ export interface AddOpenAIResponsesAccountRequest {
 }
 
 export interface UpdateOpenAIResponsesAccountRequest {
-  name?: string
+  name: string
   base_url: string
   api_key?: string
   models: string[]

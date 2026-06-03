@@ -483,9 +483,9 @@ export const api = {
   testProxy: (url: string, id?: number, lang?: string) =>
     request<ProxyTestResult>('/proxies/test', { method: 'POST', body: JSON.stringify({ url, id, lang }) }),
   // OAuth
-  generateOAuthURL: (data: { proxy_url?: string; redirect_uri?: string; tags?: string[] }) =>
+  generateOAuthURL: (data: { name: string; proxy_url?: string; redirect_uri?: string; tags?: string[] }) =>
     request<OAuthURLResponse>('/oauth/generate-auth-url', { method: 'POST', body: JSON.stringify(data) }),
-  exchangeOAuthCode: (data: { session_id: string; code: string; state: string; name?: string; proxy_url?: string; tags?: string[] }) =>
+  exchangeOAuthCode: (data: { session_id: string; code: string; state: string; name: string; proxy_url?: string; tags?: string[] }) =>
     request<OAuthExchangeResponse>('/oauth/exchange-code', { method: 'POST', body: JSON.stringify(data) }),
 }
 
