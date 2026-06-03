@@ -131,6 +131,12 @@ type AccountGroupDraft = {
   color: string;
 };
 
+const ACCOUNT_TABLE_HEAD_CLASS = "text-center text-[13px] font-semibold";
+const ACCOUNT_TABLE_SORT_HEAD_CLASS =
+  `${ACCOUNT_TABLE_HEAD_CLASS} cursor-pointer select-none transition-colors hover:text-primary`;
+const ACCOUNT_TABLE_CELL_CLASS = "text-center";
+const ACCOUNT_TABLE_CELL_CENTER_CLASS = "flex justify-center";
+
 function getDefaultAccountVisibleColumns(): Record<
   AccountTableColumn,
   boolean
@@ -3154,7 +3160,7 @@ export default function Accounts() {
                   <Table>
                     <TableHeader>
                       <TableRow>
-                        <TableHead className="w-10">
+                        <TableHead className="w-10 text-center">
                           <input
                             ref={selectAllRef}
                             type="checkbox"
@@ -3164,38 +3170,38 @@ export default function Accounts() {
                           />
                         </TableHead>
                         {visibleColumns.sequence && (
-                          <TableHead className="text-[13px] font-semibold">
+                          <TableHead className={ACCOUNT_TABLE_HEAD_CLASS}>
                             {t("accounts.sequence")}
                           </TableHead>
                         )}
                         {visibleColumns.email && (
-                          <TableHead className="text-[13px] font-semibold">
+                          <TableHead className={ACCOUNT_TABLE_HEAD_CLASS}>
                             {t("accounts.accountName")}
                           </TableHead>
                         )}
                         {visibleColumns.tags && (
-                          <TableHead className="text-[13px] font-semibold">
+                          <TableHead className={ACCOUNT_TABLE_HEAD_CLASS}>
                             {t("accounts.tagsLabel")}
                           </TableHead>
                         )}
                         {visibleColumns.groups && (
-                          <TableHead className="text-[13px] font-semibold">
+                          <TableHead className={ACCOUNT_TABLE_HEAD_CLASS}>
                             {t("accounts.groupsLabel")}
                           </TableHead>
                         )}
                         {visibleColumns.plan && (
-                          <TableHead className="text-[13px] font-semibold">
+                          <TableHead className={ACCOUNT_TABLE_HEAD_CLASS}>
                             {t("accounts.plan")}
                           </TableHead>
                         )}
                         {visibleColumns.status && (
-                          <TableHead className="text-[13px] font-semibold">
+                          <TableHead className={ACCOUNT_TABLE_HEAD_CLASS}>
                             {t("accounts.status")}
                           </TableHead>
                         )}
                         {visibleColumns.requests && (
                           <TableHead
-                            className="text-[13px] font-semibold cursor-pointer select-none hover:text-primary transition-colors"
+                            className={ACCOUNT_TABLE_SORT_HEAD_CLASS}
                             onClick={() => {
                               if (sortKey === "requests") {
                                 setSortDir((d) =>
@@ -3218,7 +3224,7 @@ export default function Accounts() {
                         )}
                         {visibleColumns.usage && (
                           <TableHead
-                            className="text-[13px] font-semibold cursor-pointer select-none hover:text-primary transition-colors"
+                            className={ACCOUNT_TABLE_SORT_HEAD_CLASS}
                             onClick={() => {
                               if (sortKey === "usage") {
                                 setSortDir((d) =>
@@ -3240,13 +3246,13 @@ export default function Accounts() {
                           </TableHead>
                         )}
                         {visibleColumns.billed && (
-                          <TableHead className="text-[13px] font-semibold">
+                          <TableHead className={ACCOUNT_TABLE_HEAD_CLASS}>
                             {t("accounts.billed")}
                           </TableHead>
                         )}
                         {visibleColumns.importTime && (
                           <TableHead
-                            className="text-[13px] font-semibold cursor-pointer select-none hover:text-primary transition-colors"
+                            className={ACCOUNT_TABLE_SORT_HEAD_CLASS}
                             onClick={() => {
                               if (sortKey === "importTime") {
                                 setSortDir((d) =>
@@ -3268,12 +3274,12 @@ export default function Accounts() {
                           </TableHead>
                         )}
                         {visibleColumns.updatedAt && (
-                          <TableHead className="text-[13px] font-semibold">
+                          <TableHead className={ACCOUNT_TABLE_HEAD_CLASS}>
                             {t("accounts.updatedAt")}
                           </TableHead>
                         )}
                         {visibleColumns.actions && (
-                          <TableHead className="text-[13px] font-semibold text-right">
+                          <TableHead className={ACCOUNT_TABLE_HEAD_CLASS}>
                             {t("accounts.actions")}
                           </TableHead>
                         )}
@@ -3287,7 +3293,7 @@ export default function Accounts() {
                             key={account.id}
                             className={isSelected ? "bg-primary/5" : ""}
                           >
-                            <TableCell>
+                            <TableCell className={ACCOUNT_TABLE_CELL_CLASS}>
                               <input
                                 type="checkbox"
                                 className="size-4 cursor-pointer accent-primary"
@@ -3297,14 +3303,14 @@ export default function Accounts() {
                             </TableCell>
                             {visibleColumns.sequence && (
                               <TableCell
-                                className="text-[14px] font-mono text-muted-foreground"
+                                className={`${ACCOUNT_TABLE_CELL_CLASS} text-[14px] font-mono text-muted-foreground`}
                                 title={`ID ${account.id}`}
                               >
                                 {(currentPage - 1) * pageSize + index + 1}
                               </TableCell>
                             )}
                             {visibleColumns.email && (
-                              <TableCell className="text-[14px] text-muted-foreground">
+                              <TableCell className={`${ACCOUNT_TABLE_CELL_CLASS} text-[14px] text-muted-foreground`}>
                                 <span>
                                   {account.openai_responses_api
                                     ? formatAccountName(account)
@@ -3335,7 +3341,7 @@ export default function Accounts() {
                               </TableCell>
                             )}
                             {visibleColumns.tags && (
-                              <TableCell className="min-w-[120px]">
+                              <TableCell className="min-w-[120px] text-center">
                                 <ChipList
                                   items={account.tags ?? []}
                                   tone="purple"
@@ -3343,7 +3349,7 @@ export default function Accounts() {
                               </TableCell>
                             )}
                             {visibleColumns.groups && (
-                              <TableCell className="min-w-[140px]">
+                              <TableCell className="min-w-[140px] text-center">
                                 <GroupChipList
                                   groups={resolveAccountGroups(
                                     account.group_ids ?? [],
@@ -3354,7 +3360,7 @@ export default function Accounts() {
                             )}
                             {visibleColumns.plan && (
                               <TableCell>
-                                <div className="flex flex-wrap items-center gap-1.5">
+                                <div className="flex flex-wrap items-center justify-center gap-1.5">
                                   <PlanBadge planType={account.plan_type} />
                                   <ExpiryBadge
                                     expiresAt={account.subscription_expires_at}
@@ -3365,8 +3371,8 @@ export default function Accounts() {
                             )}
                             {visibleColumns.status && (
                               <TableCell>
-                                <div className="space-y-1.5">
-                                  <div className="flex min-h-6 items-center gap-2 whitespace-nowrap">
+                                <div className="space-y-1.5 text-center">
+                                  <div className="flex min-h-6 items-center justify-center gap-2 whitespace-nowrap">
                                     <StatusBadge
                                       status={account.status}
                                       detail={
@@ -3416,26 +3422,32 @@ export default function Accounts() {
                             )}
                             {visibleColumns.requests && (
                               <TableCell>
-                                <RequestHealthCell account={account} />
+                                <div className={ACCOUNT_TABLE_CELL_CENTER_CLASS}>
+                                  <RequestHealthCell account={account} />
+                                </div>
                               </TableCell>
                             )}
                             {visibleColumns.usage && (
                               <TableCell>
-                                <UsageCell account={account} />
+                                <div className={ACCOUNT_TABLE_CELL_CENTER_CLASS}>
+                                  <UsageCell account={account} />
+                                </div>
                               </TableCell>
                             )}
                             {visibleColumns.billed && (
-                              <TableCell className="text-[13px] text-muted-foreground whitespace-nowrap">
-                                <BilledCell account={account} />
+                              <TableCell className="text-center text-[13px] text-muted-foreground whitespace-nowrap">
+                                <div className={ACCOUNT_TABLE_CELL_CENTER_CLASS}>
+                                  <BilledCell account={account} />
+                                </div>
                               </TableCell>
                             )}
                             {visibleColumns.importTime && (
-                              <TableCell className="text-[13px] text-muted-foreground whitespace-nowrap">
+                              <TableCell className="text-center text-[13px] text-muted-foreground whitespace-nowrap">
                                 {formatBeijingTime(account.created_at)}
                               </TableCell>
                             )}
                             {visibleColumns.updatedAt && (
-                              <TableCell className="text-[13px] text-muted-foreground whitespace-nowrap">
+                              <TableCell className="text-center text-[13px] text-muted-foreground whitespace-nowrap">
                                 {lazyMode ? (
                                   <div className="space-y-0.5 leading-tight">
                                     <div title={t("accounts.recordUpdatedAt")}>
@@ -3461,8 +3473,8 @@ export default function Accounts() {
                               </TableCell>
                             )}
                             {visibleColumns.actions && (
-                              <TableCell className="w-[112px] text-right align-middle">
-                                <div className="flex w-[104px] flex-wrap items-center justify-end gap-1">
+                              <TableCell className="w-[112px] text-center align-middle">
+                                <div className="mx-auto flex w-[104px] flex-wrap items-center justify-center gap-1">
                                   <AccountTableActionButton
                                     title={t("accounts.editScheduler")}
                                     onClick={() => openSchedulerEditor(account)}
