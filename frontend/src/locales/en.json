@@ -392,6 +392,7 @@
     "importDoneHint": "Token refresh is still running in the background. You can close this dialog.",
     "selectAll": "Select All",
     "email": "Email",
+    "accountName": "Account name",
     "plan": "Plan",
     "status": "Status",
     "requests": "Requests(7d)",

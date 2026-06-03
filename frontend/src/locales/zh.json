@@ -392,6 +392,7 @@
     "importDoneHint": "Token 刷新仍在后台进行，可关闭此窗口。",
     "selectAll": "全选",
     "email": "邮箱",
+    "accountName": "账号名称",
     "plan": "计划",
     "status": "状态",
     "requests": "请求(7d)",

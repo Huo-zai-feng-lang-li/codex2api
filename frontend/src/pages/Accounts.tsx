@@ -2979,7 +2979,7 @@ export default function Accounts() {
                 resetTitle={t("accounts.columnReset")}
                 labels={{
                   sequence: t("accounts.sequence"),
-                  email: t("accounts.email"),
+                  email: t("accounts.accountName"),
                   plan: t("accounts.plan"),
                   tags: t("accounts.tagsLabel"),
                   groups: t("accounts.groupsLabel"),
@@ -3170,7 +3170,7 @@ export default function Accounts() {
                         )}
                         {visibleColumns.email && (
                           <TableHead className="text-[13px] font-semibold">
-                            {t("accounts.email")}
+                            {t("accounts.accountName")}
                           </TableHead>
                         )}
                         {visibleColumns.tags && (
