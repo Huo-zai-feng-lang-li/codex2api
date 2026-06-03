@@ -1,10 +1,12 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -263,10 +265,22 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			}
 			upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
 			lastUpstreamCancel = upstreamCancel
-			directRawBody := stripResponsesWebSocketEnvelope(rawBody)
-			openAIResponsesBody := PrepareOpenAIResponsesBody(directRawBody)
 			baseURL, _ := account.OpenAIResponsesCredentials()
-			upstreamEndpoint = auth.OpenAIResponsesEndpoint(baseURL, "/v1/responses")
+			httpEndpoint := auth.OpenAIResponsesEndpoint(baseURL, "/v1/responses")
+			upstreamEndpoint = httpEndpoint
+			hasPreviousResponseID := strings.TrimSpace(gjson.GetBytes(rawBody, "previous_response_id").String()) != ""
+			openAIResponsesBody, openAIResponsesInputRaw := prepareOpenAIResponsesHTTPBodyFromWebSocket(rawBody, false)
+			if openAIResponsesInputRaw != "" {
+				expandedInputRaw = openAIResponsesInputRaw
+			}
+			executeOpenAIResponses := ExecuteOpenAIResponsesRequest
+			if hasPreviousResponseID {
+				openAIResponsesBody = PrepareOpenAIResponsesWebSocketBody(rawBody)
+				executeOpenAIResponses = ExecuteOpenAIResponsesWebSocketRequest
+				if wsEndpoint, err := openAIResponsesWebSocketEndpoint(httpEndpoint); err == nil {
+					upstreamEndpoint = wsEndpoint
+				}
+			}
 			if activeEnd != nil {
 				activeEnd()
 			}
@@ -278,9 +292,35 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				Stream:           true,
 				StartedAt:        start,
 			})
-			resp, reqErr := ExecuteOpenAIResponsesRequest(upstreamCtx, account, openAIResponsesBody, proxyURL, downstreamHeaders)
+			resp, reqErr := executeOpenAIResponses(upstreamCtx, account, openAIResponsesBody, proxyURL, downstreamHeaders)
 			attemptedUpstream = true
 			durationMs := int(time.Since(start).Milliseconds())
+			if reqErr == nil && hasPreviousResponseID && resp != nil && resp.StatusCode != http.StatusOK {
+				errBody, _ := readUpstreamErrorBody(resp)
+				if isOpenAIResponsesWebSocketUnsupported(resp.StatusCode, errBody) {
+					log.Printf("Responses WebSocket OpenAI Responses upstream WS unsupported, falling back to HTTP without previous_response_id (status %d): %s", resp.StatusCode, upstreamErrorLogBody(errBody))
+					upstreamEndpoint = httpEndpoint
+					openAIResponsesBody, openAIResponsesInputRaw = prepareOpenAIResponsesHTTPBodyFromWebSocket(rawBody, true)
+					if openAIResponsesInputRaw != "" {
+						expandedInputRaw = openAIResponsesInputRaw
+					}
+					if activeEnd != nil {
+						activeEnd()
+					}
+					activeEnd = h.beginActiveProxyRequest(c, account, auth.ActiveRequestMeta{
+						Endpoint:         "/v1/responses",
+						UpstreamEndpoint: upstreamEndpoint,
+						Model:            model,
+						EffectiveModel:   effectiveModel,
+						Stream:           true,
+						StartedAt:        start,
+					})
+					resp, reqErr = ExecuteOpenAIResponsesRequest(upstreamCtx, account, openAIResponsesBody, proxyURL, downstreamHeaders)
+					durationMs = int(time.Since(start).Milliseconds())
+				} else {
+					resp.Body = io.NopCloser(bytes.NewReader(errBody))
+				}
+			}
 
 			if reqErr != nil {
 				if c.Request.Context().Err() != nil {
@@ -800,6 +840,24 @@ func stripResponsesWebSocketEnvelope(raw []byte) []byte {
 		return raw
 	}
 	return stripped
+}
+
+func prepareOpenAIResponsesHTTPBodyFromWebSocket(raw []byte, dropPreviousResponseID bool) ([]byte, string) {
+	body := stripResponsesWebSocketEnvelope(raw)
+	if dropPreviousResponseID {
+		body, _ = expandPreviousResponse(body)
+		body, _ = sjson.DeleteBytes(body, "previous_response_id")
+	}
+	body = PrepareOpenAIResponsesBody(body)
+	return body, responsesInputRaw(body)
+}
+
+func isOpenAIResponsesWebSocketUnsupported(status int, body []byte) bool {
+	if status == http.StatusUpgradeRequired || status == http.StatusNotFound {
+		return true
+	}
+	return status == http.StatusBadRequest &&
+		strings.Contains(strings.ToLower(string(body)), "websocket upgrade required")
 }
 
 func (h *Handler) inspectPromptFilterOpenAIForWebSocket(c *gin.Context, conn *websocket.Conn, rawBody []byte, endpoint string, model string) bool {

@@ -42,6 +42,12 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import {
   Plus,
   RefreshCw,
   Trash2,
@@ -3384,26 +3390,7 @@ export default function Accounts() {
                             )}
                             {visibleColumns.requests && (
                               <TableCell>
-                                <div className="space-y-0.5 text-[13px]">
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-emerald-600 font-medium">
-                                      {account.success_requests ?? 0}
-                                    </span>
-                                    <span className="text-muted-foreground">
-                                      /
-                                    </span>
-                                    <span className="text-red-500 font-medium">
-                                      {account.error_requests ?? 0}
-                                    </span>
-                                  </div>
-                                  {((account.retry_error_requests ?? 0) > 0 ||
-                                    (account.rate_limit_attempts ?? 0) > 0) && (
-                                    <div className="text-[11px] text-muted-foreground">
-                                      retry {account.retry_error_requests ?? 0}{" "}
-                                      · 429 {account.rate_limit_attempts ?? 0}
-                                    </div>
-                                  )}
-                                </div>
+                                <RequestHealthCell account={account} />
                               </TableCell>
                             )}
                             {visibleColumns.usage && (
@@ -3448,60 +3435,49 @@ export default function Accounts() {
                               </TableCell>
                             )}
                             {visibleColumns.actions && (
-                              <TableCell className="text-right">
-                                <div className="flex items-center gap-1 justify-end">
-                                  <Button
-                                    variant="outline"
-                                    size="icon"
-                                    className="h-7 w-8 px-0"
-                                    onClick={() => openSchedulerEditor(account)}
+                              <TableCell className="w-[112px] text-right align-middle">
+                                <div className="flex w-[104px] flex-wrap items-center justify-end gap-1">
+                                  <AccountTableActionButton
                                     title={t("accounts.editScheduler")}
-                                  >
-                                    <Pencil className="size-3.5" />
-                                  </Button>
-                                  <Button
-                                    variant="outline"
-                                    size="icon"
-                                    className="h-7 w-8 px-0"
-                                    onClick={() => setUsageAccount(account)}
+                                    onClick={() => openSchedulerEditor(account)}
+                                    icon={<Pencil className="size-3.5" />}
+                                  />
+                                  <AccountTableActionButton
                                     title={t("accounts.usageDetail")}
-                                  >
-                                    <BarChart3 className="size-3.5" />
-                                  </Button>
-                                  <Button
-                                    variant="outline"
-                                    size="icon"
-                                    className="h-7 w-8 px-0"
-                                    onClick={() => setTestingAccount(account)}
+                                    onClick={() => setUsageAccount(account)}
+                                    icon={<BarChart3 className="size-3.5" />}
+                                  />
+                                  <AccountTableActionButton
                                     title={t("accounts.testConnection")}
-                                  >
-                                    <Zap className="size-3.5" />
-                                  </Button>
-                                  <Button
-                                    variant="outline"
-                                    size="icon"
-                                    className="h-7 w-8 px-0"
-                                    disabled={
-                                      refreshingIds.has(account.id) ||
-                                      account.at_only ||
-                                      account.openai_responses_api
-                                    }
-                                    onClick={() => void handleRefresh(account)}
+                                    onClick={() => setTestingAccount(account)}
+                                    icon={<Zap className="size-3.5" />}
+                                  />
+                                  <AccountTableActionButton
                                     title={
                                       account.at_only ||
                                       account.openai_responses_api
                                         ? t("accounts.atRefreshDisabled")
                                         : t("accounts.refreshAccessToken")
                                     }
-                                  >
-                                    <RefreshCw
-                                      className={`size-3.5 ${refreshingIds.has(account.id) ? "animate-spin" : ""}`}
-                                    />
-                                  </Button>
-                                  <Button
-                                    variant="outline"
-                                    size="icon"
-                                    className="h-7 w-8 px-0"
+                                    disabled={
+                                      refreshingIds.has(account.id) ||
+                                      account.at_only ||
+                                      account.openai_responses_api
+                                    }
+                                    onClick={() => void handleRefresh(account)}
+                                    icon={
+                                      <RefreshCw
+                                        className={`size-3.5 ${refreshingIds.has(account.id) ? "animate-spin" : ""}`}
+                                      />
+                                    }
+                                  />
+                                  <AccountTableActionButton
+                                    title={
+                                      account.at_only ||
+                                      account.openai_responses_api
+                                        ? t("accounts.authJsonDisabled")
+                                        : t("accounts.generateAuthJson")
+                                    }
                                     disabled={
                                       authJsonExportingIds.has(account.id) ||
                                       account.at_only ||
@@ -3510,79 +3486,63 @@ export default function Accounts() {
                                     onClick={() =>
                                       void handleGenerateAuthJSON(account)
                                     }
-                                    title={
-                                      account.at_only ||
-                                      account.openai_responses_api
-                                        ? t("accounts.authJsonDisabled")
-                                        : t("accounts.generateAuthJson")
-                                    }
-                                  >
-                                    <FileJson className="size-3.5" />
-                                  </Button>
-                                  <Button
-                                    variant={
-                                      account.enabled === false
-                                        ? "default"
-                                        : "outline"
-                                    }
-                                    size="icon"
-                                    className="h-7 w-8 px-0"
-                                    onClick={() =>
-                                      void handleToggleEnabled(account)
-                                    }
+                                    icon={<FileJson className="size-3.5" />}
+                                  />
+                                  <AccountTableActionButton
                                     title={
                                       account.enabled === false
                                         ? t("accounts.enableHint")
                                         : t("accounts.disableHint")
                                     }
-                                  >
-                                    {account.enabled === false ? (
-                                      <Power className="size-3.5" />
-                                    ) : (
-                                      <PowerOff className="size-3.5" />
-                                    )}
-                                  </Button>
-                                  <Button
                                     variant={
-                                      account.locked ? "default" : "outline"
+                                      account.enabled === false
+                                        ? "default"
+                                        : "outline"
                                     }
-                                    size="icon"
-                                    className="h-7 w-8 px-0"
                                     onClick={() =>
-                                      void handleToggleLock(account)
+                                      void handleToggleEnabled(account)
                                     }
+                                    icon={
+                                      account.enabled === false ? (
+                                        <Power className="size-3.5" />
+                                      ) : (
+                                        <PowerOff className="size-3.5" />
+                                      )
+                                    }
+                                  />
+                                  <AccountTableActionButton
                                     title={
                                       account.locked
                                         ? t("accounts.unlockHint")
                                         : t("accounts.lockHint")
                                     }
-                                  >
-                                    {account.locked ? (
-                                      <Lock className="size-3.5" />
-                                    ) : (
-                                      <Unlock className="size-3.5" />
-                                    )}
-                                  </Button>
-                                  <Button
-                                    variant="outline"
-                                    size="icon"
-                                    className="h-7 w-8 px-0"
+                                    variant={
+                                      account.locked ? "default" : "outline"
+                                    }
+                                    onClick={() =>
+                                      void handleToggleLock(account)
+                                    }
+                                    icon={
+                                      account.locked ? (
+                                        <Lock className="size-3.5" />
+                                      ) : (
+                                        <Unlock className="size-3.5" />
+                                      )
+                                    }
+                                  />
+                                  <AccountTableActionButton
+                                    title={t("accounts.resetStatusHint")}
                                     onClick={() =>
                                       void handleResetStatus(account)
                                     }
-                                    title={t("accounts.resetStatusHint")}
-                                  >
-                                    <RotateCcw className="size-3.5" />
-                                  </Button>
-                                  <Button
-                                    variant="destructive"
-                                    size="icon"
-                                    className="h-7 w-8 px-0"
-                                    onClick={() => void handleDelete(account)}
+                                    icon={<RotateCcw className="size-3.5" />}
+                                  />
+                                  <AccountTableActionButton
                                     title={t("accounts.deleteAccount")}
-                                  >
-                                    <Trash2 className="size-3.5" />
-                                  </Button>
+                                    variant="destructive"
+                                    onClick={() => void handleDelete(account)}
+                                    icon={<Trash2 className="size-3.5" />}
+                                  />
                                 </div>
                               </TableCell>
                             )}
@@ -6553,22 +6513,7 @@ function AccountMobileCard({
 
       <div className="grid min-w-0 grid-cols-2 gap-2 max-[380px]:grid-cols-1">
         <AccountMobileMetric label={t("accounts.requests")}>
-          <div className="flex items-center gap-2 text-[13px]">
-            <span className="font-medium text-emerald-600">
-              {account.success_requests ?? 0}
-            </span>
-            <span className="text-muted-foreground">/</span>
-            <span className="font-medium text-red-500">
-              {account.error_requests ?? 0}
-            </span>
-          </div>
-          {((account.retry_error_requests ?? 0) > 0 ||
-            (account.rate_limit_attempts ?? 0) > 0) && (
-            <div className="mt-0.5 text-[11px] text-muted-foreground">
-              retry {account.retry_error_requests ?? 0} · 429{" "}
-              {account.rate_limit_attempts ?? 0}
-            </div>
-          )}
+          <RequestHealthCell account={account} compact />
         </AccountMobileMetric>
         <AccountMobileMetric label={t("accounts.billed")}>
           <BilledCell account={account} />
@@ -6749,6 +6694,43 @@ function AccountMobileActionButton({
     >
       {icon}
     </Button>
+  );
+}
+
+function AccountTableActionButton({
+  title,
+  icon,
+  onClick,
+  disabled,
+  variant = "outline",
+}: {
+  title: string;
+  icon: ReactNode;
+  onClick: () => void;
+  disabled?: boolean;
+  variant?: "default" | "outline" | "destructive";
+}) {
+  return (
+    <TooltipProvider delayDuration={0} skipDelayDuration={0}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            type="button"
+            variant={variant}
+            size="icon"
+            className="h-7 w-8 px-0"
+            disabled={disabled}
+            onClick={onClick}
+            aria-label={title}
+          >
+            {icon}
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="top" sideOffset={4} className="max-w-[220px] whitespace-normal text-left">
+          {title}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }
 
@@ -7216,114 +7198,237 @@ function formatCompactUsageNumber(value?: number): string {
   return String(n);
 }
 
+function formatUsagePercent(value: number): string {
+  if (!Number.isFinite(value)) return "0%";
+  if (value >= 99.95) return "100%";
+  return `${value.toFixed(value >= 10 ? 0 : 1)}%`;
+}
+
+function formatMoney(value?: number): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  if (Math.abs(value) >= 100) return `$${value.toFixed(2)}`;
+  return `$${value.toFixed(4)}`;
+}
+
 function hasUsageWindowDetail(detail?: AccountRow["usage_5h_detail"]): boolean {
   return Boolean(
     detail && ((detail.requests ?? 0) > 0 || (detail.tokens ?? 0) > 0),
   );
 }
 
-// 用量条表达剩余额度: 数字显示已用比例,条体显示还能消耗多少。
-function usageRemainingBarColor(remainingPct: number): string {
-  if (remainingPct <= 10) return "bg-red-500";
-  if (remainingPct <= 30) return "bg-amber-500";
-  return "bg-emerald-500";
+function requestHealthTone(successRate: number, errorCount: number): {
+  pill: string;
+  bar: string;
+  text: string;
+} {
+  if (errorCount > 0 && successRate < 90) {
+    return {
+      pill: "border-red-500/25 bg-red-500/10 text-red-600 dark:text-red-300",
+      bar: "bg-red-500",
+      text: "text-red-600 dark:text-red-300",
+    };
+  }
+  if (errorCount > 0 && successRate < 98) {
+    return {
+      pill: "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300",
+      bar: "bg-amber-500",
+      text: "text-amber-700 dark:text-amber-300",
+    };
+  }
+  return {
+    pill: "border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+    bar: "bg-emerald-500",
+    text: "text-emerald-700 dark:text-emerald-300",
+  };
 }
 
-function usageTrackColor(pct: number): string {
-  if (pct >= 90) return "bg-red-500/12";
-  if (pct >= 70) return "bg-amber-500/14";
-  return "bg-muted";
+function RequestHealthCell({
+  account,
+  compact = false,
+}: {
+  account: AccountRow;
+  compact?: boolean;
+}) {
+  const { t } = useTranslation();
+  const success = account.success_requests ?? 0;
+  const errors = account.error_requests ?? 0;
+  const retry = account.retry_error_requests ?? 0;
+  const rateLimited = account.rate_limit_attempts ?? 0;
+  const total = success + errors;
+  const successRate = total > 0 ? (success / total) * 100 : 100;
+  const tone = requestHealthTone(successRate, errors);
+  const barWidth = total > 0 ? Math.max(4, Math.min(100, successRate)) : 0;
+  const title = [
+    `${t("accounts.requestSuccessRate")}: ${formatUsagePercent(successRate)}`,
+    `${t("accounts.requestSuccessShort")}: ${success}`,
+    `${t("accounts.requestErrorShort")}: ${errors}`,
+    `${t("accounts.requestRetryFailureShort")}: ${retry}`,
+    `${t("accounts.requestRateLimitShort")}: ${rateLimited}`,
+    account.dynamic_concurrency_limit !== undefined
+      ? `${t("accounts.requestConcurrencyShort")}: ${account.dynamic_concurrency_limit}`
+      : "",
+  ].filter(Boolean).join(" · ");
+
+  return (
+    <div
+      className={`min-w-0 ${compact ? "w-full" : "w-[148px]"} space-y-1`}
+      title={title}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span
+          className={`inline-flex min-w-[54px] justify-center rounded-md border px-1.5 py-0.5 text-[11px] font-bold tabular-nums ${tone.pill}`}
+        >
+          {formatUsagePercent(successRate)}
+        </span>
+        <span className="truncate text-[11px] font-medium text-muted-foreground">
+          {t("accounts.requestSuccessRate")}
+        </span>
+      </div>
+      <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+        <div className={`h-full rounded-full ${tone.bar}`} style={{ width: `${barWidth}%` }} />
+      </div>
+      <div className="flex flex-wrap gap-1 text-[11px] tabular-nums">
+        <RequestMetricChip
+          label={t("accounts.requestSuccessShort")}
+          value={success}
+          className="text-emerald-700 dark:text-emerald-300"
+        />
+        <RequestMetricChip
+          label={t("accounts.requestErrorShort")}
+          value={errors}
+          className={errors > 0 ? tone.text : "text-muted-foreground"}
+        />
+        {retry > 0 && (
+          <RequestMetricChip
+            label={t("accounts.requestRetryFailureShort")}
+            value={retry}
+            className="text-amber-700 dark:text-amber-300"
+          />
+        )}
+        {rateLimited > 0 && (
+          <RequestMetricChip
+            label={t("accounts.requestRateLimitShort")}
+            value={rateLimited}
+            className="text-red-600 dark:text-red-300"
+          />
+        )}
+        {account.dynamic_concurrency_limit !== undefined && (
+          <RequestMetricChip
+            label={t("accounts.requestConcurrencyCompact")}
+            value={account.dynamic_concurrency_limit}
+            className="text-muted-foreground"
+          />
+        )}
+      </div>
+    </div>
+  );
 }
 
-// 单行用量进度条
-function UsageBar({
+function RequestMetricChip({
+  label,
+  value,
+  className,
+}: {
+  label: string;
+  value: number | string;
+  className?: string;
+}) {
+  return (
+    <div className="inline-flex min-w-[44px] items-baseline gap-1 rounded-md bg-muted/60 px-1.5 py-0.5">
+      <span className="shrink-0 text-[9px] font-medium uppercase text-muted-foreground">
+        {label}
+      </span>
+      <span className={`truncate text-[12px] font-bold ${className ?? ""}`}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
+function usageCardTone(pct: number): string {
+  if (pct >= 90) return "border-red-500/25 bg-red-500/10";
+  if (pct >= 70) return "border-amber-500/25 bg-amber-500/10";
+  return "border-emerald-500/20 bg-emerald-500/5";
+}
+
+function UsageWindowLine({
   label,
   pct,
   resetAt,
   detail,
 }: {
   label: string;
-  pct: number;
+  pct?: number;
   resetAt?: string;
   detail?: AccountRow["usage_5h_detail"];
 }) {
   const resetText = formatResetAt(resetAt);
   const { t } = useTranslation();
-  const detailText = hasUsageWindowDetail(detail)
-    ? `${formatCompactUsageNumber(detail?.requests)} ${t("accounts.usageReqUnit")} / ${formatCompactUsageNumber(detail?.tokens)} ${t("accounts.usageTokUnit")}`
-    : "";
-  const clampedPct = Math.min(100, Math.max(0, pct));
-  const remainingPct = Math.max(0, 100 - clampedPct);
+  const hasPct = typeof pct === "number" && Number.isFinite(pct);
+  const clampedPct = hasPct ? Math.min(100, Math.max(0, pct)) : null;
+  const remainingPct = clampedPct === null ? null : Math.max(0, 100 - clampedPct);
+  const hasDetail = hasUsageWindowDetail(detail);
+  const costText =
+    detail &&
+    (typeof detail.account_billed === "number" ||
+      typeof detail.user_billed === "number")
+      ? formatMoney(detail.account_billed)
+      : "";
   return (
-    <div>
-      <div className="flex items-center gap-1.5">
-        <span className="text-[11px] font-medium text-muted-foreground w-5 shrink-0">
+    <div
+      className={`min-w-0 rounded-md border px-2 py-1.5 ${clampedPct === null ? "border-border/80 bg-muted/30" : usageCardTone(clampedPct)}`}
+      title={[
+        label,
+        clampedPct !== null ? `${t("accounts.usageUsed")} ${formatUsagePercent(clampedPct)}` : t("accounts.usageNoPercent"),
+        hasDetail
+          ? `${formatCompactUsageNumber(detail?.requests)} ${t("accounts.usageReqUnit")} / ${formatCompactUsageNumber(detail?.tokens)} ${t("accounts.usageTokUnit")}`
+          : "",
+        costText ? `${t("accounts.usageCostShort")} ${costText}` : "",
+        resetText ? `${t("accounts.usageResetAt")} ${resetText}` : "",
+      ].filter(Boolean).join(" · ")}
+    >
+      <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] tabular-nums">
+        <span className="shrink-0 rounded bg-background/80 px-1.5 py-0.5 text-[11px] font-bold text-foreground shadow-sm ring-1 ring-border/70">
           {label}
         </span>
-        <div className={`flex-1 h-1.5 rounded-full overflow-hidden min-w-[72px] ${usageTrackColor(clampedPct)}`}>
-          <div
-            className={`h-full rounded-full transition-all ${usageRemainingBarColor(remainingPct)}`}
-            style={{ width: `${remainingPct}%` }}
-          />
-        </div>
-        <span className="text-[12px] font-semibold w-[42px] text-right shrink-0">
-          {pct.toFixed(1)}%
-        </span>
+        {clampedPct !== null ? (
+          <span className="shrink-0 text-[11px] font-semibold text-muted-foreground">
+            {formatUsagePercent(clampedPct)}
+          </span>
+        ) : (
+          <span className="shrink-0 text-[10px] font-medium text-muted-foreground">
+            {t("accounts.usageStatsOnlyShort")}
+          </span>
+        )}
+        {remainingPct !== null && (
+          <span className="shrink-0 text-[10px] font-medium text-muted-foreground">
+            {t("accounts.usageRemainingShort")}{formatUsagePercent(remainingPct)}
+          </span>
+        )}
+        {resetText && (
+          <span className="shrink-0 whitespace-nowrap font-medium text-muted-foreground">
+            {resetText}
+          </span>
+        )}
       </div>
-      {detailText && (
-        <div className="text-[11px] font-medium text-muted-foreground mt-0.5 pl-[26px]">
-          {detailText}
+      {hasDetail && (
+        <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] tabular-nums">
+          <span className="shrink-0 whitespace-nowrap font-semibold text-foreground">
+            {formatCompactUsageNumber(detail?.requests)} {t("accounts.usageReqUnit")}
+          </span>
+          <span className="shrink-0 whitespace-nowrap font-semibold text-foreground">
+            {formatCompactUsageNumber(detail?.tokens)} {t("accounts.usageTokUnit")}
+          </span>
         </div>
       )}
-      {resetText && (
-        <div className="text-[11px] font-medium text-muted-foreground mt-0.5 pl-[26px]">
-          ⏱ {resetText}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function UsageWindowStat({
-  label,
-  detail,
-}: {
-  label: string;
-  detail?: AccountRow["usage_5h_detail"];
-}) {
-  const { t } = useTranslation();
-  if (!detail || !hasUsageWindowDetail(detail)) return null;
-
-  const accountBilledText =
-    typeof detail.account_billed === "number"
-      ? detail.account_billed.toFixed(4)
-      : "";
-  const userBilledText =
-    typeof detail.user_billed === "number" ? detail.user_billed.toFixed(4) : "";
-
-  return (
-    <div className="flex flex-col gap-0.5">
-      <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-        <span className="w-5 shrink-0">{label}</span>
-        <span>
-          {formatCompactUsageNumber(detail?.requests)}{" "}
-          {t("accounts.usageReqUnit")} /{" "}
-          {formatCompactUsageNumber(detail?.tokens)}{" "}
-          {t("accounts.usageTokUnit")}
-        </span>
-      </div>
-      {(accountBilledText || userBilledText) && (
-        <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground/80 pl-6">
-          {accountBilledText && (
-            <span>
-              {t("accounts.accountBilledLabel")}: ${accountBilledText}
-            </span>
-          )}
-          {userBilledText && (
-            <span>
-              {t("accounts.userBilledLabel")}: ${userBilledText}
-            </span>
-          )}
+      {costText && (
+        <div className="mt-1 flex min-w-0 items-center justify-between gap-1.5 rounded-md bg-primary/10 px-1.5 py-1 text-primary ring-1 ring-inset ring-primary/15 tabular-nums">
+          <span className="shrink-0 text-[9px] font-semibold uppercase text-primary/70">
+            {t("accounts.usageCostShort")}
+          </span>
+          <span className="min-w-0 truncate text-[12px] font-extrabold">
+            {costText}
+          </span>
         </div>
       )}
     </div>
@@ -7362,44 +7467,32 @@ function UsageCell({ account }: { account: AccountRow }) {
     if (!has5h && !has7d && !has5hDetail && !has7dDetail && !has5hReset && !has7dReset)
       return <span className="text-[12px] text-muted-foreground">-</span>;
     return (
-      <div className="w-52 space-y-1.5">
-        {has5h ? (
-          <UsageBar
-            label="5h"
-            pct={account.usage_percent_5h!}
-            resetAt={account.reset_5h_at}
-            detail={account.usage_5h_detail}
-          />
-        ) : (
-          <UsageWindowStat label="5h" detail={account.usage_5h_detail} />
-        )}
-        {has7d ? (
-          <UsageBar
-            label="7d"
-            pct={account.usage_percent_7d!}
-            resetAt={account.reset_7d_at}
-            detail={account.usage_7d_detail}
-          />
-        ) : (
-          <UsageWindowStat label="7d" detail={account.usage_7d_detail} />
-        )}
+      <div className="grid w-[min(100%,300px)] min-w-[190px] grid-cols-[repeat(auto-fit,minmax(136px,1fr))] gap-1.5">
+        <UsageWindowLine
+          label="5h"
+          pct={has5h ? account.usage_percent_5h! : undefined}
+          resetAt={account.reset_5h_at}
+          detail={account.usage_5h_detail}
+        />
+        <UsageWindowLine
+          label="7d"
+          pct={has7d ? account.usage_percent_7d! : undefined}
+          resetAt={account.reset_7d_at}
+          detail={account.usage_7d_detail}
+        />
       </div>
     );
   }
 
   if (sevenDayPresent) {
     return (
-      <div className="w-48">
-        {has7d ? (
-          <UsageBar
-            label="7d"
-            pct={account.usage_percent_7d!}
-            resetAt={account.reset_7d_at}
-            detail={account.usage_7d_detail}
-          />
-        ) : (
-          <UsageWindowStat label="7d" detail={account.usage_7d_detail} />
-        )}
+      <div className="w-[min(100%,150px)] min-w-[136px]">
+        <UsageWindowLine
+          label="7d"
+          pct={has7d ? account.usage_percent_7d! : undefined}
+          resetAt={account.reset_7d_at}
+          detail={account.usage_7d_detail}
+        />
       </div>
     );
   }
@@ -7408,15 +7501,22 @@ function UsageCell({ account }: { account: AccountRow }) {
 }
 
 function BilledCell({ account }: { account: AccountRow }) {
-  const h5 = typeof account.billed_5h === "number" ? account.billed_5h.toFixed(2) : null;
-  const d7 = typeof account.billed_7d === "number" ? account.billed_7d.toFixed(2) : null;
+  const billed5h =
+    typeof account.billed_5h === "number"
+      ? account.billed_5h
+      : account.usage_5h_detail?.account_billed;
+  const billed7d =
+    typeof account.billed_7d === "number"
+      ? account.billed_7d
+      : account.usage_7d_detail?.account_billed;
+  const h5 = typeof billed5h === "number" ? formatMoney(billed5h) : null;
+  const d7 = typeof billed7d === "number" ? formatMoney(billed7d) : null;
   if (h5 === null && d7 === null) return <span className="text-[12px] text-muted-foreground">-</span>;
   return (
-    <span className="text-[12px] text-muted-foreground">
-      {h5 !== null ? `5h: $${h5}` : "5h: -"}
-      {" / "}
-      {d7 !== null ? `7d: $${d7}` : "7d: -"}
-    </span>
+    <div className="min-w-[92px] space-y-0.5 text-[12px] text-muted-foreground">
+      <div>5h: {h5 ?? "-"}</div>
+      <div>7d: {d7 ?? "-"}</div>
+    </div>
   );
 }
 

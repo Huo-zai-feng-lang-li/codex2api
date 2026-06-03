@@ -1548,6 +1548,13 @@ func PrepareOpenAIResponsesBody(rawBody []byte) []byte {
 	return result
 }
 
+func PrepareOpenAIResponsesWebSocketBody(rawBody []byte) []byte {
+	body := PrepareOpenAIResponsesBody(rawBody)
+	body, _ = sjson.SetBytes(body, "type", "response.create")
+	body, _ = sjson.SetBytes(body, "stream", true)
+	return body
+}
+
 // PrepareCompactResponsesBody 将 /responses/compact 请求转换为上游可接受的格式。
 // 它复用通用 Responses 预处理，但会移除 compact 端点不接受的自动注入字段。
 func PrepareCompactResponsesBody(rawBody []byte) ([]byte, string) {

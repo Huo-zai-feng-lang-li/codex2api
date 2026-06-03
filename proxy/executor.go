@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -73,6 +75,7 @@ func evictExpiredClients() {
 const (
 	codexTransportModeStandard   = "standard"
 	codexTransportModeUTLSChrome = "utls_chrome"
+	openAIResponsesWebSocketBeta = "responses_websockets=2026-02-06"
 )
 
 func codexTransportModeFromEnv() string {
@@ -368,6 +371,131 @@ func ExecuteOpenAIResponsesRequest(ctx context.Context, account *auth.Account, r
 		return nil, ErrUpstream(0, "请求 OpenAI Responses API 失败", err)
 	}
 	return resp, nil
+}
+
+func ExecuteOpenAIResponsesWebSocketRequest(ctx context.Context, account *auth.Account, requestBody []byte, proxyOverride string, headers http.Header) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	baseURL, apiKey := account.OpenAIResponsesCredentials()
+	account.Mu().RLock()
+	proxyURL := account.ProxyURL
+	account.Mu().RUnlock()
+	if proxyOverride != "" {
+		proxyURL = proxyOverride
+	}
+	if baseURL == "" || apiKey == "" {
+		return nil, ErrNoAvailableAccount()
+	}
+
+	wsURL, err := openAIResponsesWebSocketEndpoint(auth.OpenAIResponsesEndpoint(baseURL, "/v1/responses"))
+	if err != nil {
+		return nil, ErrInternalError("构建 OpenAI Responses WebSocket URL 失败", err)
+	}
+	dialer := &websocket.Dialer{
+		HandshakeTimeout:  30 * time.Second,
+		EnableCompression: true,
+		NetDialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+	}
+	if strings.TrimSpace(proxyURL) != "" {
+		proxyURLParsed, err := url.Parse(proxyURL)
+		if err != nil {
+			return nil, ErrInternalError("解析代理地址失败", err)
+		}
+		dialer.Proxy = func(req *http.Request) (*url.URL, error) {
+			return proxyURLParsed, nil
+		}
+	}
+
+	upstreamHeaders := http.Header{}
+	upstreamHeaders.Set("Authorization", "Bearer "+apiKey)
+	if beta := strings.TrimSpace(headers.Get("OpenAI-Beta")); beta != "" {
+		upstreamHeaders.Set("OpenAI-Beta", beta)
+	} else {
+		upstreamHeaders.Set("OpenAI-Beta", openAIResponsesWebSocketBeta)
+	}
+	for _, key := range []string{"OpenAI-Organization", "OpenAI-Project", "Idempotency-Key"} {
+		if value := strings.TrimSpace(headers.Get(key)); value != "" {
+			upstreamHeaders.Set(key, value)
+		}
+	}
+
+	conn, handshakeResp, err := dialer.DialContext(ctx, wsURL, upstreamHeaders)
+	if err != nil {
+		if handshakeResp != nil {
+			return handshakeResp, nil
+		}
+		return nil, ErrUpstream(0, "连接 OpenAI Responses WebSocket 失败", err)
+	}
+
+	wsBody := PrepareOpenAIResponsesWebSocketBody(requestBody)
+	if err := conn.WriteMessage(websocket.TextMessage, wsBody); err != nil {
+		conn.Close()
+		return nil, ErrUpstream(0, "发送 OpenAI Responses WebSocket 请求失败", err)
+	}
+
+	pr, pw := io.Pipe()
+	go bridgeOpenAIResponsesWebSocketToSSE(ctx, conn, pw)
+
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       pr,
+	}, nil
+}
+
+func openAIResponsesWebSocketEndpoint(httpEndpoint string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(httpEndpoint))
+	if err != nil {
+		return "", err
+	}
+	switch parsed.Scheme {
+	case "https":
+		parsed.Scheme = "wss"
+	case "http":
+		parsed.Scheme = "ws"
+	case "wss", "ws":
+	default:
+		return "", fmt.Errorf("unsupported scheme %q", parsed.Scheme)
+	}
+	return parsed.String(), nil
+}
+
+func bridgeOpenAIResponsesWebSocketToSSE(ctx context.Context, conn *websocket.Conn, pw *io.PipeWriter) {
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			conn.Close()
+		case <-done:
+		}
+	}()
+	defer close(done)
+	defer conn.Close()
+
+	for {
+		msgType, data, err := conn.ReadMessage()
+		if err != nil {
+			_ = pw.CloseWithError(fmt.Errorf("websocket closed before response.completed: %w", err))
+			return
+		}
+		if msgType != websocket.TextMessage && msgType != websocket.BinaryMessage {
+			continue
+		}
+		if _, err := fmt.Fprintf(pw, "data: %s\n\n", data); err != nil {
+			_ = pw.CloseWithError(err)
+			return
+		}
+		eventType := gjson.GetBytes(data, "type").String()
+		if eventType == "response.completed" || eventType == "response.failed" {
+			_ = pw.Close()
+			return
+		}
+	}
 }
 
 // ExecuteCompactRequest 向 Codex 上游发送 /responses/compact 请求（非流式压缩接口）

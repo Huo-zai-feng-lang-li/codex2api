@@ -1164,10 +1164,116 @@ func TestResponsesWebSocketRetriesWrappedNoAvailableAccountStreamBreak(t *testin
 func TestResponsesWebSocketUsesDirectOpenAIResponsesAccount(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	upstreamRequests := make(chan []byte, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/responses" {
 			t.Fatalf("upstream path = %q, want /v1/responses", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer upstream-key" {
+			t.Fatalf("upstream Authorization = %q, want Bearer upstream-key", got)
+		}
+		if got := r.Header.Get("OpenAI-Beta"); got != openAIResponsesWebSocketBeta {
+			t.Fatalf("upstream OpenAI-Beta = %q, want %q", got, openAIResponsesWebSocketBeta)
+		}
+		if !websocket.IsWebSocketUpgrade(r) {
+			http.Error(w, "websocket required", http.StatusBadRequest)
+			return
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade upstream websocket: %v", err)
+		}
+		defer conn.Close()
+		_, body, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read upstream websocket body: %v", err)
+		}
+		upstreamRequests <- append([]byte(nil), body...)
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.output_text.delta","delta":"ok"}`)); err != nil {
+			t.Fatalf("write upstream delta: %v", err)
+		}
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"service_tier":"default"}}`)); err != nil {
+			t.Fatalf("write upstream completed: %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency: 2,
+		TestModel:      "gpt-5.4",
+		MaxRetries:     2,
+	})
+	store.AddAccount(&auth.Account{
+		DBID:         1,
+		Name:         "direct-openai-responses",
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      upstream.URL,
+		APIKey:       "upstream-key",
+		Models:       []string{"gpt-5.4"},
+	})
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+
+	router := gin.New()
+	handler.RegisterRoutes(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		if resp != nil {
+			t.Fatalf("dial websocket failed: %v status=%d", err, resp.StatusCode)
+		}
+		t.Fatalf("dial websocket failed: %v", err)
+	}
+	defer conn.Close()
+
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"model":"gpt-5.4","previous_response_id":"resp_prev","input":"hello"}`)); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, first, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read first downstream event: %v", err)
+	}
+	if eventType := gjson.GetBytes(first, "type").String(); eventType != "response.output_text.delta" {
+		t.Fatalf("first downstream event = %q body=%s", eventType, first)
+	}
+	_, second, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read terminal event: %v", err)
+	}
+	if eventType := gjson.GetBytes(second, "type").String(); eventType != "response.completed" {
+		t.Fatalf("terminal event type = %q body=%s", eventType, second)
+	}
+	select {
+	case body := <-upstreamRequests:
+		if model := gjson.GetBytes(body, "model").String(); model != "gpt-5.4" {
+			t.Fatalf("upstream model = %q, want gpt-5.4; body=%s", model, body)
+		}
+		if typ := gjson.GetBytes(body, "type").String(); typ != "response.create" {
+			t.Fatalf("upstream websocket type = %q, want response.create; body=%s", typ, body)
+		}
+		if prev := gjson.GetBytes(body, "previous_response_id").String(); prev != "resp_prev" {
+			t.Fatalf("upstream previous_response_id = %q, want resp_prev; body=%s", prev, body)
+		}
+	default:
+		t.Fatal("direct OpenAI Responses account did not receive websocket turn")
+	}
+}
+
+func TestResponsesWebSocketDirectOpenAIResponsesWithoutPreviousUsesHTTP(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstreamRequests := make(chan []byte, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			t.Fatalf("upstream path = %q, want /v1/responses", r.URL.Path)
+		}
+		if websocket.IsWebSocketUpgrade(r) {
+			t.Fatal("direct OpenAI Responses first turn should use HTTP, not websocket")
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer upstream-key" {
 			t.Fatalf("upstream Authorization = %q, want Bearer upstream-key", got)
@@ -1240,10 +1346,112 @@ func TestResponsesWebSocketUsesDirectOpenAIResponsesAccount(t *testing.T) {
 			t.Fatalf("upstream model = %q, want gpt-5.4; body=%s", model, body)
 		}
 		if gjson.GetBytes(body, "type").Exists() {
-			t.Fatalf("direct OpenAI Responses body should not include websocket envelope type: %s", body)
+			t.Fatalf("direct OpenAI Responses HTTP body should not include websocket envelope type: %s", body)
 		}
 	default:
-		t.Fatal("direct OpenAI Responses account did not receive websocket turn")
+		t.Fatal("direct OpenAI Responses account did not receive HTTP turn")
+	}
+}
+
+func TestResponsesWebSocketDirectOpenAIResponsesPreviousFallsBackToHTTPWhenWebSocketUnsupported(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetResponseCacheForTest()
+	cacheCompletedResponse(
+		[]byte(`[{"type":"message","role":"user","content":"call a tool"}]`),
+		[]byte(`{"type":"response.completed","response":{"id":"resp_prev","output":[{"type":"function_call","id":"fc_123","call_id":"call_abc","name":"lookup","arguments":"{}"}]}}`),
+	)
+
+	httpRequests := make(chan []byte, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			t.Fatalf("upstream path = %q, want /v1/responses", r.URL.Path)
+		}
+		if websocket.IsWebSocketUpgrade(r) {
+			http.Error(w, `{"error":{"message":"WebSocket upgrade required (Upgrade: websocket)","type":"invalid_request_error"}}`, http.StatusUpgradeRequired)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read fallback request body: %v", err)
+		}
+		httpRequests <- append([]byte(nil), body...)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(
+			`data: {"type":"response.output_text.delta","delta":"ok"}` + "\n\n" +
+				`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"service_tier":"default"}}` + "\n\n",
+		))
+	}))
+	defer upstream.Close()
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency: 2,
+		TestModel:      "gpt-5.4",
+		MaxRetries:     2,
+	})
+	store.AddAccount(&auth.Account{
+		DBID:         1,
+		Name:         "direct-openai-responses",
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      upstream.URL,
+		APIKey:       "upstream-key",
+		Models:       []string{"gpt-5.4"},
+	})
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+
+	router := gin.New()
+	handler.RegisterRoutes(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		if resp != nil {
+			t.Fatalf("dial websocket failed: %v status=%d", err, resp.StatusCode)
+		}
+		t.Fatalf("dial websocket failed: %v", err)
+	}
+	defer conn.Close()
+
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"model":"gpt-5.4","previous_response_id":"resp_prev","input":[{"type":"function_call_output","call_id":"call_abc","output":"ok"}]}`)); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, first, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read first downstream event: %v", err)
+	}
+	if eventType := gjson.GetBytes(first, "type").String(); eventType != "response.output_text.delta" {
+		t.Fatalf("first downstream event = %q body=%s", eventType, first)
+	}
+	_, second, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read terminal event: %v", err)
+	}
+	if eventType := gjson.GetBytes(second, "type").String(); eventType != "response.completed" {
+		t.Fatalf("terminal event type = %q body=%s", eventType, second)
+	}
+	select {
+	case body := <-httpRequests:
+		if gjson.GetBytes(body, "type").Exists() {
+			t.Fatalf("fallback HTTP body should not include websocket envelope type: %s", body)
+		}
+		if gjson.GetBytes(body, "previous_response_id").Exists() {
+			t.Fatalf("fallback HTTP body should drop previous_response_id after WS unsupported: %s", body)
+		}
+		input := gjson.GetBytes(body, "input").Array()
+		if len(input) != 3 {
+			t.Fatalf("fallback HTTP body should inject cached tool context; input count=%d body=%s", len(input), body)
+		}
+		if typ := input[1].Get("type").String(); typ != "function_call" {
+			t.Fatalf("fallback input[1].type = %q, want function_call; body=%s", typ, body)
+		}
+		if callID := input[2].Get("call_id").String(); callID != "call_abc" {
+			t.Fatalf("fallback output call_id = %q, want call_abc; body=%s", callID, body)
+		}
+	default:
+		t.Fatal("direct OpenAI Responses fallback did not receive HTTP turn")
 	}
 }
 
