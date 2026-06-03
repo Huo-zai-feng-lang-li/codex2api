@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useVisiblePolling } from './useVisiblePolling'
 
-const GITHUB_API = 'https://api.github.com/repos/james-6-23/codex2api/releases/latest'
-const CACHE_KEY = 'codex2api_latest_version'
+export const CODEX2API_GITHUB_REPO = 'Huo-zai-feng-lang-li/codex2api'
+export const CODEX2API_GITHUB_URL = `https://github.com/${CODEX2API_GITHUB_REPO}`
+const GITHUB_API = `https://api.github.com/repos/${CODEX2API_GITHUB_REPO}/releases/latest`
+const CACHE_KEY = `codex2api_latest_version:${CODEX2API_GITHUB_REPO}`
 const CACHE_TTL = 10 * 60 * 1000 // 10 分钟缓存
 const POLL_INTERVAL = 30 * 60 * 1000 // 30 分钟轮询
 

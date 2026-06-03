@@ -5,7 +5,7 @@ import { LayoutDashboard, Users, Activity, Settings, Server, Languages, Globe, B
 import { useTranslation } from 'react-i18next'
 import { resetAdminAuthState } from '../api'
 import { DEFAULT_SITE_LOGO, isBrandingVideo, useBranding } from '../branding'
-import { useVersionCheck } from '../hooks/useVersionCheck'
+import { CODEX2API_GITHUB_URL, useVersionCheck } from '../hooks/useVersionCheck'
 import { useTheme } from '../hooks/useTheme'
 import SecurityBanner from './SecurityBanner'
 
@@ -66,7 +66,7 @@ export default function Layout({ children }: PropsWithChildren) {
   const versionButtonRef = useRef<HTMLButtonElement | null>(null)
   const [versionPopoverPos, setVersionPopoverPos] = useState<{ top: number; left: number } | null>(null)
   const releaseURL = latestVersion
-    ? `https://github.com/james-6-23/codex2api/releases/tag/${encodeURIComponent(latestVersion)}`
+    ? `${CODEX2API_GITHUB_URL}/releases/tag/${encodeURIComponent(latestVersion)}`
     : undefined
 
   useEffect(() => {
@@ -391,7 +391,7 @@ export default function Layout({ children }: PropsWithChildren) {
                   <Languages className="size-[18px]" />
                 </button>
                 <a
-                  href="https://github.com/james-6-23/codex2api"
+                  href={CODEX2API_GITHUB_URL}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="flex items-center justify-center size-9 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/70 transition-colors duration-150"

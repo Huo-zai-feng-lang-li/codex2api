@@ -3359,7 +3359,7 @@ export default function Accounts() {
                               </TableCell>
                             )}
                             {visibleColumns.plan && (
-                              <TableCell>
+                              <TableCell className={ACCOUNT_TABLE_CELL_CLASS}>
                                 <div className="flex flex-wrap items-center justify-center gap-1.5">
                                   <PlanBadge planType={account.plan_type} />
                                   <ExpiryBadge
@@ -3370,7 +3370,7 @@ export default function Accounts() {
                               </TableCell>
                             )}
                             {visibleColumns.status && (
-                              <TableCell>
+                              <TableCell className={ACCOUNT_TABLE_CELL_CLASS}>
                                 <div className="space-y-1.5 text-center">
                                   <div className="flex min-h-6 items-center justify-center gap-2 whitespace-nowrap">
                                     <StatusBadge
@@ -3421,14 +3421,14 @@ export default function Accounts() {
                               </TableCell>
                             )}
                             {visibleColumns.requests && (
-                              <TableCell>
+                              <TableCell className={ACCOUNT_TABLE_CELL_CLASS}>
                                 <div className={ACCOUNT_TABLE_CELL_CENTER_CLASS}>
                                   <RequestHealthCell account={account} />
                                 </div>
                               </TableCell>
                             )}
                             {visibleColumns.usage && (
-                              <TableCell>
+                              <TableCell className={ACCOUNT_TABLE_CELL_CLASS}>
                                 <div className={ACCOUNT_TABLE_CELL_CENTER_CLASS}>
                                   <UsageCell account={account} />
                                 </div>
