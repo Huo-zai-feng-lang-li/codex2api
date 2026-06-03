@@ -27,7 +27,7 @@ export function formatAccountIdentity(account: {
   account_id?: number | string | null
 }, fallback = '-'): string {
   const name = account.account_name?.trim()
-  if (name && !isURLLike(name)) return formatCompactEmail(name) || name
+  if (name) return name
 
   const email = account.account_email?.trim()
   if (email && !isURLLike(email)) return formatCompactEmail(email) || email
