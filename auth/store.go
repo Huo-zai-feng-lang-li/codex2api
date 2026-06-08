@@ -2091,6 +2091,9 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 			MaxRateLimitRetries:              1,
 			SchedulerMode:                    "round_robin",
 			UpstreamGuardMode:                database.DefaultUpstreamGuardMode,
+			SecurityCaptureMode:              database.DefaultSecurityCaptureMode,
+			SecurityCaptureRetentionDays:     database.DefaultSecurityCaptureRetentionDays,
+			SecurityCaptureMaxBodyBytes:      database.DefaultSecurityCaptureMaxBodyBytes,
 		}
 	}
 	s := &Store{
@@ -3794,6 +3797,9 @@ func upstreamGuardConfigFromSettings(settings *database.SystemSettings) upstream
 		return cfg
 	}
 	cfg.Mode = database.NormalizeUpstreamGuardMode(settings.UpstreamGuardMode)
+	cfg.CaptureMode = database.NormalizeSecurityCaptureMode(settings.SecurityCaptureMode)
+	cfg.CaptureRetentionDays = database.NormalizeSecurityCaptureRetentionDays(settings.SecurityCaptureRetentionDays)
+	cfg.CaptureMaxBodyBytes = database.NormalizeSecurityCaptureMaxBodyBytes(settings.SecurityCaptureMaxBodyBytes)
 	cfg.Suppressions = parseUpstreamGuardSuppressions(settings.UpstreamGuardSuppressions)
 	return upstreamguard.NormalizeConfig(cfg)
 }
@@ -3808,6 +3814,9 @@ func parseUpstreamGuardSuppressions(raw string) []upstreamguard.SuppressionRule 
 
 func (s *Store) SetUpstreamGuardConfig(cfg upstreamguard.Config) {
 	cfg.Mode = database.NormalizeUpstreamGuardMode(cfg.Mode)
+	cfg.CaptureMode = database.NormalizeSecurityCaptureMode(cfg.CaptureMode)
+	cfg.CaptureRetentionDays = database.NormalizeSecurityCaptureRetentionDays(cfg.CaptureRetentionDays)
+	cfg.CaptureMaxBodyBytes = database.NormalizeSecurityCaptureMaxBodyBytes(cfg.CaptureMaxBodyBytes)
 	s.upstreamGuardConfig.Store(upstreamguard.NormalizeConfig(cfg))
 }
 

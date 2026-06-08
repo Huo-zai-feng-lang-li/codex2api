@@ -204,7 +204,9 @@ func (h *Handler) Messages(c *gin.Context) {
 		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
 		lastUpstreamCancel = upstreamCancel
 		ttftGuard := newFirstTokenTimeoutGuard(currentFirstTokenTimeout(), upstreamCancel)
-		if verdict := h.inspectUpstreamGuardRequest(c.Request.Context(), "/v1/messages", effectiveModel, account, codexBody, isStream, c.GetHeader("X-Request-Id")); shouldBlockUpstreamGuard(verdict) {
+		audit := h.newUpstreamGuardAudit(c.Request.Context(), "/v1/messages", effectiveModel, account, codexBody, isStream, upstreamGuardRequestID(c))
+		defer audit.Finish()
+		if verdict := audit.InspectRequest(); shouldBlockUpstreamGuard(verdict) {
 			h.store.Release(account)
 			sendAnthropicError(c, http.StatusForbidden, "permission_error", upstreamGuardBlockMessage(verdict))
 			return
@@ -345,7 +347,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			var pendingFirstTokenEvents bytes.Buffer
 
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
-				if verdict := h.inspectUpstreamGuardResponse(c.Request.Context(), "/v1/messages", effectiveModel, account, data, true, c.GetHeader("X-Request-Id")); shouldBlockUpstreamGuard(verdict) {
+				if verdict := audit.InspectResponseSSE(data); shouldBlockUpstreamGuard(verdict) {
 					sendAnthropicStreamError(c, "permission_error", upstreamGuardBlockMessage(verdict))
 					wroteAnyBody = true
 					gotTerminal = true
@@ -434,7 +436,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			accumulator := newAnthropicResponseAccumulator(originalModel)
 
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
-				if verdict := h.inspectUpstreamGuardResponse(c.Request.Context(), "/v1/messages", effectiveModel, account, data, false, c.GetHeader("X-Request-Id")); shouldBlockUpstreamGuard(verdict) {
+				if verdict := audit.ScanResponseBody(data, false); shouldBlockUpstreamGuard(verdict) {
 					verdictCopy := verdict
 					upstreamGuardBlockedVerdict = &verdictCopy
 					gotTerminal = true
@@ -477,7 +479,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			if lastCompletedData != nil {
 				anthropicResp := accumulator.build(lastCompletedData)
 				if responseBody, err := json.Marshal(anthropicResp); err == nil {
-					if verdict := h.inspectUpstreamGuardResponse(c.Request.Context(), "/v1/messages", effectiveModel, account, responseBody, false, c.GetHeader("X-Request-Id")); shouldBlockUpstreamGuard(verdict) {
+					if verdict := audit.InspectResponseBody(responseBody, false); shouldBlockUpstreamGuard(verdict) {
 						h.store.Release(account)
 						sendAnthropicError(c, http.StatusForbidden, "permission_error", upstreamGuardBlockMessage(verdict))
 						return

@@ -150,7 +150,10 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 				affinity_mode TEXT DEFAULT 'bounded',
 				upstream_guard_mode TEXT DEFAULT 'warn',
 				upstream_guard_suppressions TEXT DEFAULT '[]',
-				security_event_retention_days INTEGER DEFAULT 30
+				security_event_retention_days INTEGER DEFAULT 30,
+				security_capture_mode TEXT DEFAULT 'hit_raw',
+				security_capture_retention_days INTEGER DEFAULT 7,
+				security_capture_max_body_bytes INTEGER DEFAULT 1048576
 			);`,
 		`CREATE TABLE IF NOT EXISTS model_registry (
 			id TEXT PRIMARY KEY,
@@ -274,6 +277,27 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 			scanner_error TEXT DEFAULT '',
 			false_positive_hints TEXT DEFAULT '[]'
 		);`,
+		`CREATE TABLE IF NOT EXISTS security_captures (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			security_event_id INTEGER DEFAULT 0,
+			capture_reason TEXT DEFAULT 'hit',
+			direction TEXT DEFAULT '',
+			endpoint TEXT DEFAULT '',
+			model TEXT DEFAULT '',
+			account_id INTEGER DEFAULT 0,
+			account_name TEXT DEFAULT '',
+			base_url TEXT DEFAULT '',
+			source_type TEXT DEFAULT '',
+			stream INTEGER DEFAULT 0,
+			tool_call INTEGER DEFAULT 0,
+			request_id TEXT DEFAULT '',
+			body TEXT DEFAULT '',
+			body_hash TEXT DEFAULT '',
+			body_bytes INTEGER DEFAULT 0,
+			truncated INTEGER DEFAULT 0,
+			expires_at TIMESTAMP NULL
+		);`,
 	}
 	for _, stmt := range statements {
 		if _, err := db.conn.ExecContext(ctx, stmt); err != nil {
@@ -377,6 +401,9 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "upstream_guard_mode", "TEXT DEFAULT 'warn'"},
 		{"system_settings", "upstream_guard_suppressions", "TEXT DEFAULT '[]'"},
 		{"system_settings", "security_event_retention_days", "INTEGER DEFAULT 30"},
+		{"system_settings", "security_capture_mode", "TEXT DEFAULT 'hit_raw'"},
+		{"system_settings", "security_capture_retention_days", "INTEGER DEFAULT 7"},
+		{"system_settings", "security_capture_max_body_bytes", "INTEGER DEFAULT 1048576"},
 		{"accounts", "enabled", "INTEGER DEFAULT 1"},
 		{"accounts", "locked", "INTEGER DEFAULT 0"},
 		{"accounts", "credit_enabled", "INTEGER DEFAULT 0"},

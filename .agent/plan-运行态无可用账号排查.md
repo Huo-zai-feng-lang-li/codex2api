@@ -16,6 +16,10 @@
 - 2026-06-02：定位新开对话走 `GET /responses` WebSocket 路径；WebSocket 路径未按 direct OpenAI Responses API 账号走 `/v1/responses` HTTP/SSE，上游返回的 `无可用账号` 可能透传到下游。
 - 2026-06-02：已修复 WebSocket direct OpenAI Responses 分支，剥离 WS-only `type` 字段；`go test ./... -count=1` 通过；重建并重启 `codex2api.exe`。
 - 2026-06-02：真实本地 WebSocket 请求验证通过，收到 `response.completed`。
+- 2026-06-08：继续排查“历史成功账号未参与本次调度”。本轮先按真实数据库和 API Key 规则模拟候选账号过滤，再决定是否需要代码修复。
+- 2026-06-08：当前 API Key `id=1` 未设置 `allowed_group_ids`，因此本轮不是 API Key 分组限制导致。`/health` 使用 `.env` 中端口 `18080`；账号池排查期间持续变化，最新取证返回 `available=6,total=22`。
+- 2026-06-08：按 `api_key=1 + model=gpt-5.5` 模拟过滤：最新通过调度过滤的是账号 `551、582、583、602、603、604`；`576` 仍被 `payment_required` 冷却排除，`585-598` 多数被 `rate_limited` 冷却排除，`553` 因 `enabled=0` 排除，`599、601` 已删除。
+- 2026-06-08：近期日志里的 `no available account` 主要来自上游 WebSocket 返回 `1013 no available account` 或本地候选池被冷却压缩后的重试链，不是本地调度器漏扫历史成功账号。
 
 ## 当前完整流程说明
 - 客户端入口：

@@ -37,6 +37,7 @@ import type {
   RuntimeStatusResponse,
   ResetRadarResponse,
   SecurityEventsResponse,
+  SecurityCapturesResponse,
   ShutdownResponse,
   SiteBranding,
   StatsResponse,
@@ -468,6 +469,26 @@ export const api = {
   },
   suppressSecurityEvent: (id: number, data: { rule_id?: string }) =>
     request<{ upstream_guard_suppressions: string }>(`/security-events/${id}/suppress`, { method: 'POST', body: JSON.stringify(data) }),
+  getSecurityEventCaptures: (id: number) =>
+    request<SecurityCapturesResponse>(`/security-events/${id}/captures`),
+  getSecurityCaptures: (params: { page?: number; pageSize?: number; captureReason?: string; direction?: string; endpoint?: string; model?: string; accountId?: string; baseUrl?: string; sourceType?: string; toolCall?: string; requestId?: string; start?: string; end?: string; q?: string } = {}) => {
+    const search = new URLSearchParams()
+    if (params.page) search.set('page', String(params.page))
+    if (params.pageSize) search.set('page_size', String(params.pageSize))
+    if (params.captureReason) search.set('capture_reason', params.captureReason)
+    if (params.direction) search.set('direction', params.direction)
+    if (params.endpoint) search.set('endpoint', params.endpoint)
+    if (params.model) search.set('model', params.model)
+    if (params.accountId) search.set('account_id', params.accountId)
+    if (params.baseUrl) search.set('base_url', params.baseUrl)
+    if (params.sourceType) search.set('source_type', params.sourceType)
+    if (params.toolCall) search.set('tool_call', params.toolCall)
+    if (params.requestId) search.set('request_id', params.requestId)
+    if (params.start) search.set('start', params.start)
+    if (params.end) search.set('end', params.end)
+    if (params.q) search.set('q', params.q)
+    return request<SecurityCapturesResponse>(`/security-captures?${search.toString()}`)
+  },
   clearSecurityEvents: () =>
     request<MessageResponse>('/security-events', { method: 'DELETE' }),
   getModels: () => request<ModelsResponse>('/models'),

@@ -1,12 +1,20 @@
 package proxy
 
 import (
+	"context"
 	"encoding/base64"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
+	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )
 
@@ -29,8 +37,11 @@ func TestBuildImagesResponsesRequestMatchesReferenceChain(t *testing.T) {
 	if got := gjson.GetBytes(body, "model").String(); got != defaultImagesMainModel {
 		t.Fatalf("responses model = %q, want %q", got, defaultImagesMainModel)
 	}
-	if gjson.GetBytes(body, "tool_choice").Exists() {
-		t.Fatalf("tool_choice should be omitted for image proxy requests; body=%s", body)
+	if got := gjson.GetBytes(body, "tool_choice.type").String(); got != "image_generation" {
+		t.Fatalf("tool_choice.type = %q, want image_generation; body=%s", got, body)
+	}
+	if instructions := gjson.GetBytes(body, "instructions").String(); !strings.Contains(instructions, codexImageGenerationBridgeMarker) {
+		t.Fatalf("instructions should include image generation bridge marker; body=%s", body)
 	}
 	if got := gjson.GetBytes(body, "tools.0.type").String(); got != "image_generation" {
 		t.Fatalf("tools.0.type = %q, want image_generation", got)
@@ -83,6 +94,30 @@ func TestNextImageAccountPrefersOpenAIResponsesAPI(t *testing.T) {
 	}
 }
 
+func TestNextImageAccountSkipsImagePermissionDeniedAccounts(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	store.AddAccount(&auth.Account{
+		DBID:         1,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      "https://api.example.test",
+		APIKey:       "sk-test",
+		Models:       []string{defaultImagesMainModel},
+		ErrorMsg:     "上游返回 403: Image generation is not enabled for this group",
+	})
+	store.AddAccount(&auth.Account{DBID: 2, AccessToken: "plus-token", PlanType: "plus"})
+	handler := &Handler{store: store}
+
+	account, _ := handler.nextImageAccount(0, nil, "gpt-image-2")
+	if account == nil {
+		t.Fatal("nextImageAccount returned nil")
+	}
+	defer store.Release(account)
+
+	if account.DBID != 2 {
+		t.Fatalf("nextImageAccount picked account %d, want image-capable fallback account 2", account.DBID)
+	}
+}
+
 func TestNextImageAccountFallsBackWhenOpenAIResponsesLacksMainModel(t *testing.T) {
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
 	store.AddAccount(&auth.Account{
@@ -119,6 +154,134 @@ func TestNextImageAccountFallsBackToFreeWhenNoPaidAccountAvailable(t *testing.T)
 
 	if account.DBID != 1 {
 		t.Fatalf("nextImageAccount picked account %d, want fallback free account 1", account.DBID)
+	}
+}
+
+func TestShouldRetryImageNoOutputUntilImageAttemptBudgetExhausted(t *testing.T) {
+	retries := 0
+	err := fmt.Errorf("upstream did not return image output")
+
+	if !shouldRetryImageStreamError(err, &retries, 0, 0, maxImageAttempts) {
+		t.Fatal("expected no-output image failure to keep trying another account even when generic retry budget is zero")
+	}
+	if retries != 0 {
+		t.Fatalf("generic retries = %d, want 0 for image no-output retry", retries)
+	}
+	if shouldRetryImageStreamError(err, &retries, 0, maxImageAttempts-1, maxImageAttempts) {
+		t.Fatal("expected no-output retry to stop at image attempt budget")
+	}
+}
+
+func TestForwardImagesRequestWaitUsesImageEligibleFilter(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var upstreamHits int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&upstreamHits, 1)
+		w.WriteHeader(http.StatusTeapot)
+		_, _ = w.Write([]byte(`{"error":{"message":"bad image account reached"}}`))
+	}))
+	defer upstream.Close()
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	store.AddAccount(&auth.Account{
+		DBID:         1,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      upstream.URL,
+		APIKey:       "sk-bad",
+		Models:       []string{"gpt-4.1"},
+	})
+	handler := &Handler{store: store}
+
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(""))
+	body := buildImagesResponsesRequest("draw a dog", nil, []byte(`{"type":"image_generation","model":"gpt-image-2","size":"1024x1024"}`))
+
+	handler.forwardImagesRequest(ginCtx, "/v1/images/generations", "gpt-image-2", body, "b64_json", "image_generation", false)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body=%s", recorder.Code, recorder.Body.String())
+	}
+	if got := atomic.LoadInt32(&upstreamHits); got != 0 {
+		t.Fatalf("upstream hits = %d, want 0; wait branch should keep image-ineligible account out", got)
+	}
+}
+
+func TestForwardImagesRequestLogsImageNoOutputRetryAttempt(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"created_at":1710000000,"output":[]}}` + "\n\n"))
+	}))
+	defer upstream.Close()
+
+	db, err := database.New("sqlite", filepath.Join(t.TempDir(), "codex2api.db"))
+	if err != nil {
+		t.Fatalf("New(sqlite) error: %v", err)
+	}
+	defer db.Close()
+	db.SetUsageLogConfig(database.UsageLogModeFull, 1, 1)
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: 1, AccessToken: "codex-token", PlanType: "plus"}
+	store.AddAccount(account)
+	handler := &Handler{store: store, db: db}
+
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(""))
+
+	previousExecuteRequest := ExecuteRequest
+	ExecuteRequest = func(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header, useWebsocket ...bool) (*http.Response, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, upstream.URL+"/v1/responses", strings.NewReader(string(requestBody)))
+		if err != nil {
+			return nil, err
+		}
+		return http.DefaultClient.Do(req)
+	}
+	defer func() {
+		ExecuteRequest = previousExecuteRequest
+	}()
+
+	body := buildImagesResponsesRequest("draw a dog", nil, []byte(`{"type":"image_generation","model":"gpt-image-2","size":"1024x1024"}`))
+	handler.forwardImagesRequest(ginCtx, "/v1/images/generations", "gpt-image-2", body, "b64_json", "image_generation", false)
+
+	logs := waitRecentUsageLogs(t, db, 1)
+	if len(logs) != 1 {
+		t.Fatalf("usage log count = %d, want 1", len(logs))
+	}
+	log := logs[0]
+	if log.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status_code = %d, want 502", log.StatusCode)
+	}
+	if !log.IsRetryAttempt {
+		t.Fatal("is_retry_attempt = false, want true")
+	}
+	if log.AttemptIndex != 1 {
+		t.Fatalf("attempt_index = %d, want 1", log.AttemptIndex)
+	}
+	if log.UpstreamErrorKind != imageNoOutputCooldownCode {
+		t.Fatalf("upstream_error_kind = %q, want %q", log.UpstreamErrorKind, imageNoOutputCooldownCode)
+	}
+	if !strings.Contains(log.ErrorMessage, "upstream did not return image output") {
+		t.Fatalf("error_message = %q, want no-output message", log.ErrorMessage)
+	}
+}
+
+func waitRecentUsageLogs(t *testing.T, db *database.DB, want int) []*database.UsageLog {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		logs, err := db.ListRecentUsageLogs(context.Background(), want)
+		if err != nil {
+			t.Fatalf("ListRecentUsageLogs error: %v", err)
+		}
+		if len(logs) >= want || time.Now().After(deadline) {
+			return logs
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

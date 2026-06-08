@@ -145,8 +145,11 @@ const (
 	UsageLogModeErrors = "errors"
 	UsageLogModeOff    = "off"
 
-	DefaultUpstreamGuardMode          = "warn"
-	DefaultSecurityEventRetentionDays = 30
+	DefaultUpstreamGuardMode            = "warn"
+	DefaultSecurityEventRetentionDays   = 30
+	DefaultSecurityCaptureMode          = "hit_raw"
+	DefaultSecurityCaptureRetentionDays = 7
+	DefaultSecurityCaptureMaxBodyBytes  = 1024 * 1024
 
 	defaultUsageLogMode                 = UsageLogModeFull
 	defaultUsageLogBatchSize            = 200
@@ -156,6 +159,8 @@ const (
 	minUsageLogFlushIntervalSeconds     = 1
 	maxUsageLogFlushIntervalSeconds     = 300
 	maxSecurityEventRetentionDays       = 3650
+	maxSecurityCaptureRetentionDays     = 365
+	maxSecurityCaptureMaxBodyBytes      = 64 * 1024 * 1024
 )
 
 var ErrDuplicateAccountCredential = errors.New("duplicate account credential")
@@ -216,6 +221,37 @@ func NormalizeSecurityEventRetentionDays(days int) int {
 		return maxSecurityEventRetentionDays
 	}
 	return days
+}
+
+func NormalizeSecurityCaptureMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", DefaultSecurityCaptureMode:
+		return DefaultSecurityCaptureMode
+	case "off", "full_raw":
+		return strings.ToLower(strings.TrimSpace(mode))
+	default:
+		return DefaultSecurityCaptureMode
+	}
+}
+
+func NormalizeSecurityCaptureRetentionDays(days int) int {
+	if days <= 0 {
+		return DefaultSecurityCaptureRetentionDays
+	}
+	if days > maxSecurityCaptureRetentionDays {
+		return maxSecurityCaptureRetentionDays
+	}
+	return days
+}
+
+func NormalizeSecurityCaptureMaxBodyBytes(bytes int) int {
+	if bytes < 0 {
+		return DefaultSecurityCaptureMaxBodyBytes
+	}
+	if bytes > maxSecurityCaptureMaxBodyBytes {
+		return maxSecurityCaptureMaxBodyBytes
+	}
+	return bytes
 }
 
 // usageLogEntry 日志缓冲条目
@@ -736,6 +772,9 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS upstream_guard_mode VARCHAR(20) DEFAULT 'warn';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS upstream_guard_suppressions TEXT DEFAULT '[]';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS security_event_retention_days INT DEFAULT 30;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS security_capture_mode VARCHAR(20) DEFAULT 'hit_raw';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS security_capture_retention_days INT DEFAULT 7;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS security_capture_max_body_bytes INT DEFAULT 1048576;
 
 			CREATE TABLE IF NOT EXISTS prompt_filter_logs (
 				id               SERIAL PRIMARY KEY,
@@ -785,6 +824,31 @@ func (db *DB) migrate(ctx context.Context) error {
 			CREATE INDEX IF NOT EXISTS idx_security_events_risk_created_at ON security_events(risk_level, created_at);
 			CREATE INDEX IF NOT EXISTS idx_security_events_direction_created_at ON security_events(direction, created_at);
 			CREATE INDEX IF NOT EXISTS idx_security_events_account_created_at ON security_events(account_id, created_at);
+
+			CREATE TABLE IF NOT EXISTS security_captures (
+				id                   SERIAL PRIMARY KEY,
+				created_at           TIMESTAMPTZ DEFAULT NOW(),
+				security_event_id    INT DEFAULT 0,
+				capture_reason       VARCHAR(20) DEFAULT 'hit',
+				direction            VARCHAR(20) DEFAULT '',
+				endpoint             VARCHAR(100) DEFAULT '',
+				model                VARCHAR(100) DEFAULT '',
+				account_id           INT DEFAULT 0,
+				account_name         VARCHAR(255) DEFAULT '',
+				base_url             TEXT DEFAULT '',
+				source_type          VARCHAR(30) DEFAULT '',
+				stream               BOOLEAN DEFAULT FALSE,
+				tool_call            BOOLEAN DEFAULT FALSE,
+				request_id           VARCHAR(128) DEFAULT '',
+				body                 TEXT DEFAULT '',
+				body_hash            VARCHAR(128) DEFAULT '',
+				body_bytes           INT DEFAULT 0,
+				truncated            BOOLEAN DEFAULT FALSE,
+				expires_at           TIMESTAMPTZ NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_security_captures_event_id ON security_captures(security_event_id);
+			CREATE INDEX IF NOT EXISTS idx_security_captures_request_id ON security_captures(request_id);
+			CREATE INDEX IF NOT EXISTS idx_security_captures_expires_at ON security_captures(expires_at);
 
 			CREATE TABLE IF NOT EXISTS model_registry (
 				id                     VARCHAR(100) PRIMARY KEY,
@@ -1307,6 +1371,9 @@ type SystemSettings struct {
 	UpstreamGuardMode                string
 	UpstreamGuardSuppressions        string
 	SecurityEventRetentionDays       int
+	SecurityCaptureMode              string
+	SecurityCaptureRetentionDays     int
+	SecurityCaptureMaxBodyBytes      int
 }
 
 // GetSystemSettings 加载全局设置
@@ -1353,10 +1420,13 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       COALESCE(dispatch_queue_limit, 0),
 		       COALESCE(image_storage_config, '{}'),
 		       COALESCE(background_config, '{}'),
-		       COALESCE(show_full_usage_numbers, false),
-		       COALESCE(upstream_guard_mode, 'warn'),
-		       COALESCE(upstream_guard_suppressions, '[]'),
-		       COALESCE(security_event_retention_days, 30)
+	       COALESCE(show_full_usage_numbers, false),
+	       COALESCE(upstream_guard_mode, 'warn'),
+	       COALESCE(upstream_guard_suppressions, '[]'),
+	       COALESCE(security_event_retention_days, 30),
+	       COALESCE(security_capture_mode, 'hit_raw'),
+	       COALESCE(security_capture_retention_days, 7),
+	       COALESCE(security_capture_max_body_bytes, 1048576)
 		FROM system_settings WHERE id = 1
 	`).Scan(
 		&s.SiteName, &s.SiteLogo,
@@ -1381,6 +1451,9 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.UpstreamGuardMode,
 		&s.UpstreamGuardSuppressions,
 		&s.SecurityEventRetentionDays,
+		&s.SecurityCaptureMode,
+		&s.SecurityCaptureRetentionDays,
+		&s.SecurityCaptureMaxBodyBytes,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -1395,6 +1468,9 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		s.UpstreamGuardSuppressions = "[]"
 	}
 	s.SecurityEventRetentionDays = NormalizeSecurityEventRetentionDays(s.SecurityEventRetentionDays)
+	s.SecurityCaptureMode = NormalizeSecurityCaptureMode(s.SecurityCaptureMode)
+	s.SecurityCaptureRetentionDays = NormalizeSecurityCaptureRetentionDays(s.SecurityCaptureRetentionDays)
+	s.SecurityCaptureMaxBodyBytes = NormalizeSecurityCaptureMaxBodyBytes(s.SecurityCaptureMaxBodyBytes)
 	return s, err
 }
 
@@ -1492,9 +1568,14 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		UPDATE system_settings
 		SET upstream_guard_mode = $1,
 		    upstream_guard_suppressions = $2,
-		    security_event_retention_days = $3
+		    security_event_retention_days = $3,
+		    security_capture_mode = $4,
+		    security_capture_retention_days = $5,
+		    security_capture_max_body_bytes = $6
 		WHERE id = 1
-	`, NormalizeUpstreamGuardMode(s.UpstreamGuardMode), strings.TrimSpace(s.UpstreamGuardSuppressions), NormalizeSecurityEventRetentionDays(s.SecurityEventRetentionDays))
+	`, NormalizeUpstreamGuardMode(s.UpstreamGuardMode), strings.TrimSpace(s.UpstreamGuardSuppressions),
+		NormalizeSecurityEventRetentionDays(s.SecurityEventRetentionDays), NormalizeSecurityCaptureMode(s.SecurityCaptureMode),
+		NormalizeSecurityCaptureRetentionDays(s.SecurityCaptureRetentionDays), NormalizeSecurityCaptureMaxBodyBytes(s.SecurityCaptureMaxBodyBytes))
 	return err
 }
 

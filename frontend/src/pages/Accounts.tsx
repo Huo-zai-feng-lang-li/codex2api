@@ -7542,22 +7542,33 @@ function usageCardTone(pct: number): string {
   return "border-emerald-500/20 bg-emerald-500/5";
 }
 
+function usageRemainingTone(remainingPct: number): string {
+  if (remainingPct <= 10) return "border-red-500/35 bg-red-500/10 text-red-700 ring-red-500/15 dark:text-red-300";
+  if (remainingPct <= 30) return "border-amber-500/35 bg-amber-500/10 text-amber-700 ring-amber-500/15 dark:text-amber-300";
+  return "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 ring-emerald-500/15 dark:text-emerald-300";
+}
+
 function UsageWindowLine({
   label,
   pct,
   resetAt,
   detail,
+  showStatsLabel = true,
 }: {
   label: string;
   pct?: number;
   resetAt?: string;
   detail?: AccountRow["usage_5h_detail"];
+  showStatsLabel?: boolean;
 }) {
   const resetText = formatResetAt(resetAt);
   const { t } = useTranslation();
   const hasPct = typeof pct === "number" && Number.isFinite(pct);
   const clampedPct = hasPct ? Math.min(100, Math.max(0, pct)) : null;
   const remainingPct = clampedPct === null ? null : Math.max(0, 100 - clampedPct);
+  const usedPrefix = t("accounts.usageUsed") === "已用"
+    ? "用"
+    : `${t("accounts.usageUsed")} `;
   const hasDetail = hasUsageWindowDetail(detail);
   const costText =
     detail &&
@@ -7570,7 +7581,8 @@ function UsageWindowLine({
       className={`min-w-0 rounded-md border px-2 py-1.5 ${clampedPct === null ? "border-border/80 bg-muted/30" : usageCardTone(clampedPct)}`}
       title={[
         label,
-        clampedPct !== null ? `${t("accounts.usageUsed")} ${formatUsagePercent(clampedPct)}` : t("accounts.usageNoPercent"),
+        clampedPct !== null ? `${t("accounts.usageUsed")} ${formatUsagePercent(clampedPct)}` : showStatsLabel ? t("accounts.usageNoPercent") : "",
+        remainingPct !== null ? `${t("accounts.usageRemainingShort")}${formatUsagePercent(remainingPct)}` : "",
         hasDetail
           ? `${formatCompactUsageNumber(detail?.requests)} ${t("accounts.usageReqUnit")} / ${formatCompactUsageNumber(detail?.tokens)} ${t("accounts.usageTokUnit")}`
           : "",
@@ -7578,22 +7590,36 @@ function UsageWindowLine({
         resetText ? `${t("accounts.usageResetAt")} ${resetText}` : "",
       ].filter(Boolean).join(" · ")}
     >
-      <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] tabular-nums">
-        <span className="shrink-0 rounded bg-background/80 px-1.5 py-0.5 text-[11px] font-bold text-foreground shadow-sm ring-1 ring-border/70">
-          {label}
-        </span>
-        {clampedPct !== null ? (
-          <span className="shrink-0 text-[11px] font-semibold text-muted-foreground">
-            {formatUsagePercent(clampedPct)}
+      <div className="flex min-w-0 flex-wrap items-center gap-1 text-[11px] tabular-nums">
+        <div className="inline-flex shrink-0 items-center gap-1 rounded-md bg-background/90 px-1.5 py-0.5 shadow-sm ring-1 ring-border/70">
+          <span className="text-[12px] font-extrabold text-foreground">
+            {label}
           </span>
-        ) : (
-          <span className="shrink-0 text-[10px] font-medium text-muted-foreground">
-            {t("accounts.usageStatsOnlyShort")}
-          </span>
-        )}
+          {clampedPct !== null ? (
+            <span className="text-[11px] font-semibold text-muted-foreground">
+              {showStatsLabel ? (
+                <span className="text-[11px] italic">
+                  {usedPrefix}
+                </span>
+              ) : null}
+              {formatUsagePercent(clampedPct)}
+            </span>
+          ) : showStatsLabel ? (
+            <span className="text-[10px] font-medium text-muted-foreground">
+              {t("accounts.usageStatsOnlyShort")}
+            </span>
+          ) : null}
+        </div>
         {remainingPct !== null && (
-          <span className="shrink-0 text-[10px] font-medium text-muted-foreground">
-            {t("accounts.usageRemainingShort")}{formatUsagePercent(remainingPct)}
+          <span
+            className={`inline-flex shrink-0 items-baseline gap-0.5 rounded-md border px-1.5 py-0.5 font-bold shadow-sm ring-1 ring-inset ${usageRemainingTone(remainingPct)}`}
+          >
+            <span className="text-[11px] italic leading-none">
+              {t("accounts.usageRemainingShort")}
+            </span>
+            <span className="text-[13px] leading-none">
+              {formatUsagePercent(remainingPct)}
+            </span>
           </span>
         )}
         {resetText && (
@@ -7658,18 +7684,20 @@ function UsageCell({ account }: { account: AccountRow }) {
     if (!has5h && !has7d && !has5hDetail && !has7dDetail && !has5hReset && !has7dReset)
       return <span className="text-[12px] text-muted-foreground">-</span>;
     return (
-      <div className="grid w-[min(100%,300px)] min-w-[190px] grid-cols-[repeat(auto-fit,minmax(136px,1fr))] gap-1.5">
+      <div className="grid w-[min(100%,324px)] min-w-[204px] grid-cols-[repeat(auto-fit,minmax(148px,1fr))] gap-1.5">
         <UsageWindowLine
           label="5h"
           pct={has5h ? account.usage_percent_5h! : undefined}
           resetAt={account.reset_5h_at}
           detail={account.usage_5h_detail}
+          showStatsLabel={!account.openai_responses_api}
         />
         <UsageWindowLine
           label="7d"
           pct={has7d ? account.usage_percent_7d! : undefined}
           resetAt={account.reset_7d_at}
           detail={account.usage_7d_detail}
+          showStatsLabel={!account.openai_responses_api}
         />
       </div>
     );
@@ -7677,12 +7705,13 @@ function UsageCell({ account }: { account: AccountRow }) {
 
   if (sevenDayPresent) {
     return (
-      <div className="w-[min(100%,150px)] min-w-[136px]">
+      <div className="w-[min(100%,162px)] min-w-[148px]">
         <UsageWindowLine
           label="7d"
           pct={has7d ? account.usage_percent_7d! : undefined}
           resetAt={account.reset_7d_at}
           detail={account.usage_7d_detail}
+          showStatsLabel={!account.openai_responses_api}
         />
       </div>
     );

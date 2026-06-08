@@ -49,6 +49,11 @@ const (
 	// generation requests, including retries across different accounts.
 	maxImageAttempts = 5
 
+	imageNoOutputCooldown     = 10 * time.Minute
+	imagePermissionCooldown   = 30 * time.Minute
+	imageNoOutputCooldownCode = "image_no_output"
+	imageNotEnabledCode       = "image_not_enabled"
+
 	// MaxImageEditInputCount caps the number of input images for edit requests.
 	MaxImageEditInputCount = 10
 )
@@ -889,37 +894,167 @@ func buildImagesResponsesRequest(prompt string, images []string, toolJSON []byte
 	req, _ = sjson.SetRawBytes(req, "tools", []byte(`[]`))
 	if len(toolJSON) > 0 && json.Valid(toolJSON) {
 		req, _ = sjson.SetRawBytes(req, "tools.-1", toolJSON)
+		req, _ = sjson.SetRawBytes(req, "tool_choice", []byte(`{"type":"image_generation"}`))
+		req, _ = sjson.SetBytes(req, "instructions", codexImageGenerationBridgeText)
 	}
 	return req
 }
 
-func imageResponsesAccountFilter(account *auth.Account) bool {
+func imageAccountBlockedByPermission(account *auth.Account) bool {
 	if account == nil {
 		return false
 	}
-	return account.IsOpenAIResponsesAPI() &&
-		account.SupportsOpenAIResponsesModel(defaultImagesMainModel)
+	account.Mu().RLock()
+	message := strings.ToLower(strings.TrimSpace(account.ErrorMsg))
+	reason := strings.ToLower(strings.TrimSpace(account.CooldownReason))
+	account.Mu().RUnlock()
+
+	return reason == imageNotEnabledCode || isImagePermissionDeniedMessage(message)
+}
+
+func isImagePermissionDeniedMessage(message string) bool {
+	message = strings.ToLower(strings.TrimSpace(message))
+	if message == "" {
+		return false
+	}
+	for _, marker := range []string{
+		"image generation is not enabled",
+		"image generations is not enabled",
+		"images generation is not enabled",
+		"image_generation_not_enabled",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func isImageNoOutputErrorMessage(message string) bool {
+	return strings.Contains(strings.ToLower(strings.TrimSpace(message)), "upstream did not return image output")
+}
+
+func imageResponsesAccountFilter(model string) auth.AccountFilter {
+	model = strings.TrimSpace(model)
+	return func(account *auth.Account) bool {
+		if account == nil || imageAccountBlockedByPermission(account) {
+			return false
+		}
+		if !account.IsOpenAIResponsesAPI() || !account.SupportsOpenAIResponsesModel(defaultImagesMainModel) {
+			return false
+		}
+		if account.IsModelRateLimited(defaultImagesMainModel) {
+			return false
+		}
+		return model == "" || !account.IsModelRateLimited(model)
+	}
+}
+
+func imageEligibleAccountFilter(model string) auth.AccountFilter {
+	codexFilter := accountFilterForModel(model)
+	responsesFilter := imageResponsesAccountFilter(model)
+	return func(account *auth.Account) bool {
+		if account == nil || imageAccountBlockedByPermission(account) {
+			return false
+		}
+		if account.IsOpenAIResponsesAPI() {
+			return responsesFilter(account)
+		}
+		return codexFilter(account)
+	}
 }
 
 func imagePreferredAccountFilter(account *auth.Account) bool {
-	if account == nil || account.IsOpenAIResponsesAPI() {
+	if account == nil || account.IsOpenAIResponsesAPI() || imageAccountBlockedByPermission(account) {
 		return false
 	}
 	return auth.IsPlusOrHigherPlan(account.GetPlanType())
 }
 
+func (h *Handler) markImageHTTPFailure(account *auth.Account, model string, statusCode int, body []byte) {
+	if h == nil || h.store == nil || account == nil {
+		return
+	}
+	if statusCode != http.StatusForbidden && statusCode != http.StatusPaymentRequired {
+		return
+	}
+	if !isImagePermissionDeniedMessage(string(body)) {
+		return
+	}
+	h.store.MarkModelCooldown(account, model, imagePermissionCooldown, imageNotEnabledCode)
+}
+
+func (h *Handler) markImageReadFailure(account *auth.Account, model string, err error) {
+	if h == nil || h.store == nil || account == nil || err == nil {
+		return
+	}
+	if !isImageNoOutputErrorMessage(err.Error()) {
+		return
+	}
+	h.store.MarkModelCooldown(account, model, imageNoOutputCooldown, imageNoOutputCooldownCode)
+}
+
+func (h *Handler) logImageReadFailure(c *gin.Context, account *auth.Account, inboundEndpoint, upstreamEndpoint, model string, stream bool, durationMs int, attempt int, willRetry bool, err error) {
+	if h == nil || account == nil || err == nil {
+		return
+	}
+	message := err.Error()
+	kind := upstreamErrorKind(http.StatusBadGateway, []byte(message), codex429Decision{})
+	if isImageNoOutputErrorMessage(message) {
+		kind = imageNoOutputCooldownCode
+	}
+	h.logUsageForRequest(c, &database.UsageLogInput{
+		AccountID:         account.ID(),
+		Endpoint:          inboundEndpoint,
+		Model:             model,
+		StatusCode:        http.StatusBadGateway,
+		DurationMs:        durationMs,
+		InboundEndpoint:   inboundEndpoint,
+		UpstreamEndpoint:  upstreamEndpoint,
+		Stream:            stream,
+		IsRetryAttempt:    willRetry,
+		AttemptIndex:      attempt + 1,
+		UpstreamErrorKind: kind,
+		ErrorMessage:      usageLogErrorMessage(http.StatusBadGateway, []byte(message)),
+	})
+}
+
+func imageModelCooldownFilter(h *Handler, model string, filter auth.AccountFilter) auth.AccountFilter {
+	if h == nil {
+		return filter
+	}
+	return h.withModelCooldownFilter(model, filter)
+}
+
+func imageResponsesCooldownFilter(h *Handler, model string, filter auth.AccountFilter) auth.AccountFilter {
+	if h == nil {
+		return filter
+	}
+	filter = h.withModelCooldownFilter(defaultImagesMainModel, filter)
+	return h.withModelCooldownFilter(model, filter)
+}
+
+func imageEligibleCooldownFilter(h *Handler, model string) auth.AccountFilter {
+	filter := imageEligibleAccountFilter(model)
+	if h == nil {
+		return filter
+	}
+	filter = h.withModelCooldownFilter(model, filter)
+	return h.withModelCooldownFilter(defaultImagesMainModel, filter)
+}
+
 func (h *Handler) nextImageAccount(apiKeyID int64, exclude map[int64]bool, model string) (*auth.Account, string) {
-	responsesFilter := h.withModelCooldownFilter(defaultImagesMainModel, imageResponsesAccountFilter)
+	responsesFilter := imageResponsesCooldownFilter(h, model, imageResponsesAccountFilter(model))
 	account, stickyProxyURL := h.nextAccountForSessionWithFilter("", apiKeyID, exclude, responsesFilter)
 	if account != nil {
 		return account, stickyProxyURL
 	}
-	preferredFilter := h.withModelCooldownFilter(model, imagePreferredAccountFilter)
+	preferredFilter := imageModelCooldownFilter(h, model, imagePreferredAccountFilter)
 	account, stickyProxyURL = h.nextAccountForSessionWithFilter("", apiKeyID, exclude, preferredFilter)
 	if account != nil {
 		return account, stickyProxyURL
 	}
-	return h.nextAccountForSessionWithFilter("", apiKeyID, exclude, h.withModelCooldownFilter(model, accountFilterForModel(model)))
+	return h.nextAccountForSessionWithFilter("", apiKeyID, exclude, imageEligibleCooldownFilter(h, model))
 }
 
 func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestModel string, responsesBody []byte, responseFormat, streamPrefix string, stream bool) {
@@ -953,7 +1088,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 		}
 		account, stickyProxyURL := h.nextImageAccount(apiKeyID, excludeAccounts, requestModel)
 		if account == nil {
-			account, stickyProxyURL = h.store.WaitForSessionAvailableWithFilter(c.Request.Context(), "", 30*time.Second, apiKeyID, excludeAccounts, h.withModelCooldownFilter(requestModel, nil))
+			account, stickyProxyURL = h.store.WaitForSessionAvailableWithFilter(c.Request.Context(), "", 30*time.Second, apiKeyID, excludeAccounts, imageEligibleCooldownFilter(h, requestModel))
 			if account == nil {
 				if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
 					h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
@@ -1025,6 +1160,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 			}
 			errBody, _ := readUpstreamErrorBody(resp)
 			resp.Body.Close()
+			h.markImageHTTPFailure(account, requestModel, resp.StatusCode, errBody)
 			h.store.Release(account)
 			excludeAccounts[account.ID()] = true
 			logUpstreamError(inboundEndpoint, resp.StatusCode, requestModel, account.ID(), errBody)
@@ -1076,20 +1212,17 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 				// Check retryability BEFORE writing error response to avoid
 				// double-write when the error is transient.
 				resp.Body.Close()
+				h.markImageReadFailure(account, requestModel, readErr)
 				h.store.Release(account)
 				excludeAccounts[account.ID()] = true
-				if shouldRetryImageStreamError(readErr, &generalRetries, maxRetries, attempt, maxImageAttempts) {
+				shouldRetry := shouldRetryImageStreamError(readErr, &generalRetries, maxRetries, attempt, maxImageAttempts)
+				h.logImageReadFailure(c, account, inboundEndpoint, upstreamEndpoint, requestModel, stream, int(time.Since(start).Milliseconds()), attempt, shouldRetry, readErr)
+				if shouldRetry {
 					lastStatusCode = http.StatusBadGateway
 					lastBody = []byte(readErr.Error())
 					continue
 				}
 				c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": readErr.Error(), "type": "upstream_error"}})
-				h.logUsageForRequest(c, &database.UsageLogInput{
-					AccountID:  account.ID(),
-					Endpoint:   inboundEndpoint,
-					Model:      requestModel,
-					StatusCode: http.StatusBadGateway,
-				})
 				return
 			}
 		}
@@ -1101,9 +1234,13 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 			// Stream disconnects and upstream image generation failures can be
 			// transient (e.g. upstream model overload, network hiccup).
 			resp.Body.Close()
+			h.markImageReadFailure(account, requestModel, readErr)
 			h.store.Release(account)
 			excludeAccounts[account.ID()] = true
-			if shouldRetryImageStreamError(readErr, &generalRetries, maxRetries, attempt, maxImageAttempts) {
+			shouldRetry := shouldRetryImageStreamError(readErr, &generalRetries, maxRetries, attempt, maxImageAttempts)
+			willRetry := shouldRetry && !c.Writer.Written()
+			h.logImageReadFailure(c, account, inboundEndpoint, upstreamEndpoint, requestModel, stream, int(time.Since(start).Milliseconds()), attempt, willRetry, readErr)
+			if shouldRetry {
 				lastStatusCode = statusCode
 				lastBody = []byte(readErr.Error())
 				if !c.Writer.Written() {
@@ -1114,12 +1251,6 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 			if !c.Writer.Written() {
 				c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": readErr.Error(), "type": "upstream_error"}})
 			}
-			h.logUsageForRequest(c, &database.UsageLogInput{
-				AccountID:  account.ID(),
-				Endpoint:   inboundEndpoint,
-				Model:      requestModel,
-				StatusCode: http.StatusBadGateway,
-			})
 			return
 		}
 		logInput := &database.UsageLogInput{
@@ -1179,7 +1310,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 // (stream disconnects, upstream model errors) are retryable; permanent
 // failures (content policy, invalid request, quota exhausted) are not.
 func shouldRetryImageStreamError(err error, generalRetries *int, maxGeneralRetries int, attempt int, maxAttempts int) bool {
-	if err == nil || generalRetries == nil || *generalRetries >= maxGeneralRetries {
+	if err == nil || generalRetries == nil {
 		return false
 	}
 	if attempt >= maxAttempts-1 {
@@ -1194,6 +1325,12 @@ func shouldRetryImageStreamError(err error, generalRetries *int, maxGeneralRetri
 		if strings.Contains(msg, keyword) {
 			return false
 		}
+	}
+	if isImageNoOutputErrorMessage(msg) {
+		return true
+	}
+	if *generalRetries >= maxGeneralRetries {
+		return false
 	}
 	// Retry transient upstream issues.
 	*generalRetries++

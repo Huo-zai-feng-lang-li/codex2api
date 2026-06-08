@@ -296,6 +296,8 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/prompt-filter/test", h.TestPromptFilter)
 	api.GET("/prompt-filter/rules", h.GetPromptFilterRules)
 	api.GET("/security-events", h.ListSecurityEvents)
+	api.GET("/security-captures", h.ListSecurityCaptures)
+	api.GET("/security-events/:id/captures", h.ListSecurityEventCaptures)
 	api.POST("/security-events/:id/suppress", h.SuppressSecurityEvent)
 	api.DELETE("/security-events", h.ClearSecurityEvents)
 	api.GET("/models", h.ListModels)
@@ -4399,6 +4401,9 @@ type settingsResponse struct {
 	UpstreamGuardMode                string `json:"upstream_guard_mode"`
 	UpstreamGuardSuppressions        string `json:"upstream_guard_suppressions"`
 	SecurityEventRetentionDays       int    `json:"security_event_retention_days"`
+	SecurityCaptureMode              string `json:"security_capture_mode"`
+	SecurityCaptureRetentionDays     int    `json:"security_capture_retention_days"`
+	SecurityCaptureMaxBodyBytes      int    `json:"security_capture_max_body_bytes"`
 	ClientCompatMode                 string `json:"client_compat_mode"`
 	CodexMinCLIVersion               string `json:"codex_min_cli_version"`
 	UsageLogMode                     string `json:"usage_log_mode"`
@@ -4467,6 +4472,9 @@ type updateSettingsReq struct {
 	UpstreamGuardMode                *string `json:"upstream_guard_mode"`
 	UpstreamGuardSuppressions        *string `json:"upstream_guard_suppressions"`
 	SecurityEventRetentionDays       *int    `json:"security_event_retention_days"`
+	SecurityCaptureMode              *string `json:"security_capture_mode"`
+	SecurityCaptureRetentionDays     *int    `json:"security_capture_retention_days"`
+	SecurityCaptureMaxBodyBytes      *int    `json:"security_capture_max_body_bytes"`
 	ClientCompatMode                 *string `json:"client_compat_mode"`
 	CodexMinCLIVersion               *string `json:"codex_min_cli_version"`
 	UsageLogMode                     *string `json:"usage_log_mode"`
@@ -4975,6 +4983,9 @@ func (h *Handler) GetSettings(c *gin.Context) {
 	showFullUsageNumbers := false
 	upstreamGuardSuppressions := "[]"
 	securityEventRetentionDays := database.DefaultSecurityEventRetentionDays
+	securityCaptureMode := database.DefaultSecurityCaptureMode
+	securityCaptureRetentionDays := database.DefaultSecurityCaptureRetentionDays
+	securityCaptureMaxBodyBytes := database.DefaultSecurityCaptureMaxBodyBytes
 	if dbSettings != nil && adminAuthSource != "env" {
 		adminSecret = dbSettings.AdminSecret
 	}
@@ -4987,6 +4998,9 @@ func (h *Handler) GetSettings(c *gin.Context) {
 			upstreamGuardSuppressions = "[]"
 		}
 		securityEventRetentionDays = database.NormalizeSecurityEventRetentionDays(dbSettings.SecurityEventRetentionDays)
+		securityCaptureMode = database.NormalizeSecurityCaptureMode(dbSettings.SecurityCaptureMode)
+		securityCaptureRetentionDays = database.NormalizeSecurityCaptureRetentionDays(dbSettings.SecurityCaptureRetentionDays)
+		securityCaptureMaxBodyBytes = database.NormalizeSecurityCaptureMaxBodyBytes(dbSettings.SecurityCaptureMaxBodyBytes)
 	}
 	promptFilterCfg := h.store.GetPromptFilterConfig()
 	upstreamGuardCfg := h.store.GetUpstreamGuardConfig()
@@ -5051,6 +5065,9 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		UpstreamGuardMode:                upstreamGuardCfg.Mode,
 		UpstreamGuardSuppressions:        upstreamGuardSuppressions,
 		SecurityEventRetentionDays:       securityEventRetentionDays,
+		SecurityCaptureMode:              securityCaptureMode,
+		SecurityCaptureRetentionDays:     securityCaptureRetentionDays,
+		SecurityCaptureMaxBodyBytes:      securityCaptureMaxBodyBytes,
 		ClientCompatMode:                 runtimeCfg.ClientCompatMode,
 		CodexMinCLIVersion:               runtimeCfg.CodexMinCLIVersion,
 		UsageLogMode:                     h.db.GetUsageLogMode(),
@@ -5086,6 +5103,9 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	showFullUsageNumbers := false
 	upstreamGuardSuppressions := "[]"
 	securityEventRetentionDays := database.DefaultSecurityEventRetentionDays
+	securityCaptureMode := database.DefaultSecurityCaptureMode
+	securityCaptureRetentionDays := database.DefaultSecurityCaptureRetentionDays
+	securityCaptureMaxBodyBytes := database.DefaultSecurityCaptureMaxBodyBytes
 	existingSettings, _ := h.db.GetSystemSettings(c.Request.Context())
 	if existingSettings != nil {
 		currentAdminSecret = existingSettings.AdminSecret
@@ -5098,6 +5118,9 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			upstreamGuardSuppressions = "[]"
 		}
 		securityEventRetentionDays = database.NormalizeSecurityEventRetentionDays(existingSettings.SecurityEventRetentionDays)
+		securityCaptureMode = database.NormalizeSecurityCaptureMode(existingSettings.SecurityCaptureMode)
+		securityCaptureRetentionDays = database.NormalizeSecurityCaptureRetentionDays(existingSettings.SecurityCaptureRetentionDays)
+		securityCaptureMaxBodyBytes = database.NormalizeSecurityCaptureMaxBodyBytes(existingSettings.SecurityCaptureMaxBodyBytes)
 	}
 	if req.AdminSecret != nil {
 		if h.adminSecretEnv == "" {
@@ -5511,6 +5534,28 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		securityEventRetentionDays = database.NormalizeSecurityEventRetentionDays(*req.SecurityEventRetentionDays)
 		log.Printf("设置已更新: security_event_retention_days = %d", securityEventRetentionDays)
 	}
+	if req.SecurityCaptureMode != nil {
+		securityCaptureMode = database.NormalizeSecurityCaptureMode(*req.SecurityCaptureMode)
+		upstreamGuardCfg.CaptureMode = securityCaptureMode
+		log.Printf("设置已更新: security_capture_mode = %s", securityCaptureMode)
+	}
+	if req.SecurityCaptureRetentionDays != nil {
+		securityCaptureRetentionDays = database.NormalizeSecurityCaptureRetentionDays(*req.SecurityCaptureRetentionDays)
+		upstreamGuardCfg.CaptureRetentionDays = securityCaptureRetentionDays
+		log.Printf("设置已更新: security_capture_retention_days = %d", securityCaptureRetentionDays)
+	}
+	if req.SecurityCaptureMaxBodyBytes != nil {
+		securityCaptureMaxBodyBytes = database.NormalizeSecurityCaptureMaxBodyBytes(*req.SecurityCaptureMaxBodyBytes)
+		upstreamGuardCfg.CaptureMaxBodyBytes = securityCaptureMaxBodyBytes
+		log.Printf("设置已更新: security_capture_max_body_bytes = %d", securityCaptureMaxBodyBytes)
+	}
+	if req.SecurityCaptureMode != nil || req.SecurityCaptureRetentionDays != nil || req.SecurityCaptureMaxBodyBytes != nil {
+		h.store.SetUpstreamGuardConfig(upstreamGuardCfg)
+		upstreamGuardCfg = h.store.GetUpstreamGuardConfig()
+		securityCaptureMode = upstreamGuardCfg.CaptureMode
+		securityCaptureRetentionDays = upstreamGuardCfg.CaptureRetentionDays
+		securityCaptureMaxBodyBytes = upstreamGuardCfg.CaptureMaxBodyBytes
+	}
 
 	// Resin 粘性代理池配置
 	resinURL := ""
@@ -5637,6 +5682,9 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		UpstreamGuardMode:                upstreamGuardCfg.Mode,
 		UpstreamGuardSuppressions:        upstreamGuardSuppressions,
 		SecurityEventRetentionDays:       securityEventRetentionDays,
+		SecurityCaptureMode:              securityCaptureMode,
+		SecurityCaptureRetentionDays:     securityCaptureRetentionDays,
+		SecurityCaptureMaxBodyBytes:      securityCaptureMaxBodyBytes,
 		ClientCompatMode:                 runtimeCfg.ClientCompatMode,
 		CodexMinCLIVersion:               runtimeCfg.CodexMinCLIVersion,
 		UsageLogMode:                     usageLogMode,
@@ -5721,6 +5769,9 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		UpstreamGuardMode:                upstreamGuardCfg.Mode,
 		UpstreamGuardSuppressions:        upstreamGuardSuppressions,
 		SecurityEventRetentionDays:       securityEventRetentionDays,
+		SecurityCaptureMode:              securityCaptureMode,
+		SecurityCaptureRetentionDays:     securityCaptureRetentionDays,
+		SecurityCaptureMaxBodyBytes:      securityCaptureMaxBodyBytes,
 		ClientCompatMode:                 runtimeCfg.ClientCompatMode,
 		CodexMinCLIVersion:               runtimeCfg.CodexMinCLIVersion,
 		UsageLogMode:                     usageLogMode,

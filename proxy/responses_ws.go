@@ -292,7 +292,9 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				Stream:           true,
 				StartedAt:        start,
 			})
-			if verdict := h.inspectUpstreamGuardRequest(c.Request.Context(), "/v1/responses", effectiveModel, account, openAIResponsesBody, true, c.GetHeader("X-Request-Id")); shouldBlockUpstreamGuard(verdict) {
+			audit := h.newUpstreamGuardAudit(c.Request.Context(), "/v1/responses", effectiveModel, account, openAIResponsesBody, true, upstreamGuardRequestID(c))
+			defer audit.Finish()
+			if verdict := audit.InspectRequest(); shouldBlockUpstreamGuard(verdict) {
 				_ = writeResponsesWSError(conn, upstreamGuardBlockAPIError(verdict))
 				h.store.Release(account)
 				return newResponsesWSCloseError(websocket.ClosePolicyViolation, upstreamGuardBlockMessage(verdict), nil)
@@ -406,7 +408,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				return nil
 			}
 
-			if err := h.streamResponsesWSUpstream(c, conn, resp, account, proxyURL, affinityKey, upstreamEndpoint, model, effectiveModel, reasoningEffort, serviceTier, expandedInputRaw, start, attempt+1); err != nil {
+			if err := h.streamResponsesWSUpstream(c, conn, resp, account, proxyURL, affinityKey, upstreamEndpoint, model, effectiveModel, reasoningEffort, serviceTier, expandedInputRaw, audit, start, attempt+1); err != nil {
 				if errors.Is(err, errResponsesWSClientGone) {
 					return err
 				}
@@ -447,7 +449,9 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		}
 		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
 		lastUpstreamCancel = upstreamCancel
-		if verdict := h.inspectUpstreamGuardRequest(c.Request.Context(), "/v1/responses", effectiveModel, account, codexBody, true, c.GetHeader("X-Request-Id")); shouldBlockUpstreamGuard(verdict) {
+		audit := h.newUpstreamGuardAudit(c.Request.Context(), "/v1/responses", effectiveModel, account, codexBody, true, upstreamGuardRequestID(c))
+		defer audit.Finish()
+		if verdict := audit.InspectRequest(); shouldBlockUpstreamGuard(verdict) {
 			_ = writeResponsesWSError(conn, upstreamGuardBlockAPIError(verdict))
 			h.store.Release(account)
 			return newResponsesWSCloseError(websocket.ClosePolicyViolation, upstreamGuardBlockMessage(verdict), nil)
@@ -559,7 +563,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			return nil
 		}
 
-		if err := h.streamResponsesWSUpstream(c, conn, resp, account, proxyURL, affinityKey, upstreamEndpoint, model, effectiveModel, reasoningEffort, serviceTier, expandedInputRaw, start, attempt+1); err != nil {
+		if err := h.streamResponsesWSUpstream(c, conn, resp, account, proxyURL, affinityKey, upstreamEndpoint, model, effectiveModel, reasoningEffort, serviceTier, expandedInputRaw, audit, start, attempt+1); err != nil {
 			if errors.Is(err, errResponsesWSClientGone) {
 				return err
 			}
@@ -611,6 +615,7 @@ func (h *Handler) streamResponsesWSUpstream(
 	reasoningEffort string,
 	serviceTier string,
 	expandedInputRaw string,
+	audit *upstreamGuardAudit,
 	start time.Time,
 	attemptIndex int,
 ) error {
@@ -636,8 +641,9 @@ func (h *Handler) streamResponsesWSUpstream(
 	wroteAnyMessage := false
 	withheldRetryableFailure := false
 
+	defer audit.Finish()
 	readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
-		if verdict := h.inspectUpstreamGuardResponse(c.Request.Context(), "/v1/responses", effectiveModel, account, data, true, c.GetHeader("X-Request-Id")); shouldBlockUpstreamGuard(verdict) {
+		if verdict := audit.InspectResponseSSE(data); shouldBlockUpstreamGuard(verdict) {
 			blockEvent := buildUpstreamGuardBlockedEvent(verdict)
 			terminalFailurePayload = blockEvent
 			gotTerminal = true

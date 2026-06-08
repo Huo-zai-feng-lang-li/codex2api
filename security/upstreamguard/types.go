@@ -8,6 +8,10 @@ const (
 	ModeHighBlock = "high_block"
 	ModeStrict    = "strict"
 
+	CaptureModeOff     = "off"
+	CaptureModeHitRaw  = "hit_raw"
+	CaptureModeFullRaw = "full_raw"
+
 	DirectionRequest  = "request"
 	DirectionResponse = "response"
 	DirectionSource   = "source"
@@ -48,16 +52,19 @@ type RiskLevel string
 type SourceType string
 
 type Config struct {
-	Enabled            bool
-	Mode               string
-	RequestDLPEnabled  bool
-	ResponseFirewall   bool
-	ToolCallWarning    bool
-	ScanTimeout        time.Duration
-	MaxScanBytes       int
-	MaxPreviewChars    int
-	Suppressions       []SuppressionRule
-	OfficialHostSuffix []string
+	Enabled              bool
+	Mode                 string
+	RequestDLPEnabled    bool
+	ResponseFirewall     bool
+	ToolCallWarning      bool
+	ScanTimeout          time.Duration
+	MaxScanBytes         int
+	MaxPreviewChars      int
+	CaptureMode          string
+	CaptureRetentionDays int
+	CaptureMaxBodyBytes  int
+	Suppressions         []SuppressionRule
+	OfficialHostSuffix   []string
 }
 
 type SuppressionRule struct {
@@ -81,6 +88,8 @@ type ScanContext struct {
 type Evidence struct {
 	RuleID  string `json:"rule_id"`
 	Snippet string `json:"snippet"`
+	Field   string `json:"field,omitempty"`
+	Match   string `json:"match,omitempty"`
 }
 
 type Verdict struct {
@@ -102,14 +111,17 @@ type Verdict struct {
 
 func DefaultConfig() Config {
 	return Config{
-		Enabled:            true,
-		Mode:               ModeWarn,
-		RequestDLPEnabled:  true,
-		ResponseFirewall:   true,
-		ToolCallWarning:    true,
-		ScanTimeout:        1500 * time.Millisecond,
-		MaxScanBytes:       128 * 1024,
-		MaxPreviewChars:    500,
-		OfficialHostSuffix: []string{"api.openai.com", "api.anthropic.com"},
+		Enabled:              true,
+		Mode:                 ModeWarn,
+		RequestDLPEnabled:    true,
+		ResponseFirewall:     true,
+		ToolCallWarning:      true,
+		ScanTimeout:          1500 * time.Millisecond,
+		MaxScanBytes:         128 * 1024,
+		MaxPreviewChars:      500,
+		CaptureMode:          CaptureModeHitRaw,
+		CaptureRetentionDays: 7,
+		CaptureMaxBodyBytes:  1024 * 1024,
+		OfficialHostSuffix:   []string{"api.openai.com", "api.anthropic.com"},
 	}
 }

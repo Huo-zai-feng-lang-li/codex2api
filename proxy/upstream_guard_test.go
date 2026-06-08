@@ -56,6 +56,215 @@ func TestUpstreamGuardWarnModeRecordsEventWithoutBlocking(t *testing.T) {
 	}
 }
 
+func TestUpstreamGuardHitRawCapturesFullBody(t *testing.T) {
+	db := newProxyGuardTestDB(t)
+	handler := &Handler{db: db}
+	cfg := upstreamguard.DefaultConfig()
+	cfg.CaptureMode = upstreamguard.CaptureModeHitRaw
+	rawBody := []byte(`{"input":"OPENAI_API_KEY=sk-proj-real-secret-token-value-abcdefghijklmnopqrstuvwxyz1234567890"}`)
+	input := upstreamGuardInput{
+		Direction:   upstreamguard.DirectionRequest,
+		Endpoint:    "/v1/responses",
+		Model:       "gpt-5",
+		AccountID:   12,
+		BaseURL:     "https://relay.example.com/v1",
+		Source:      upstreamguard.SourceThirdParty,
+		Body:        rawBody,
+		RequestID:   "req-hit-raw",
+		Config:      cfg,
+		InspectFunc: upstreamguard.InspectRequest,
+	}
+
+	verdict := handler.inspectUpstreamGuard(context.Background(), input)
+
+	if verdict.Action != "warn" {
+		t.Fatalf("Action = %q, want warn", verdict.Action)
+	}
+	events, total, err := db.ListSecurityEventsPage(context.Background(), database.SecurityEventQuery{Page: 1, PageSize: 10})
+	if err != nil {
+		t.Fatalf("ListSecurityEventsPage returned error: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("events total = %d, want 1", total)
+	}
+	captures, err := db.ListSecurityCaptures(context.Background(), database.SecurityCaptureQuery{SecurityEventID: events[0].ID})
+	if err != nil {
+		t.Fatalf("ListSecurityCaptures returned error: %v", err)
+	}
+	if len(captures) != 1 {
+		t.Fatalf("captures len = %d, want 1", len(captures))
+	}
+	if captures[0].Body != string(rawBody) || !strings.Contains(captures[0].Body, "sk-proj-real-secret") {
+		t.Fatalf("raw capture did not preserve body: %+v", captures[0])
+	}
+	if captures[0].CaptureReason != database.SecurityCaptureReasonHit {
+		t.Fatalf("CaptureReason = %q, want %q", captures[0].CaptureReason, database.SecurityCaptureReasonHit)
+	}
+}
+
+func TestUpstreamGuardAuditCapturesWholeRequestAndStreamAfterHit(t *testing.T) {
+	db := newProxyGuardTestDB(t)
+	handler := &Handler{db: db}
+	cfg := upstreamguard.DefaultConfig()
+	cfg.CaptureMode = upstreamguard.CaptureModeHitRaw
+	requestBody := []byte(`{"model":"gpt-5.5","input":"open security events"}`)
+	account := &auth.Account{DBID: 12, BaseURL: "https://relay.example.com/v1"}
+	audit := handler.newUpstreamGuardAudit(context.Background(), "/v1/responses", "gpt-5.5", account, requestBody, true, "req-audit-full")
+	audit.requestInput.Config = cfg
+	audit.responseInput.Config = cfg
+
+	if verdict := audit.InspectRequest(); verdict.RiskLevel != upstreamguard.RiskNone {
+		t.Fatalf("request verdict = %+v, want no risk", verdict)
+	}
+	audit.InspectResponseSSE([]byte(`{"type":"response.created","response":{"id":"resp_1"}}`))
+	audit.InspectResponseSSE([]byte(`{"type":"response.output_item.done","item":{"type":"function_call","name":"browser_navigate","arguments":"{\"url\":\"http://127.0.0.1:18080/admin/security-events\"}"}}`))
+	audit.InspectResponseSSE([]byte(`{"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`))
+	audit.Finish()
+
+	captures, err := db.ListSecurityCaptures(context.Background(), database.SecurityCaptureQuery{RequestID: "req-audit-full"})
+	if err != nil {
+		t.Fatalf("ListSecurityCaptures returned error: %v", err)
+	}
+	if len(captures) != 2 {
+		t.Fatalf("captures len = %d, want request and full response: %+v", len(captures), captures)
+	}
+	var requestCapture, responseCapture *database.SecurityCapture
+	for _, capture := range captures {
+		switch capture.Direction {
+		case upstreamguard.DirectionRequest:
+			requestCapture = capture
+		case upstreamguard.DirectionResponse:
+			responseCapture = capture
+		}
+	}
+	if requestCapture == nil || requestCapture.Body != string(requestBody) {
+		t.Fatalf("request capture = %+v, want original request body", requestCapture)
+	}
+	if responseCapture == nil {
+		t.Fatal("missing response capture")
+	}
+	if !strings.Contains(responseCapture.Body, "response.created") ||
+		!strings.Contains(responseCapture.Body, "browser_navigate") ||
+		!strings.Contains(responseCapture.Body, "response.completed") {
+		t.Fatalf("response capture did not preserve the full stream: %s", responseCapture.Body)
+	}
+	if !responseCapture.ToolCall {
+		t.Fatalf("response ToolCall = false, want true")
+	}
+}
+
+func TestUpstreamGuardAuditCapturesFinalJSONWithoutIntermediateSSE(t *testing.T) {
+	db := newProxyGuardTestDB(t)
+	handler := &Handler{db: db}
+	cfg := upstreamguard.DefaultConfig()
+	cfg.CaptureMode = upstreamguard.CaptureModeHitRaw
+	requestBody := []byte(`{"model":"gpt-5.5","input":"summarize"}`)
+	finalBody := []byte(`{"id":"chatcmpl_1","choices":[{"message":{"content":"done"}}]}`)
+	account := &auth.Account{DBID: 12, BaseURL: "https://relay.example.com/v1"}
+	audit := handler.newUpstreamGuardAudit(context.Background(), "/v1/chat/completions", "gpt-5.5", account, requestBody, false, "req-audit-final-json")
+	audit.requestInput.Config = cfg
+	audit.responseInput.Config = cfg
+
+	audit.InspectRequest()
+	audit.ScanResponseBody([]byte(`{"type":"response.output_item.done","item":{"type":"function_call","name":"browser_navigate","arguments":"{\"url\":\"http://127.0.0.1:18080/admin/security-events\"}"}}`), false)
+	audit.InspectResponseBody(finalBody, false)
+	audit.Finish()
+
+	captures, err := db.ListSecurityCaptures(context.Background(), database.SecurityCaptureQuery{RequestID: "req-audit-final-json"})
+	if err != nil {
+		t.Fatalf("ListSecurityCaptures returned error: %v", err)
+	}
+	if len(captures) != 2 {
+		t.Fatalf("captures len = %d, want request and final response: %+v", len(captures), captures)
+	}
+	var responseCapture *database.SecurityCapture
+	for _, capture := range captures {
+		if capture.Direction == upstreamguard.DirectionResponse {
+			responseCapture = capture
+		}
+	}
+	if responseCapture == nil {
+		t.Fatal("missing response capture")
+	}
+	if responseCapture.Body != string(finalBody) {
+		t.Fatalf("response capture = %s, want final JSON only", responseCapture.Body)
+	}
+	if strings.Contains(responseCapture.Body, "browser_navigate") {
+		t.Fatalf("response capture leaked intermediate SSE chunk: %s", responseCapture.Body)
+	}
+	if !responseCapture.ToolCall {
+		t.Fatalf("response ToolCall = false, want true from scanned intermediate event")
+	}
+}
+
+func TestUpstreamGuardFullRawCapturesAllowTraffic(t *testing.T) {
+	db := newProxyGuardTestDB(t)
+	handler := &Handler{db: db}
+	cfg := upstreamguard.DefaultConfig()
+	cfg.CaptureMode = upstreamguard.CaptureModeFullRaw
+	rawBody := []byte(`{"input":"normal hello"}`)
+	input := upstreamGuardInput{
+		Direction:   upstreamguard.DirectionRequest,
+		Endpoint:    "/v1/responses",
+		Model:       "gpt-5",
+		Body:        rawBody,
+		RequestID:   "req-full-raw",
+		Config:      cfg,
+		InspectFunc: upstreamguard.InspectRequest,
+	}
+
+	verdict := handler.inspectUpstreamGuard(context.Background(), input)
+
+	if verdict.Action != "allow" || verdict.RiskLevel != upstreamguard.RiskNone {
+		t.Fatalf("verdict = %+v, want allow none", verdict)
+	}
+	events, total, err := db.ListSecurityEventsPage(context.Background(), database.SecurityEventQuery{Page: 1, PageSize: 10})
+	if err != nil {
+		t.Fatalf("ListSecurityEventsPage returned error: %v", err)
+	}
+	if total != 0 || len(events) != 0 {
+		t.Fatalf("full raw capture should not create risk events, total=%d events=%+v", total, events)
+	}
+	captures, err := db.ListSecurityCaptures(context.Background(), database.SecurityCaptureQuery{RequestID: "req-full-raw"})
+	if err != nil {
+		t.Fatalf("ListSecurityCaptures returned error: %v", err)
+	}
+	if len(captures) != 1 || captures[0].Body != string(rawBody) {
+		t.Fatalf("captures = %+v, want one full raw body", captures)
+	}
+	if captures[0].CaptureReason != database.SecurityCaptureReasonFull {
+		t.Fatalf("CaptureReason = %q, want %q", captures[0].CaptureReason, database.SecurityCaptureReasonFull)
+	}
+}
+
+func TestUpstreamGuardCaptureOffDoesNotStoreRawBody(t *testing.T) {
+	db := newProxyGuardTestDB(t)
+	handler := &Handler{db: db}
+	cfg := upstreamguard.DefaultConfig()
+	cfg.CaptureMode = upstreamguard.CaptureModeOff
+	input := upstreamGuardInput{
+		Direction:   upstreamguard.DirectionRequest,
+		Endpoint:    "/v1/responses",
+		Body:        []byte(`{"input":"OPENAI_API_KEY=sk-proj-real-secret-token-value-abcdefghijklmnopqrstuvwxyz1234567890"}`),
+		RequestID:   "req-capture-off",
+		Config:      cfg,
+		InspectFunc: upstreamguard.InspectRequest,
+	}
+
+	verdict := handler.inspectUpstreamGuard(context.Background(), input)
+
+	if verdict.RiskLevel != upstreamguard.RiskHigh {
+		t.Fatalf("RiskLevel = %q, want high", verdict.RiskLevel)
+	}
+	captures, err := db.ListSecurityCaptures(context.Background(), database.SecurityCaptureQuery{RequestID: "req-capture-off"})
+	if err != nil {
+		t.Fatalf("ListSecurityCaptures returned error: %v", err)
+	}
+	if len(captures) != 0 {
+		t.Fatalf("captures len = %d, want 0: %+v", len(captures), captures)
+	}
+}
+
 func TestUpstreamGuardOffModeSkipsScanAndEvents(t *testing.T) {
 	db := newProxyGuardTestDB(t)
 	handler := &Handler{db: db}

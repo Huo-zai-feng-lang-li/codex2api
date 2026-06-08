@@ -72,3 +72,64 @@ func TestSettingsRoutesExposeAndUpdateUpstreamGuardMode(t *testing.T) {
 		t.Fatalf("db UpstreamGuardSuppressions not persisted: %q", settings.UpstreamGuardSuppressions)
 	}
 }
+
+func TestSettingsRoutesExposeAndUpdateSecurityCaptureConfig(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	tc := cache.NewMemory(1)
+	defer tc.Close()
+	store := auth.NewStore(db, tc, &database.SystemSettings{
+		UpstreamGuardMode:            upstreamguard.ModeWarn,
+		SecurityCaptureMode:          upstreamguard.CaptureModeHitRaw,
+		SecurityCaptureRetentionDays: 7,
+		SecurityCaptureMaxBodyBytes:  1048576,
+	})
+	handler := NewHandler(store, db, tc, proxy.NewRateLimiter(0), "admin-secret")
+	router := gin.New()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/settings", nil)
+	req.Header.Set("X-Admin-Key", "admin-secret")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("get status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	var getPayload map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &getPayload); err != nil {
+		t.Fatalf("decode get response: %v", err)
+	}
+	if getPayload["security_capture_mode"] != upstreamguard.CaptureModeHitRaw {
+		t.Fatalf("GET security_capture_mode = %v, want %s", getPayload["security_capture_mode"], upstreamguard.CaptureModeHitRaw)
+	}
+
+	body := bytes.NewBufferString(`{"security_capture_mode":"full_raw","security_capture_retention_days":3,"security_capture_max_body_bytes":2097152}`)
+	req = httptest.NewRequest(http.MethodPut, "/api/admin/settings", body)
+	req.Header.Set("X-Admin-Key", "admin-secret")
+	req.Header.Set("Content-Type", "application/json")
+	recorder = httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("put status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	cfg := store.GetUpstreamGuardConfig()
+	if cfg.CaptureMode != upstreamguard.CaptureModeFullRaw {
+		t.Fatalf("store CaptureMode = %q, want %q", cfg.CaptureMode, upstreamguard.CaptureModeFullRaw)
+	}
+	if cfg.CaptureRetentionDays != 3 || cfg.CaptureMaxBodyBytes != 2097152 {
+		t.Fatalf("store capture retention/max = %d/%d", cfg.CaptureRetentionDays, cfg.CaptureMaxBodyBytes)
+	}
+	settings, err := db.GetSystemSettings(context.Background())
+	if err != nil {
+		t.Fatalf("GetSystemSettings returned error: %v", err)
+	}
+	if settings.SecurityCaptureMode != upstreamguard.CaptureModeFullRaw {
+		t.Fatalf("db SecurityCaptureMode = %q, want %q", settings.SecurityCaptureMode, upstreamguard.CaptureModeFullRaw)
+	}
+	if settings.SecurityCaptureRetentionDays != 3 || settings.SecurityCaptureMaxBodyBytes != 2097152 {
+		t.Fatalf("db capture retention/max = %d/%d", settings.SecurityCaptureRetentionDays, settings.SecurityCaptureMaxBodyBytes)
+	}
+}

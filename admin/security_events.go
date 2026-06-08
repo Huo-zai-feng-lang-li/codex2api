@@ -21,6 +21,13 @@ type securityEventsResponse struct {
 	PageSize int                       `json:"page_size"`
 }
 
+type securityCapturesResponse struct {
+	Captures []*database.SecurityCapture `json:"captures"`
+	Total    int                         `json:"total"`
+	Page     int                         `json:"page"`
+	PageSize int                         `json:"page_size"`
+}
+
 type suppressSecurityEventRequest struct {
 	RuleID string `json:"rule_id"`
 }
@@ -77,6 +84,59 @@ func (h *Handler) ListSecurityEvents(c *gin.Context) {
 		events = []*database.SecurityEvent{}
 	}
 	c.JSON(http.StatusOK, securityEventsResponse{Events: events, Total: total, Page: page, PageSize: pageSize})
+}
+
+func (h *Handler) ListSecurityEventCaptures(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeError(c, http.StatusBadRequest, "安全事件 ID 无效")
+		return
+	}
+	captures, err := h.db.ListSecurityCaptures(c.Request.Context(), database.SecurityCaptureQuery{SecurityEventID: id, Limit: 20})
+	if err != nil {
+		writeInternalError(c, err)
+		return
+	}
+	if captures == nil {
+		captures = []*database.SecurityCapture{}
+	}
+	c.JSON(http.StatusOK, securityCapturesResponse{Captures: captures, Total: len(captures), Page: 1, PageSize: 20})
+}
+
+func (h *Handler) ListSecurityCaptures(c *gin.Context) {
+	page := positiveQueryInt(c, "page", 1)
+	pageSize := positiveQueryInt(c, "page_size", positiveQueryInt(c, "limit", 100))
+	accountID := int64(0)
+	if raw := strings.TrimSpace(c.Query("account_id")); raw != "" {
+		if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil && parsed > 0 {
+			accountID = parsed
+		}
+	}
+	query := database.SecurityCaptureQuery{
+		Page:          page,
+		PageSize:      pageSize,
+		CaptureReason: c.Query("capture_reason"),
+		Direction:     c.Query("direction"),
+		Endpoint:      c.Query("endpoint"),
+		Model:         c.Query("model"),
+		AccountID:     accountID,
+		BaseURL:       c.Query("base_url"),
+		SourceType:    c.Query("source_type"),
+		ToolCall:      optionalBoolQuery(c, "tool_call"),
+		RequestID:     c.Query("request_id"),
+		Query:         c.Query("q"),
+		StartTime:     optionalTimeQuery(c, "start"),
+		EndTime:       optionalTimeQuery(c, "end"),
+	}
+	captures, total, err := h.db.ListSecurityCapturesPage(c.Request.Context(), query)
+	if err != nil {
+		writeInternalError(c, err)
+		return
+	}
+	if captures == nil {
+		captures = []*database.SecurityCapture{}
+	}
+	c.JSON(http.StatusOK, securityCapturesResponse{Captures: captures, Total: total, Page: page, PageSize: pageSize})
 }
 
 func (h *Handler) ClearSecurityEvents(c *gin.Context) {

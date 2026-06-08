@@ -32,6 +32,16 @@ func TestInspectRequestFlagsRealSecretsWithExplanation(t *testing.T) {
 	if strings.Contains(verdict.Preview, "postgres://admin:s3cret") {
 		t.Fatalf("Preview leaked database password: %q", verdict.Preview)
 	}
+	tokenEvidence := evidenceForRule(verdict.Evidence, RuleDLPToken)
+	if tokenEvidence == nil {
+		t.Fatalf("Evidence = %+v, want %s", verdict.Evidence, RuleDLPToken)
+	}
+	if tokenEvidence.Field != "$.messages[0].content" {
+		t.Fatalf("token evidence field = %q, want $.messages[0].content", tokenEvidence.Field)
+	}
+	if !strings.Contains(tokenEvidence.Match, "sk-proj-abcdefghijklmnopqrstuvwxyz") {
+		t.Fatalf("token evidence match = %q, want raw token", tokenEvidence.Match)
+	}
 }
 
 func TestInspectRequestDowngradesFalsePositiveSamples(t *testing.T) {
@@ -93,6 +103,13 @@ func TestInspectResponseRecordsToolCallRiskWithoutEquatingAttack(t *testing.T) {
 	}
 	if verdict.RiskLevel == RiskHigh || verdict.RiskLevel == RiskCritical {
 		t.Fatalf("RiskLevel = %q, tool call alone should not be high", verdict.RiskLevel)
+	}
+	toolEvidence := evidenceForRule(verdict.Evidence, RuleToolCall)
+	if toolEvidence == nil {
+		t.Fatalf("Evidence = %+v, want %s", verdict.Evidence, RuleToolCall)
+	}
+	if toolEvidence.Field != "$.choices[0].message.tool_calls" {
+		t.Fatalf("tool evidence field = %q, want $.choices[0].message.tool_calls", toolEvidence.Field)
 	}
 }
 
@@ -172,4 +189,13 @@ func contains(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func evidenceForRule(values []Evidence, ruleID string) *Evidence {
+	for i := range values {
+		if values[i].RuleID == ruleID {
+			return &values[i]
+		}
+	}
+	return nil
 }

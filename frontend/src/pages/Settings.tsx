@@ -448,6 +448,9 @@ export default function Settings() {
     upstream_guard_mode: 'warn',
     upstream_guard_suppressions: '[]',
     security_event_retention_days: 30,
+    security_capture_mode: 'hit_raw',
+    security_capture_retention_days: 7,
+    security_capture_max_body_bytes: 1048576,
     client_compat_mode: 'preserve',
     codex_min_cli_version: '0.118.0',
     usage_log_mode: 'full',
@@ -1169,6 +1172,37 @@ export default function Settings() {
                     value={settingsForm.security_event_retention_days}
                     aria-label={t('settings.securityEventRetentionDays')}
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm((f) => ({ ...f, security_event_retention_days: parseInt(e.target.value) || 30 }))}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.securityCaptureMode')} description={t('settings.securityCaptureModeDesc')}>
+                  <Select
+                    value={settingsForm.security_capture_mode}
+                    onValueChange={(value) => setSettingsForm((f) => ({ ...f, security_capture_mode: value as SystemSettings['security_capture_mode'] }))}
+                    options={[
+                      { label: t('settings.securityCaptureOff'), value: 'off' },
+                      { label: t('settings.securityCaptureHitRaw'), value: 'hit_raw' },
+                      { label: t('settings.securityCaptureFullRaw'), value: 'full_raw' },
+                    ]}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.securityCaptureRetentionDays')} description={t('settings.securityCaptureRetentionDaysDesc')}>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={365}
+                    value={settingsForm.security_capture_retention_days}
+                    aria-label={t('settings.securityCaptureRetentionDays')}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm((f) => ({ ...f, security_capture_retention_days: parseInt(e.target.value) || 7 }))}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.securityCaptureMaxBodyBytes')} description={t('settings.securityCaptureMaxBodyBytesDesc')}>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={67108864}
+                    value={settingsForm.security_capture_max_body_bytes}
+                    aria-label={t('settings.securityCaptureMaxBodyBytes')}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm((f) => ({ ...f, security_capture_max_body_bytes: parseInt(e.target.value) || 0 }))}
                   />
                 </SettingField>
                 <SettingField

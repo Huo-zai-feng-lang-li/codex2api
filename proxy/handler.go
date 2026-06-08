@@ -1439,7 +1439,9 @@ func (h *Handler) Responses(c *gin.Context) {
 				Stream:           isStream,
 				StartedAt:        start,
 			})
-			if verdict := h.inspectUpstreamGuardRequest(c.Request.Context(), "/v1/responses", effectiveModel, account, openAIResponsesBody, isStream, c.GetHeader("X-Request-Id")); writeUpstreamGuardBlock(c, verdict) {
+			audit := h.newUpstreamGuardAudit(c.Request.Context(), "/v1/responses", effectiveModel, account, openAIResponsesBody, isStream, upstreamGuardRequestID(c))
+			defer audit.Finish()
+			if verdict := audit.InspectRequest(); writeUpstreamGuardBlock(c, verdict) {
 				h.store.Release(account)
 				return
 			}
@@ -1605,7 +1607,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				clientGone := false
 				var pendingFirstTokenEvents bytes.Buffer
 				readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
-					if verdict := h.inspectUpstreamGuardResponse(c.Request.Context(), "/v1/responses", effectiveModel, account, data, true, c.GetHeader("X-Request-Id")); shouldBlockUpstreamGuard(verdict) {
+					if verdict := audit.InspectResponseSSE(data); shouldBlockUpstreamGuard(verdict) {
 						blockEvent := buildUpstreamGuardBlockedEvent(verdict)
 						terminalFailurePayload = blockEvent
 						gotTerminal = true
@@ -1685,7 +1687,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					if contentType == "" {
 						contentType = "application/json"
 					}
-					if verdict := h.inspectUpstreamGuardResponse(c.Request.Context(), "/v1/responses", effectiveModel, account, respBody, false, c.GetHeader("X-Request-Id")); writeUpstreamGuardBlock(c, verdict) {
+					if verdict := audit.InspectResponseBody(respBody, false); writeUpstreamGuardBlock(c, verdict) {
 						h.store.Release(account)
 						return
 					}
@@ -1827,7 +1829,9 @@ func (h *Handler) Responses(c *gin.Context) {
 		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
 		lastUpstreamCancel = upstreamCancel
 		ttftGuard := newFirstTokenTimeoutGuard(currentFirstTokenTimeout(), upstreamCancel)
-		if verdict := h.inspectUpstreamGuardRequest(c.Request.Context(), "/v1/responses", effectiveModel, account, codexBody, isStream, c.GetHeader("X-Request-Id")); writeUpstreamGuardBlock(c, verdict) {
+		audit := h.newUpstreamGuardAudit(c.Request.Context(), "/v1/responses", effectiveModel, account, codexBody, isStream, upstreamGuardRequestID(c))
+		defer audit.Finish()
+		if verdict := audit.InspectRequest(); writeUpstreamGuardBlock(c, verdict) {
 			h.store.Release(account)
 			return
 		}
@@ -1993,7 +1997,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			clientGone := false
 			var pendingFirstTokenEvents bytes.Buffer
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
-				if verdict := h.inspectUpstreamGuardResponse(c.Request.Context(), "/v1/responses", effectiveModel, account, data, true, c.GetHeader("X-Request-Id")); shouldBlockUpstreamGuard(verdict) {
+				if verdict := audit.InspectResponseSSE(data); shouldBlockUpstreamGuard(verdict) {
 					blockEvent := buildUpstreamGuardBlockedEvent(verdict)
 					terminalFailurePayload = blockEvent
 					gotTerminal = true
@@ -2078,7 +2082,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			imageOutputs := make([]json.RawMessage, 0, 1)
 			seenImageOutputs := make(map[string]struct{})
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
-				if verdict := h.inspectUpstreamGuardResponse(c.Request.Context(), "/v1/responses", effectiveModel, account, data, false, c.GetHeader("X-Request-Id")); shouldBlockUpstreamGuard(verdict) {
+				if verdict := audit.ScanResponseBody(data, false); shouldBlockUpstreamGuard(verdict) {
 					verdictCopy := verdict
 					upstreamGuardBlockedVerdict = &verdictCopy
 					gotTerminal = true
@@ -2200,7 +2204,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					"error": gin.H{"message": outcome.failureMessage, "type": "upstream_error"},
 				})
 			} else if responseJSON != nil {
-				if verdict := h.inspectUpstreamGuardResponse(c.Request.Context(), "/v1/responses", effectiveModel, account, responseJSON, false, c.GetHeader("X-Request-Id")); writeUpstreamGuardBlock(c, verdict) {
+				if verdict := audit.InspectResponseBody(responseJSON, false); writeUpstreamGuardBlock(c, verdict) {
 					h.store.Release(account)
 					return
 				}
@@ -2396,7 +2400,9 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		downstreamHeaders := c.Request.Header.Clone()
 
 		if account.IsOpenAIResponsesAPI() {
-			if verdict := h.inspectUpstreamGuardRequest(c.Request.Context(), "/v1/responses/compact", effectiveModel, account, openAIResponsesBody, false, c.GetHeader("X-Request-Id")); writeUpstreamGuardBlock(c, verdict) {
+			audit := h.newUpstreamGuardAudit(c.Request.Context(), "/v1/responses/compact", effectiveModel, account, openAIResponsesBody, false, upstreamGuardRequestID(c))
+			defer audit.Finish()
+			if verdict := audit.InspectRequest(); writeUpstreamGuardBlock(c, verdict) {
 				h.store.Release(account)
 				return
 			}
@@ -2491,7 +2497,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			h.store.ClearModelCooldown(account, effectiveModel)
 			respBody, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			if verdict := h.inspectUpstreamGuardResponse(c.Request.Context(), "/v1/responses/compact", effectiveModel, account, respBody, false, c.GetHeader("X-Request-Id")); writeUpstreamGuardBlock(c, verdict) {
+			if verdict := audit.InspectResponseBody(respBody, false); writeUpstreamGuardBlock(c, verdict) {
 				h.store.Release(account)
 				return
 			}
@@ -2538,7 +2544,9 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			return
 		}
 
-		if verdict := h.inspectUpstreamGuardRequest(c.Request.Context(), "/v1/responses/compact", effectiveModel, account, codexBody, false, c.GetHeader("X-Request-Id")); writeUpstreamGuardBlock(c, verdict) {
+		audit := h.newUpstreamGuardAudit(c.Request.Context(), "/v1/responses/compact", effectiveModel, account, codexBody, false, upstreamGuardRequestID(c))
+		defer audit.Finish()
+		if verdict := audit.InspectRequest(); writeUpstreamGuardBlock(c, verdict) {
 			h.store.Release(account)
 			return
 		}
@@ -2633,7 +2641,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 
 		respBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		if verdict := h.inspectUpstreamGuardResponse(c.Request.Context(), "/v1/responses/compact", effectiveModel, account, respBody, false, c.GetHeader("X-Request-Id")); writeUpstreamGuardBlock(c, verdict) {
+		if verdict := audit.InspectResponseBody(respBody, false); writeUpstreamGuardBlock(c, verdict) {
 			h.store.Release(account)
 			return
 		}
@@ -2822,7 +2830,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
 		lastUpstreamCancel = upstreamCancel
 		ttftGuard := newFirstTokenTimeoutGuard(currentFirstTokenTimeout(), upstreamCancel)
-		if verdict := h.inspectUpstreamGuardRequest(c.Request.Context(), "/v1/chat/completions", effectiveModel, account, codexBody, isStream, c.GetHeader("X-Request-Id")); writeUpstreamGuardBlock(c, verdict) {
+		audit := h.newUpstreamGuardAudit(c.Request.Context(), "/v1/chat/completions", effectiveModel, account, codexBody, isStream, upstreamGuardRequestID(c))
+		defer audit.Finish()
+		if verdict := audit.InspectRequest(); writeUpstreamGuardBlock(c, verdict) {
 			h.store.Release(account)
 			return
 		}
@@ -2960,7 +2970,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			clientGone := false
 			var pendingFirstTokenChunks bytes.Buffer
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
-				if verdict := h.inspectUpstreamGuardResponse(c.Request.Context(), "/v1/chat/completions", effectiveModel, account, data, true, c.GetHeader("X-Request-Id")); shouldBlockUpstreamGuard(verdict) {
+				if verdict := audit.InspectResponseSSE(data); shouldBlockUpstreamGuard(verdict) {
 					if !clientGone {
 						if err := streamWriter.WriteString(fmt.Sprintf("data: %s\n\n", buildUpstreamGuardBlockedErrorPayload(verdict))); err != nil {
 							writeErr = err
@@ -3053,7 +3063,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			var toolCalls []ToolCallResult
 
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
-				if verdict := h.inspectUpstreamGuardResponse(c.Request.Context(), "/v1/chat/completions", effectiveModel, account, data, false, c.GetHeader("X-Request-Id")); shouldBlockUpstreamGuard(verdict) {
+				if verdict := audit.ScanResponseBody(data, false); shouldBlockUpstreamGuard(verdict) {
 					verdictCopy := verdict
 					upstreamGuardBlockedVerdict = &verdictCopy
 					gotTerminal = true
@@ -3147,7 +3157,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 					"error": gin.H{"message": outcome.failureMessage, "type": "upstream_error"},
 				})
 			} else if compactResult != nil {
-				if verdict := h.inspectUpstreamGuardResponse(c.Request.Context(), "/v1/chat/completions", effectiveModel, account, compactResult, false, c.GetHeader("X-Request-Id")); writeUpstreamGuardBlock(c, verdict) {
+				if verdict := audit.InspectResponseBody(compactResult, false); writeUpstreamGuardBlock(c, verdict) {
 					h.store.Release(account)
 					return
 				}

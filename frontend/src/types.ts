@@ -588,6 +588,9 @@ export interface SystemSettings {
   upstream_guard_mode: 'off' | 'warn' | 'high_block' | 'strict'
   upstream_guard_suppressions: string
   security_event_retention_days: number
+  security_capture_mode: 'off' | 'hit_raw' | 'full_raw' | string
+  security_capture_retention_days: number
+  security_capture_max_body_bytes: number
   client_compat_mode: 'preserve' | 'auto' | 'force' | string
   codex_min_cli_version: string
   usage_log_mode: 'full' | 'errors' | 'off' | string
@@ -705,6 +708,43 @@ export interface SecurityEvent {
 
 export interface SecurityEventsResponse {
   events: SecurityEvent[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface SecurityCapture {
+  id: number
+  created_at: ISODateString
+  security_event_id: number
+  capture_reason: 'hit' | 'full' | string
+  direction: 'request' | 'response' | 'source' | string
+  endpoint: string
+  model: string
+  account_id: number
+  account_name: string
+  base_url: string
+  source_type: 'official' | 'third_party' | 'unknown' | string
+  stream: boolean
+  tool_call: boolean
+  request_id: string
+  body: string
+  body_hash: string
+  body_bytes: number
+  truncated: boolean
+  expires_at: ISODateString
+  event_action: string
+  event_risk_level: string
+  event_risk_score: number
+  event_confidence: number
+  event_rules: string
+  event_preview: string
+  event_scanner_error: string
+  event_false_positive_hints: string
+}
+
+export interface SecurityCapturesResponse {
+  captures: SecurityCapture[]
   total: number
   page: number
   page_size: number

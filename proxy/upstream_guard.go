@@ -1,16 +1,20 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/codex2api/api"
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 	"github.com/codex2api/security/upstreamguard"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 const upstreamGuardBlockedCode api.ErrorCode = "upstream_guard_blocked"
@@ -25,26 +29,190 @@ type upstreamGuardScanResult struct {
 }
 
 type upstreamGuardInput struct {
-	Direction   string
-	Endpoint    string
-	Model       string
-	AccountID   int64
-	AccountName string
-	BaseURL     string
-	Source      upstreamguard.SourceType
-	Stream      bool
-	Body        []byte
-	RequestID   string
-	Config      upstreamguard.Config
-	InspectFunc upstreamGuardInspectFunc
-	Scanner     upstreamGuardScanner
+	Direction    string
+	Endpoint     string
+	Model        string
+	AccountID    int64
+	AccountName  string
+	BaseURL      string
+	Source       upstreamguard.SourceType
+	Stream       bool
+	Body         []byte
+	RequestID    string
+	Config       upstreamguard.Config
+	InspectFunc  upstreamGuardInspectFunc
+	Scanner      upstreamGuardScanner
+	DeferCapture bool
+}
+
+type upstreamGuardAudit struct {
+	h               *Handler
+	ctx             context.Context
+	requestInput    upstreamGuardInput
+	responseInput   upstreamGuardInput
+	requestBody     []byte
+	responseBody    bytes.Buffer
+	requestEventID  int64
+	responseEventID int64
+	hit             bool
+	toolCall        bool
+	finished        bool
+}
+
+func (h *Handler) newUpstreamGuardAudit(ctx context.Context, endpoint, model string, account *auth.Account, requestBody []byte, stream bool, requestID string) *upstreamGuardAudit {
+	requestInput := h.newUpstreamGuardInput(upstreamguard.DirectionRequest, endpoint, model, account, requestBody, stream, requestID)
+	requestInput.DeferCapture = true
+	responseInput := h.newUpstreamGuardInput(upstreamguard.DirectionResponse, endpoint, model, account, nil, stream, requestID)
+	responseInput.DeferCapture = true
+	return &upstreamGuardAudit{
+		h:             h,
+		ctx:           ctx,
+		requestInput:  requestInput,
+		responseInput: responseInput,
+		requestBody:   append([]byte(nil), requestBody...),
+	}
+}
+
+func upstreamGuardRequestID(c *gin.Context) string {
+	if c == nil {
+		return uuid.New().String()
+	}
+	if requestID := strings.TrimSpace(c.GetHeader("X-Request-Id")); requestID != "" {
+		return requestID
+	}
+	if value, ok := c.Get("upstream_guard_request_id"); ok {
+		if requestID := strings.TrimSpace(fmt.Sprint(value)); requestID != "" {
+			return requestID
+		}
+	}
+	requestID := uuid.New().String()
+	c.Set("upstream_guard_request_id", requestID)
+	return requestID
+}
+
+func (a *upstreamGuardAudit) InspectRequest() upstreamguard.Verdict {
+	if a == nil || a.h == nil {
+		return upstreamguard.Verdict{}
+	}
+	input := a.requestInput
+	input.Body = a.requestBody
+	verdict, eventID := a.h.inspectUpstreamGuardWithEventID(a.ctx, input)
+	if eventID > 0 {
+		a.requestEventID = eventID
+		a.hit = true
+	}
+	return verdict
+}
+
+func (a *upstreamGuardAudit) InspectResponseBody(body []byte, stream bool) upstreamguard.Verdict {
+	if a == nil || a.h == nil {
+		return upstreamguard.Verdict{}
+	}
+	a.responseBody.Write(body)
+	return a.inspectResponseForVerdict(body, stream)
+}
+
+func (a *upstreamGuardAudit) ScanResponseBody(body []byte, stream bool) upstreamguard.Verdict {
+	if a == nil || a.h == nil {
+		return upstreamguard.Verdict{}
+	}
+	return a.inspectResponseForVerdict(body, stream)
+}
+
+func (a *upstreamGuardAudit) inspectResponseForVerdict(body []byte, stream bool) upstreamguard.Verdict {
+	input := a.responseInput
+	input.Body = body
+	input.Stream = stream
+	input.DeferCapture = true
+	verdict, eventID := a.h.inspectUpstreamGuardWithEventID(a.ctx, input)
+	a.observeResponseVerdict(verdict, eventID)
+	return verdict
+}
+
+func (a *upstreamGuardAudit) InspectResponseSSE(data []byte) upstreamguard.Verdict {
+	if a == nil || a.h == nil {
+		return upstreamguard.Verdict{}
+	}
+	a.responseBody.WriteString("data: ")
+	a.responseBody.Write(data)
+	a.responseBody.WriteString("\n\n")
+	input := a.responseInput
+	input.Body = data
+	input.Stream = true
+	input.DeferCapture = true
+	verdict, eventID := a.h.inspectUpstreamGuardWithEventID(a.ctx, input)
+	a.observeResponseVerdict(verdict, eventID)
+	return verdict
+}
+
+func (a *upstreamGuardAudit) observeResponseVerdict(verdict upstreamguard.Verdict, eventID int64) {
+	if eventID > 0 {
+		a.responseEventID = eventID
+		a.hit = true
+	}
+	if verdict.ToolCall {
+		a.toolCall = true
+	}
+}
+
+func (a *upstreamGuardAudit) Finish() {
+	if a == nil || a.h == nil || a.h.db == nil || a.finished {
+		return
+	}
+	a.finished = true
+	cfg := upstreamguard.NormalizeConfig(a.requestInput.Config)
+	if cfg.CaptureMode == upstreamguard.CaptureModeOff {
+		return
+	}
+	reason := database.SecurityCaptureReasonFull
+	if a.hit {
+		reason = database.SecurityCaptureReasonHit
+	} else if cfg.CaptureMode != upstreamguard.CaptureModeFullRaw {
+		return
+	}
+	if len(a.requestBody) > 0 {
+		input := a.requestInput
+		input.Body = a.requestBody
+		input.Config = cfg
+		eventID := a.requestEventID
+		if eventID == 0 {
+			eventID = a.responseEventID
+		}
+		a.h.recordUpstreamGuardCapture(a.ctx, input, upstreamguard.Verdict{
+			Direction: input.Direction,
+			Source:    input.Source,
+		}, eventID, reason)
+	}
+	if a.responseBody.Len() > 0 {
+		input := a.responseInput
+		input.Body = append([]byte(nil), a.responseBody.Bytes()...)
+		input.Config = cfg
+		eventID := a.responseEventID
+		if eventID == 0 {
+			eventID = a.requestEventID
+		}
+		a.h.recordUpstreamGuardCapture(a.ctx, input, upstreamguard.Verdict{
+			Direction: input.Direction,
+			Source:    input.Source,
+			ToolCall:  a.toolCall,
+		}, eventID, reason)
+	}
 }
 
 func (h *Handler) inspectUpstreamGuard(ctx context.Context, input upstreamGuardInput) upstreamguard.Verdict {
+	verdict, _ := h.inspectUpstreamGuardWithEventID(ctx, input)
+	return verdict
+}
+
+func (h *Handler) inspectUpstreamGuardWithEventID(ctx context.Context, input upstreamGuardInput) (upstreamguard.Verdict, int64) {
 	cfg := upstreamguard.NormalizeConfig(input.Config)
 	input.Config = cfg
 	if cfg.Mode == upstreamguard.ModeOff || !cfg.Enabled {
-		return upstreamguard.Verdict{Enabled: false, Direction: input.Direction, Action: "allow", RiskLevel: upstreamguard.RiskNone}
+		verdict := upstreamguard.Verdict{Enabled: false, Direction: input.Direction, Action: "allow", RiskLevel: upstreamguard.RiskNone}
+		if shouldCaptureFullRaw(cfg) && !input.DeferCapture {
+			h.recordUpstreamGuardCapture(ctx, input, verdict, 0, database.SecurityCaptureReasonFull)
+		}
+		return verdict, 0
 	}
 	scanner := input.Scanner
 	if scanner == nil {
@@ -62,9 +230,15 @@ func (h *Handler) inspectUpstreamGuard(ctx context.Context, input upstreamGuardI
 		}
 	}
 	if shouldRecordUpstreamGuardEvent(verdict) {
-		h.recordUpstreamGuardEvent(ctx, input, verdict)
+		eventID := h.recordUpstreamGuardEvent(ctx, input, verdict)
+		if shouldCaptureHitRaw(cfg) && !input.DeferCapture {
+			h.recordUpstreamGuardCapture(ctx, input, verdict, eventID, database.SecurityCaptureReasonHit)
+		}
+		return verdict, eventID
+	} else if shouldCaptureFullRaw(cfg) && !input.DeferCapture {
+		h.recordUpstreamGuardCapture(ctx, input, verdict, 0, database.SecurityCaptureReasonFull)
 	}
-	return verdict
+	return verdict, 0
 }
 
 func runUpstreamGuardScanner(ctx context.Context, scanner upstreamGuardScanner, input upstreamGuardInput) (upstreamguard.Verdict, error) {
@@ -170,6 +344,14 @@ func shouldBlockUpstreamGuard(verdict upstreamguard.Verdict) bool {
 	return verdict.Enabled && verdict.Action == "block"
 }
 
+func shouldCaptureHitRaw(cfg upstreamguard.Config) bool {
+	return cfg.CaptureMode == upstreamguard.CaptureModeHitRaw || cfg.CaptureMode == upstreamguard.CaptureModeFullRaw
+}
+
+func shouldCaptureFullRaw(cfg upstreamguard.Config) bool {
+	return cfg.CaptureMode == upstreamguard.CaptureModeFullRaw
+}
+
 func upstreamGuardBlockMessage(verdict upstreamguard.Verdict) string {
 	reason := strings.TrimSpace(verdict.Reason)
 	if reason == "" {
@@ -228,14 +410,14 @@ func buildUpstreamGuardBlockedErrorPayload(verdict upstreamguard.Verdict) []byte
 	return encoded
 }
 
-func (h *Handler) recordUpstreamGuardEvent(ctx context.Context, input upstreamGuardInput, verdict upstreamguard.Verdict) {
+func (h *Handler) recordUpstreamGuardEvent(ctx context.Context, input upstreamGuardInput, verdict upstreamguard.Verdict) int64 {
 	if h == nil || h.db == nil {
-		return
+		return 0
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	_ = h.db.InsertSecurityEvent(ctx, &database.SecurityEventInput{
+	id, _ := h.db.InsertSecurityEventReturningID(ctx, &database.SecurityEventInput{
 		Direction:          input.Direction,
 		Action:             verdict.Action,
 		RiskLevel:          string(verdict.RiskLevel),
@@ -256,12 +438,55 @@ func (h *Handler) recordUpstreamGuardEvent(ctx context.Context, input upstreamGu
 		ScannerError:       verdict.ScannerError,
 		FalsePositiveHints: marshalStringList(verdict.FalsePositiveHints),
 	})
+	return id
+}
+
+func (h *Handler) recordUpstreamGuardCapture(ctx context.Context, input upstreamGuardInput, verdict upstreamguard.Verdict, eventID int64, reason string) {
+	if h == nil || h.db == nil || len(input.Body) == 0 {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	body, truncated := captureBody(input.Body, input.Config.CaptureMaxBodyBytes)
+	sourceType := verdict.Source
+	if sourceType == "" {
+		sourceType = input.Source
+	}
+	_, _ = h.db.InsertSecurityCapture(ctx, &database.SecurityCaptureInput{
+		SecurityEventID: eventID,
+		CaptureReason:   reason,
+		Direction:       input.Direction,
+		Endpoint:        input.Endpoint,
+		Model:           input.Model,
+		AccountID:       input.AccountID,
+		AccountName:     input.AccountName,
+		BaseURL:         input.BaseURL,
+		SourceType:      string(sourceType),
+		Stream:          input.Stream,
+		ToolCall:        verdict.ToolCall,
+		RequestID:       input.RequestID,
+		Body:            body,
+		BodyHash:        upstreamguard.ContentHash(input.Body),
+		BodyBytes:       len(input.Body),
+		Truncated:       truncated,
+		ExpiresAt:       time.Now().Add(time.Duration(input.Config.CaptureRetentionDays) * 24 * time.Hour),
+	})
+}
+
+func captureBody(body []byte, maxBytes int) (string, bool) {
+	if maxBytes > 0 && len(body) > maxBytes {
+		return string(body[:maxBytes]), true
+	}
+	return string(body), false
 }
 
 func marshalUpstreamGuardRules(verdict upstreamguard.Verdict) string {
 	type ruleEvent struct {
 		RuleID   string `json:"rule_id"`
 		Evidence string `json:"evidence,omitempty"`
+		Field    string `json:"field,omitempty"`
+		Match    string `json:"match,omitempty"`
 	}
 	rules := make([]ruleEvent, 0, len(verdict.RuleIDs))
 	for _, ruleID := range verdict.RuleIDs {
@@ -271,6 +496,8 @@ func marshalUpstreamGuardRules(verdict upstreamguard.Verdict) string {
 		for _, evidence := range verdict.Evidence {
 			if evidence.RuleID == rules[i].RuleID {
 				rules[i].Evidence = evidence.Snippet
+				rules[i].Field = evidence.Field
+				rules[i].Match = evidence.Match
 				break
 			}
 		}
