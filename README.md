@@ -107,6 +107,18 @@ Run it as a full **PostgreSQL + Redis** production stack or as a single-containe
 
 > For detailed deployment instructions, see [DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
+### Windows Local Bundle
+
+If you are using a prebuilt Windows local folder, use the desktop `CodexProxy Admin` shortcut or `start-codex2api.bat` in the project root:
+
+```text
+desktop shortcut -> start-codex2api.bat -> codex2api.exe
+```
+
+Do not double-click `codex2api.exe` directly for daily startup. The batch launcher enters the project directory, sets `CODEX_PORT=18080` and `CODEX_BIND=127.0.0.1`, checks whether the service is already running, starts it only when needed, opens `http://127.0.0.1:18080/admin/`, and writes startup logs under `logs/`.
+
+After moving the folder to another PC or another path, run `create-desktop-shortcut.bat` in the project root to regenerate the desktop shortcut with the correct path and icon.
+
 ### Deployment Modes
 
 | Mode | File | Use Case |

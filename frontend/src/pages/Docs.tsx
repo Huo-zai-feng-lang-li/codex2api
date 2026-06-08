@@ -1041,6 +1041,38 @@ set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`;
         description={t("docs.quickStart.description")}
       />
 
+      <Card className="mb-4 py-0">
+        <CardContent className="p-5">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div className="min-w-0">
+              <h3 className="text-[15px] font-semibold text-foreground">
+                {t("docs.quickStart.localLaunchTitle")}
+              </h3>
+              <p className="mt-1 text-sm leading-6 text-muted-foreground">
+                {t("docs.quickStart.localLaunchDesc")}
+              </p>
+            </div>
+            <div className="rounded-lg border border-primary/25 bg-primary/5 px-3 py-2 font-mono text-xs text-foreground">
+              {t("docs.quickStart.localLaunchFlow")}
+            </div>
+          </div>
+          <div className="mt-4 grid gap-3 md:grid-cols-3">
+            {[
+              "localLaunchNoteBat",
+              "localLaunchNoteExe",
+              "localLaunchNoteShortcut",
+            ].map((key) => (
+              <div
+                key={key}
+                className="rounded-lg border border-border bg-muted/25 px-3 py-3 text-xs leading-5 text-muted-foreground"
+              >
+                {t(`docs.quickStart.${key}`)}
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_260px]">
         <div className="min-w-0">
           <Card id="qs-tools" className="mb-4 scroll-mt-20 py-0">

@@ -1,21 +1,23 @@
-# 最新接续状态 (2026-06-03 20:19)
+# 最新接续状态 (2026-06-08 17:50)
 
 ## 核心进展
-- 已完成账号管理手动新增名称必填与默认“正常”筛选闭环：`admin/handler.go`、`admin/oauth.go`、`frontend/src/pages/Accounts.tsx` 已提交 `628f34e`；随后补充来源账号展示规则，`frontend/src/lib/utils.ts` 已提交 `d84d689`。
-- 当前运行态已重建并重启到最新 `codex2api.exe`，服务健康检查为 `{"available":3,"status":"ok","total":12}`，运行进程路径为 `C:\Users\Administrator\Desktop\codex2api\codex2api.exe`。
+- 安全防护计划已按 `.agent/plan-安全防护.md` 完成阶段 2-6：新增 `security/upstreamguard` 规则引擎、`security_events` 持久化和后台接口、代理请求/响应/SSE/WebSocket 接入、设置页 `upstream_guard_mode` 配置、安全事件页面与可读 preview 详情弹窗；完成目标已标记为 complete。
+- 最后验证结果：`go test ./proxy -run "UpstreamGuard|ResponsesCompact(Off|Warn|HighBlock)"`、`go test ./security/upstreamguard`、`go test ./security/... ./database/... ./admin/... ./proxy/...`、`go test ./...`、`npm run typecheck`、`npm run build` 均通过；Playwright mock 验收安全事件页/设置页通过且新增控制台错误为 0。
 
 ## 变更决策
-- 手动新增账号入口 RT/ST/AT/API Key/OAuth 均要求账号名称非空；后端同步校验，避免绕过前端写入空名或默认名。
-- API Key 类型 OpenAI Responses 账号新增/编辑同样要求名称非空；新增时不再自动回退为 `openai-responses`，编辑时不允许清空名称。
-- 使用统计等来源账号展示规则调整为：`account_name.trim()` 非空则原样展示；为空才使用邮箱兜底，邮箱也无效时显示 `ID xxx`。
-- API Key 新增里的模型列表保持原交互：模型输入框只是草稿，必须点击“添加”生成模型 chip 后，底部“添加”按钮才会启用。
-- Windows 运行中的 exe 不做硬覆盖；后续构建切换继续使用 `codex2api.new.exe` sidecar 构建、停旧进程、原地替换、启动、`/health` 验证、失败回滚的流程。
+- 默认策略保持“仅告警”：`warn` 模式记录事件但不阻断业务；`off` 模式完全跳过扫描和事件写入；`high_block` 只阻断真实高危；`strict` 阻断 medium 及以上风险，但当前采用逐块扫描，不做首段延迟闸门。
+- 安全事件只保存脱敏 preview、规则 JSON、内容 hash 和元数据，不保存完整 prompt、源码、响应或密钥原文；`response.output_item.done` / `function_call` 这类工具调用 preview 在前端解析成工具名、命令、目录、状态、调用 ID 等摘要，完整 JSON 只在详情中以纯文本展示。
+- 低误报优先：示例密钥、代码块、文档模板、安全分析文本、普通 OpenAI usage/model/id/object 不应判 high/critical；工具调用单独出现只做低危告警，不等同恶意。
+- 架构对账：仓库根目录无 `AGENTS.md` / `.agent/rules/README.md`，本轮按用户提供规则和现有 README 架构执行；实现沿现有 `auth.Store`、`SystemSettings`、admin API、proxy handler、React/Vite admin dashboard 路径扩展，没有新增账号字段或绕开现有配置链路。
 
 ## 待办事项 (Next Steps)
-- [ ] 如用户继续追问“来源账号不对”，优先核验 `data/codex2api.db` 中对应 `accounts.name` 与 `usage_logs.account_id`，再看前端 `formatAccountIdentity`。
-- [ ] 如用户追问 API Key 新增按钮禁用，说明模型输入框需要点击旁边“添加”进入模型列表；若要改交互，需重新确认是否允许草稿模型自动计入提交。
-- [ ] 继续观察真实流量下服务健康、可用账号数和使用统计页面显示，确认无新的运行态回归。
+- [ ] 人工验收真实运行环境：在后台“系统设置”切换 `off/warn/high_block/strict`，用真实 `/v1/responses` 和 `/v1/chat/completions` 请求验证事件、阻断和透传行为。
+- [ ] 观察 `warn` 模式一段时间的安全事件，按 rule/account/base_url/endpoint 调整误报抑制规则，再决定是否对部分上游启用 `high_block`。
+- [ ] 如需真正的严格流式首段延迟闸门，单独立项并定义可接受首 token 延迟预算；当前只通过 `first_token_ms` / Usage 首 token 延迟观测逐块扫描影响。
+- [ ] 工作区存在大量已修改/新增文件，包含安全防护、OAuth、README/docs、前端页面等；提交前需按主题拆分审查，避免把无关改动混进同一提交。
 
 ## 关键上下文
 - 目录: `C:\Users\Administrator\Desktop\codex2api`
-- 主要文件: `C:\Users\Administrator\Desktop\codex2api\admin\handler.go`, `C:\Users\Administrator\Desktop\codex2api\admin\oauth.go`, `C:\Users\Administrator\Desktop\codex2api\frontend\src\pages\Accounts.tsx`, `C:\Users\Administrator\Desktop\codex2api\frontend\src\lib\utils.ts`
+- 主要文件: `security/upstreamguard/guard.go`, `proxy/upstream_guard.go`, `frontend/src/pages/SecurityEvents.tsx`
+- 计划文件: `.agent/plan-安全防护.md`
+- 关键测试: `security/upstreamguard/guard_test.go`, `proxy/upstream_guard_test.go`, `database/security_events_test.go`, `admin/security_events_test.go`

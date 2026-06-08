@@ -20,6 +20,7 @@ import (
 	"github.com/codex2api/cache"
 	"github.com/codex2api/database"
 	"github.com/codex2api/security/promptfilter"
+	"github.com/codex2api/security/upstreamguard"
 )
 
 // AccountStatus 账号状态
@@ -1584,6 +1585,7 @@ type Store struct {
 	schedulerMode        atomic.Value // string: "round_robin" or "remaining_quota"
 	affinityMode         atomic.Value // string: "bounded" / "off" / "strict"
 	promptFilterConfig   atomic.Value // promptfilter.Config
+	upstreamGuardConfig  atomic.Value // upstreamguard.Config
 	sessionMu            sync.RWMutex
 	sessionBindings      map[string]sessionAffinity
 	activeRequestSeq     int64
@@ -2088,6 +2090,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 			ProxyURL:                         "",
 			MaxRateLimitRetries:              1,
 			SchedulerMode:                    "round_robin",
+			UpstreamGuardMode:                database.DefaultUpstreamGuardMode,
 		}
 	}
 	s := &Store{
@@ -2131,6 +2134,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 		s.modelMapping.Store(settings.ModelMapping)
 	}
 	s.SetPromptFilterConfig(promptFilterConfigFromSettings(settings))
+	s.SetUpstreamGuardConfig(upstreamGuardConfigFromSettings(settings))
 	// 环境变量优先，否则读数据库设置
 	fastEnabled := fastSchedulerEnabledFromEnv() || settings.FastSchedulerEnabled
 	s.fastSchedulerEnabled.Store(fastEnabled)
@@ -3782,6 +3786,36 @@ func (s *Store) GetPromptFilterConfig() promptfilter.Config {
 		return promptfilter.NormalizeConfig(v)
 	}
 	return promptfilter.DefaultConfig()
+}
+
+func upstreamGuardConfigFromSettings(settings *database.SystemSettings) upstreamguard.Config {
+	cfg := upstreamguard.DefaultConfig()
+	if settings == nil {
+		return cfg
+	}
+	cfg.Mode = database.NormalizeUpstreamGuardMode(settings.UpstreamGuardMode)
+	cfg.Suppressions = parseUpstreamGuardSuppressions(settings.UpstreamGuardSuppressions)
+	return upstreamguard.NormalizeConfig(cfg)
+}
+
+func parseUpstreamGuardSuppressions(raw string) []upstreamguard.SuppressionRule {
+	rules, err := upstreamguard.ParseSuppressions(raw)
+	if err != nil {
+		return nil
+	}
+	return rules
+}
+
+func (s *Store) SetUpstreamGuardConfig(cfg upstreamguard.Config) {
+	cfg.Mode = database.NormalizeUpstreamGuardMode(cfg.Mode)
+	s.upstreamGuardConfig.Store(upstreamguard.NormalizeConfig(cfg))
+}
+
+func (s *Store) GetUpstreamGuardConfig() upstreamguard.Config {
+	if v, ok := s.upstreamGuardConfig.Load().(upstreamguard.Config); ok {
+		return upstreamguard.NormalizeConfig(v)
+	}
+	return upstreamguard.DefaultConfig()
 }
 
 // AddAccount 热加载新账号到内存池（前端添加后即刻生效）

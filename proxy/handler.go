@@ -20,6 +20,7 @@ import (
 	"github.com/codex2api/config"
 	"github.com/codex2api/database"
 	"github.com/codex2api/security"
+	"github.com/codex2api/security/upstreamguard"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
@@ -1438,6 +1439,10 @@ func (h *Handler) Responses(c *gin.Context) {
 				Stream:           isStream,
 				StartedAt:        start,
 			})
+			if verdict := h.inspectUpstreamGuardRequest(c.Request.Context(), "/v1/responses", effectiveModel, account, openAIResponsesBody, isStream, c.GetHeader("X-Request-Id")); writeUpstreamGuardBlock(c, verdict) {
+				h.store.Release(account)
+				return
+			}
 			resp, reqErr := ExecuteOpenAIResponsesRequest(upstreamCtx, account, openAIResponsesBody, proxyURL, downstreamHeaders)
 			attemptedUpstream = true
 			durationMs := int(time.Since(start).Milliseconds())
@@ -1600,6 +1605,20 @@ func (h *Handler) Responses(c *gin.Context) {
 				clientGone := false
 				var pendingFirstTokenEvents bytes.Buffer
 				readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
+					if verdict := h.inspectUpstreamGuardResponse(c.Request.Context(), "/v1/responses", effectiveModel, account, data, true, c.GetHeader("X-Request-Id")); shouldBlockUpstreamGuard(verdict) {
+						blockEvent := buildUpstreamGuardBlockedEvent(verdict)
+						terminalFailurePayload = blockEvent
+						gotTerminal = true
+						if !clientGone {
+							if err := streamWriter.WriteString(fmt.Sprintf("data: %s\n\n", blockEvent)); err != nil {
+								writeErr = err
+								clientGone = true
+							} else {
+								wroteAnyBody = true
+							}
+						}
+						return false
+					}
 					parsed := gjson.ParseBytes(data)
 					eventType := parsed.Get("type").String()
 					isFirstToken := isFirstTokenEvent(eventType)
@@ -1665,6 +1684,10 @@ func (h *Handler) Responses(c *gin.Context) {
 					contentType := resp.Header.Get("Content-Type")
 					if contentType == "" {
 						contentType = "application/json"
+					}
+					if verdict := h.inspectUpstreamGuardResponse(c.Request.Context(), "/v1/responses", effectiveModel, account, respBody, false, c.GetHeader("X-Request-Id")); writeUpstreamGuardBlock(c, verdict) {
+						h.store.Release(account)
+						return
 					}
 					c.Data(http.StatusOK, contentType, respBody)
 				}
@@ -1804,6 +1827,10 @@ func (h *Handler) Responses(c *gin.Context) {
 		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
 		lastUpstreamCancel = upstreamCancel
 		ttftGuard := newFirstTokenTimeoutGuard(currentFirstTokenTimeout(), upstreamCancel)
+		if verdict := h.inspectUpstreamGuardRequest(c.Request.Context(), "/v1/responses", effectiveModel, account, codexBody, isStream, c.GetHeader("X-Request-Id")); writeUpstreamGuardBlock(c, verdict) {
+			h.store.Release(account)
+			return
+		}
 		resp, reqErr := ExecuteRequest(upstreamCtx, account, codexBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, useWebsocket)
 		durationMs := int(time.Since(start).Milliseconds())
 
@@ -1936,6 +1963,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		var readErr error
 		var writeErr error
 		wroteAnyBody := false
+		var upstreamGuardBlockedVerdict *upstreamguard.Verdict
 		var responseJSON []byte
 		var imageLogInfo imageUsageLogInfo
 		var terminalFailurePayload []byte
@@ -1965,6 +1993,20 @@ func (h *Handler) Responses(c *gin.Context) {
 			clientGone := false
 			var pendingFirstTokenEvents bytes.Buffer
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
+				if verdict := h.inspectUpstreamGuardResponse(c.Request.Context(), "/v1/responses", effectiveModel, account, data, true, c.GetHeader("X-Request-Id")); shouldBlockUpstreamGuard(verdict) {
+					blockEvent := buildUpstreamGuardBlockedEvent(verdict)
+					terminalFailurePayload = blockEvent
+					gotTerminal = true
+					if !clientGone {
+						if err := streamWriter.WriteString(fmt.Sprintf("data: %s\n\n", blockEvent)); err != nil {
+							writeErr = err
+							clientGone = true
+						} else {
+							wroteAnyBody = true
+						}
+					}
+					return false
+				}
 				parsed := gjson.ParseBytes(data)
 				eventType := parsed.Get("type").String()
 
@@ -2036,6 +2078,12 @@ func (h *Handler) Responses(c *gin.Context) {
 			imageOutputs := make([]json.RawMessage, 0, 1)
 			seenImageOutputs := make(map[string]struct{})
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
+				if verdict := h.inspectUpstreamGuardResponse(c.Request.Context(), "/v1/responses", effectiveModel, account, data, false, c.GetHeader("X-Request-Id")); shouldBlockUpstreamGuard(verdict) {
+					verdictCopy := verdict
+					upstreamGuardBlockedVerdict = &verdictCopy
+					gotTerminal = true
+					return false
+				}
 				parsed := gjson.ParseBytes(data)
 				eventType := parsed.Get("type").String()
 				if outputItem, ok := extractResponseOutputItemDone(data, seenOutputItems); ok {
@@ -2142,11 +2190,20 @@ func (h *Handler) Responses(c *gin.Context) {
 			}
 		}
 		if !isStream {
-			if len(terminalFailurePayload) > 0 {
+			if upstreamGuardBlockedVerdict != nil {
+				if writeUpstreamGuardBlock(c, *upstreamGuardBlockedVerdict) {
+					h.store.Release(account)
+					return
+				}
+			} else if len(terminalFailurePayload) > 0 {
 				c.JSON(logStatusCode, gin.H{
 					"error": gin.H{"message": outcome.failureMessage, "type": "upstream_error"},
 				})
 			} else if responseJSON != nil {
+				if verdict := h.inspectUpstreamGuardResponse(c.Request.Context(), "/v1/responses", effectiveModel, account, responseJSON, false, c.GetHeader("X-Request-Id")); writeUpstreamGuardBlock(c, verdict) {
+					h.store.Release(account)
+					return
+				}
 				c.Data(http.StatusOK, "application/json", responseJSON)
 			} else {
 				c.JSON(http.StatusBadGateway, gin.H{
@@ -2339,6 +2396,10 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		downstreamHeaders := c.Request.Header.Clone()
 
 		if account.IsOpenAIResponsesAPI() {
+			if verdict := h.inspectUpstreamGuardRequest(c.Request.Context(), "/v1/responses/compact", effectiveModel, account, openAIResponsesBody, false, c.GetHeader("X-Request-Id")); writeUpstreamGuardBlock(c, verdict) {
+				h.store.Release(account)
+				return
+			}
 			resp, reqErr := ExecuteOpenAIResponsesRequest(c.Request.Context(), account, openAIResponsesBody, proxyURL, downstreamHeaders)
 			durationMs := int(time.Since(start).Milliseconds())
 
@@ -2430,6 +2491,10 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			h.store.ClearModelCooldown(account, effectiveModel)
 			respBody, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
+			if verdict := h.inspectUpstreamGuardResponse(c.Request.Context(), "/v1/responses/compact", effectiveModel, account, respBody, false, c.GetHeader("X-Request-Id")); writeUpstreamGuardBlock(c, verdict) {
+				h.store.Release(account)
+				return
+			}
 			totalDuration := int(time.Since(start).Milliseconds())
 			usage := extractUsageFromResult(gjson.GetBytes(respBody, "usage"))
 			promptTokens := 0
@@ -2473,6 +2538,10 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			return
 		}
 
+		if verdict := h.inspectUpstreamGuardRequest(c.Request.Context(), "/v1/responses/compact", effectiveModel, account, codexBody, false, c.GetHeader("X-Request-Id")); writeUpstreamGuardBlock(c, verdict) {
+			h.store.Release(account)
+			return
+		}
 		upstreamSessionID := IsolateCodexSessionID(apiKeyID, sessionID)
 		resp, reqErr := ExecuteCompactRequest(c.Request.Context(), account, codexBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders)
 		durationMs := int(time.Since(start).Milliseconds())
@@ -2564,6 +2633,10 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 
 		respBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		if verdict := h.inspectUpstreamGuardResponse(c.Request.Context(), "/v1/responses/compact", effectiveModel, account, respBody, false, c.GetHeader("X-Request-Id")); writeUpstreamGuardBlock(c, verdict) {
+			h.store.Release(account)
+			return
+		}
 
 		// 提取 usage 用于日志
 		promptTokens := int(gjson.GetBytes(respBody, "usage.input_tokens").Int())
@@ -2749,6 +2822,10 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
 		lastUpstreamCancel = upstreamCancel
 		ttftGuard := newFirstTokenTimeoutGuard(currentFirstTokenTimeout(), upstreamCancel)
+		if verdict := h.inspectUpstreamGuardRequest(c.Request.Context(), "/v1/chat/completions", effectiveModel, account, codexBody, isStream, c.GetHeader("X-Request-Id")); writeUpstreamGuardBlock(c, verdict) {
+			h.store.Release(account)
+			return
+		}
 		resp, reqErr := ExecuteRequest(upstreamCtx, account, codexBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, useWebsocket)
 		durationMs := int(time.Since(start).Milliseconds())
 
@@ -2853,6 +2930,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		var writeErr error
 		wroteAnyBody := false
 		var compactResult []byte
+		var upstreamGuardBlockedVerdict *upstreamguard.Verdict
 		var terminalFailurePayload []byte
 
 		chunkID := "chatcmpl-" + uuid.New().String()[:8]
@@ -2882,6 +2960,18 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			clientGone := false
 			var pendingFirstTokenChunks bytes.Buffer
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
+				if verdict := h.inspectUpstreamGuardResponse(c.Request.Context(), "/v1/chat/completions", effectiveModel, account, data, true, c.GetHeader("X-Request-Id")); shouldBlockUpstreamGuard(verdict) {
+					if !clientGone {
+						if err := streamWriter.WriteString(fmt.Sprintf("data: %s\n\n", buildUpstreamGuardBlockedErrorPayload(verdict))); err != nil {
+							writeErr = err
+							clientGone = true
+						} else {
+							wroteAnyBody = true
+						}
+					}
+					gotTerminal = true
+					return false
+				}
 				chunk, done := streamTranslator.Translate(data)
 
 				parsed := gjson.ParseBytes(data)
@@ -2963,6 +3053,12 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			var toolCalls []ToolCallResult
 
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
+				if verdict := h.inspectUpstreamGuardResponse(c.Request.Context(), "/v1/chat/completions", effectiveModel, account, data, false, c.GetHeader("X-Request-Id")); shouldBlockUpstreamGuard(verdict) {
+					verdictCopy := verdict
+					upstreamGuardBlockedVerdict = &verdictCopy
+					gotTerminal = true
+					return false
+				}
 				parsed := gjson.ParseBytes(data)
 				eventType := parsed.Get("type").String()
 				if !ttftRecorded && isFirstTokenEvent(eventType) {
@@ -3041,11 +3137,20 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			}
 		}
 		if !isStream {
-			if len(terminalFailurePayload) > 0 {
+			if upstreamGuardBlockedVerdict != nil {
+				if writeUpstreamGuardBlock(c, *upstreamGuardBlockedVerdict) {
+					h.store.Release(account)
+					return
+				}
+			} else if len(terminalFailurePayload) > 0 {
 				c.JSON(logStatusCode, gin.H{
 					"error": gin.H{"message": outcome.failureMessage, "type": "upstream_error"},
 				})
 			} else if compactResult != nil {
+				if verdict := h.inspectUpstreamGuardResponse(c.Request.Context(), "/v1/chat/completions", effectiveModel, account, compactResult, false, c.GetHeader("X-Request-Id")); writeUpstreamGuardBlock(c, verdict) {
+					h.store.Release(account)
+					return
+				}
 				c.Data(http.StatusOK, "application/json", compactResult)
 			} else {
 				c.JSON(http.StatusBadGateway, gin.H{

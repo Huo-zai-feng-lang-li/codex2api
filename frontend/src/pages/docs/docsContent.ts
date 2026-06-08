@@ -841,6 +841,34 @@ ${copy(locale, "挑选你常用的 AI 客户端，复制配置或一键唤起：
 
 ${quickToolLines}
 
+### ${copy(locale, "Windows 本地启动入口", "Windows Local Launcher")}
+
+${copy(
+  locale,
+  "日常启动请使用桌面 `CodexProxy 管理后台` 快捷方式，或项目根目录的 `start-codex2api.bat`；不要直接双击 `codex2api.exe`。",
+  "For daily startup, use the desktop `CodexProxy Admin` shortcut or `start-codex2api.bat` in the project root. Do not double-click `codex2api.exe` directly.",
+)}
+
+\`\`\`text
+${copy(
+  locale,
+  "桌面快捷方式 -> start-codex2api.bat -> codex2api.exe",
+  "desktop shortcut -> start-codex2api.bat -> codex2api.exe",
+)}
+\`\`\`
+
+${copy(
+  locale,
+  "`start-codex2api.bat` 会切到项目目录、设置 `18080` / `127.0.0.1`、检查服务是否已运行、没运行才启动，并自动打开管理后台。",
+  "`start-codex2api.bat` enters the project directory, sets `18080` / `127.0.0.1`, checks whether the service is already running, starts it only when needed, and opens the admin console.",
+)}
+
+${copy(
+  locale,
+  "换电脑或移动目录后，双击项目根目录的 `create-desktop-shortcut.bat` 重新生成桌面快捷方式。",
+  "After moving to another PC or directory, run `create-desktop-shortcut.bat` in the project root to regenerate the desktop shortcut.",
+)}
+
 ### ${copy(locale, "cURL 快速验证", "cURL Quick Check")}
 
 \`\`\`bash

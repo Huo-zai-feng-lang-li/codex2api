@@ -411,6 +411,7 @@ export default function Settings() {
     usage_probe_concurrency: 16,
     recovery_probe_interval_minutes: 30,
     lazy_mode: false,
+    proxy_url: '',
     pg_max_conns: 50,
     redis_pool_size: 30,
     auto_clean_unauthorized: false,
@@ -444,6 +445,9 @@ export default function Settings() {
     prompt_filter_sensitive_words: '',
     prompt_filter_custom_patterns: '[]',
     prompt_filter_disabled_patterns: '[]',
+    upstream_guard_mode: 'warn',
+    upstream_guard_suppressions: '[]',
+    security_event_retention_days: 30,
     client_compat_mode: 'preserve',
     codex_min_cli_version: '0.118.0',
     usage_log_mode: 'full',
@@ -748,6 +752,16 @@ export default function Settings() {
                 </Badge>
               </StatusTile>
             </div>
+          </SettingsCard>
+
+          <SettingsCard title={t('settings.proxyUrl')} description={t('settings.proxyUrlDesc')}>
+            <SettingField label={t('settings.proxyUrlLabel')}>
+              <Input
+                placeholder="http://127.0.0.1:51081"
+                value={settingsForm.proxy_url ?? ''}
+                onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, proxy_url: e.target.value }))}
+              />
+            </SettingField>
           </SettingsCard>
 
           <div className="grid gap-4 xl:grid-cols-3">
@@ -1133,6 +1147,45 @@ export default function Settings() {
                       { label: t('promptFilter.modeWarn'), value: 'warn' },
                       { label: t('promptFilter.modeBlock'), value: 'block' },
                     ]}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.upstreamGuardMode')} description={t('settings.upstreamGuardModeDesc')}>
+                  <Select
+                    value={settingsForm.upstream_guard_mode}
+                    onValueChange={(value) => setSettingsForm((f) => ({ ...f, upstream_guard_mode: value as SystemSettings['upstream_guard_mode'] }))}
+                    options={[
+                      { label: t('settings.upstreamGuardOff'), value: 'off' },
+                      { label: t('settings.upstreamGuardWarn'), value: 'warn' },
+                      { label: t('settings.upstreamGuardHighBlock'), value: 'high_block' },
+                      { label: t('settings.upstreamGuardStrict'), value: 'strict' },
+                    ]}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.securityEventRetentionDays')} description={t('settings.securityEventRetentionDaysDesc')}>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={3650}
+                    value={settingsForm.security_event_retention_days}
+                    aria-label={t('settings.securityEventRetentionDays')}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm((f) => ({ ...f, security_event_retention_days: parseInt(e.target.value) || 30 }))}
+                  />
+                </SettingField>
+                <SettingField
+                  label={t('settings.upstreamGuardSuppressions')}
+                  description={t('settings.upstreamGuardSuppressionsDesc')}
+                  className="md:col-span-2"
+                >
+                  <textarea
+                    value={settingsForm.upstream_guard_suppressions}
+                    aria-label={t('settings.upstreamGuardSuppressions')}
+                    spellCheck={false}
+                    className={cn(
+                      'min-h-[108px] w-full min-w-0 resize-y rounded-md border border-input bg-transparent px-3 py-2 text-sm font-mono shadow-xs outline-none transition-[color,box-shadow]',
+                      'placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50'
+                    )}
+                    placeholder='[{"rule_id":"response_injection","endpoint":"/v1/responses","action":"downgrade"}]'
+                    onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setSettingsForm((f) => ({ ...f, upstream_guard_suppressions: e.target.value }))}
                   />
                 </SettingField>
               </div>

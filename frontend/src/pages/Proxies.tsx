@@ -449,6 +449,64 @@ export default function Proxies() {
         </div>
       </div>
 
+      <Card className="py-0">
+        <CardContent className="p-5">
+          <div className="grid gap-5 xl:grid-cols-[1.2fr_0.8fr]">
+            <div>
+              <h3 className="text-base font-semibold text-foreground">
+                {t("proxies.guideTitle")}
+              </h3>
+              <div className="mt-4 grid gap-3 md:grid-cols-2">
+                {[
+                  ["accountProxy", "accountProxyDesc"],
+                  ["poolProxy", "poolProxyDesc"],
+                  ["globalProxy", "globalProxyDesc"],
+                  ["oauthProxy", "oauthProxyDesc"],
+                  ["resinProxy", "resinProxyDesc"],
+                ].map(([titleKey, descKey]) => (
+                  <div
+                    key={titleKey}
+                    className="rounded-lg border border-border bg-muted/20 px-3 py-3"
+                  >
+                    <div className="text-sm font-semibold text-foreground">
+                      {t(`proxies.${titleKey}`)}
+                    </div>
+                    <div className="mt-1 text-xs leading-5 text-muted-foreground">
+                      {t(`proxies.${descKey}`)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="space-y-4">
+              <div>
+                <div className="text-sm font-semibold text-foreground">
+                  {t("proxies.priorityTitle")}
+                </div>
+                <div className="mt-2 rounded-lg border border-primary/25 bg-primary/5 px-3 py-3 font-mono text-xs leading-5 text-foreground">
+                  {t("proxies.priorityValue")}
+                </div>
+                <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                  {t("proxies.priorityDesc")}
+                </p>
+              </div>
+              <div>
+                <div className="flex items-center gap-1.5 text-sm font-semibold text-amber-700 dark:text-amber-300">
+                  <AlertTriangle className="size-4" />
+                  {t("proxies.notesTitle")}
+                </div>
+                <ul className="mt-2 space-y-1.5 text-xs leading-5 text-muted-foreground">
+                  <li>{t("proxies.noteDomesticApiKey")}</li>
+                  <li>{t("proxies.noteOfficialLogin")}</li>
+                  <li>{t("proxies.notePoolToggle")}</li>
+                  <li>{t("proxies.noteResin")}</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
       {/* Add Panel */}
       {showAdd && (
         <Card className="py-0">

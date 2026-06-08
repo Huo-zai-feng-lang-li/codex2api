@@ -204,8 +204,9 @@ func getPooledClient(account *auth.Account, proxyURL string) *http.Client {
 
 	entry := &poolEntry{
 		client: &http.Client{
-			Transport: transport,
-			Timeout:   10 * time.Minute,
+			Transport:     transport,
+			Timeout:       10 * time.Minute,
+			CheckRedirect: noFollowUpstreamRedirect,
 		},
 	}
 	entry.touch()
@@ -216,6 +217,10 @@ func getPooledClient(account *auth.Account, proxyURL string) *http.Client {
 		return e.client
 	}
 	return entry.client
+}
+
+func noFollowUpstreamRedirect(_ *http.Request, _ []*http.Request) error {
+	return http.ErrUseLastResponse
 }
 
 // Codex 上游常量

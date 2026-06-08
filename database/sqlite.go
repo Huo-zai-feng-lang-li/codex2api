@@ -147,7 +147,10 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 				image_storage_config TEXT DEFAULT '{}',
 				show_full_usage_numbers INTEGER DEFAULT 0,
 				scheduler_mode TEXT DEFAULT 'round_robin',
-				affinity_mode TEXT DEFAULT 'bounded'
+				affinity_mode TEXT DEFAULT 'bounded',
+				upstream_guard_mode TEXT DEFAULT 'warn',
+				upstream_guard_suppressions TEXT DEFAULT '[]',
+				security_event_retention_days INTEGER DEFAULT 30
 			);`,
 		`CREATE TABLE IF NOT EXISTS model_registry (
 			id TEXT PRIMARY KEY,
@@ -247,6 +250,29 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 			api_key_masked TEXT DEFAULT '',
 			client_ip TEXT DEFAULT '',
 			error_code TEXT DEFAULT ''
+		);`,
+		`CREATE TABLE IF NOT EXISTS security_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			direction TEXT DEFAULT '',
+			action TEXT DEFAULT '',
+			risk_level TEXT DEFAULT '',
+			risk_score INTEGER DEFAULT 0,
+			confidence INTEGER DEFAULT 0,
+			endpoint TEXT DEFAULT '',
+			model TEXT DEFAULT '',
+			account_id INTEGER DEFAULT 0,
+			account_name TEXT DEFAULT '',
+			base_url TEXT DEFAULT '',
+			source_type TEXT DEFAULT '',
+			stream INTEGER DEFAULT 0,
+			tool_call INTEGER DEFAULT 0,
+			rules TEXT DEFAULT '[]',
+			preview TEXT DEFAULT '',
+			content_hash TEXT DEFAULT '',
+			request_id TEXT DEFAULT '',
+			scanner_error TEXT DEFAULT '',
+			false_positive_hints TEXT DEFAULT '[]'
 		);`,
 	}
 	for _, stmt := range statements {
@@ -348,6 +374,9 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "show_full_usage_numbers", "INTEGER DEFAULT 0"},
 		{"system_settings", "scheduler_mode", "TEXT DEFAULT 'round_robin'"},
 		{"system_settings", "affinity_mode", "TEXT DEFAULT 'bounded'"},
+		{"system_settings", "upstream_guard_mode", "TEXT DEFAULT 'warn'"},
+		{"system_settings", "upstream_guard_suppressions", "TEXT DEFAULT '[]'"},
+		{"system_settings", "security_event_retention_days", "INTEGER DEFAULT 30"},
 		{"accounts", "enabled", "INTEGER DEFAULT 1"},
 		{"accounts", "locked", "INTEGER DEFAULT 0"},
 		{"accounts", "credit_enabled", "INTEGER DEFAULT 0"},
@@ -390,6 +419,10 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_image_assets_job_id ON image_assets(job_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_prompt_filter_logs_created_at ON prompt_filter_logs(created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_prompt_filter_logs_action_created_at ON prompt_filter_logs(action, created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_security_events_created_at ON security_events(created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_security_events_risk_created_at ON security_events(risk_level, created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_security_events_direction_created_at ON security_events(direction, created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_security_events_account_created_at ON security_events(account_id, created_at);`,
 	}
 	for _, stmt := range indexStatements {
 		if _, err := db.conn.ExecContext(ctx, stmt); err != nil {

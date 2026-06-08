@@ -176,8 +176,9 @@ func getResinHTTPClient(account *auth.Account) *http.Client {
 
 	entry := &poolEntry{
 		client: &http.Client{
-			Transport: transport,
-			Timeout:   0, // 流式响应不设超时
+			Transport:     transport,
+			Timeout:       0, // 流式响应不设超时
+			CheckRedirect: noFollowUpstreamRedirect,
 		},
 	}
 	entry.touch()

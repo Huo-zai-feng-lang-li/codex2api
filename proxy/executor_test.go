@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/codex2api/auth"
@@ -423,6 +425,40 @@ func TestCodexTransportModeCanUseUTLSChrome(t *testing.T) {
 	t.Setenv("CODEX_TRANSPORT_MODE", "utls_chrome")
 	if _, ok := newCodexTransport("").(*utlsRoundTripper); !ok {
 		t.Fatalf("newCodexTransport utls_chrome = %T, want *utlsRoundTripper", newCodexTransport(""))
+	}
+}
+
+func TestPooledClientDoesNotFollowCrossHostRedirectWithSensitiveBody(t *testing.T) {
+	var redirected atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirected.Add(1)
+		t.Errorf("client followed cross-host redirect with method=%s authorization=%q", r.Method, r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/capture", http.StatusTemporaryRedirect)
+	}))
+	defer source.Close()
+
+	req, err := http.NewRequest(http.MethodPost, source.URL+"/v1/responses", strings.NewReader(`{"secret":"sk-proj-12345678901234567890123456789012"}`))
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer upstream-token")
+
+	resp, err := getPooledClient(&auth.Account{DBID: 9001}, "").Do(req)
+	if err != nil {
+		t.Fatalf("Do() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusTemporaryRedirect {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusTemporaryRedirect)
+	}
+	if got := redirected.Load(); got != 0 {
+		t.Fatalf("cross-host redirect target calls = %d, want 0", got)
 	}
 }
 

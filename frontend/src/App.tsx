@@ -22,6 +22,7 @@ const Usage = lazy(() => import('./pages/Usage'))
 const Subscriptions = lazy(() => import('./pages/Subscriptions'))
 const ImageStudio = lazy(() => import('./pages/ImageStudio'))
 const PromptFilter = lazy(() => import('./pages/PromptFilter'))
+const SecurityEvents = lazy(() => import('./pages/SecurityEvents'))
 const ThemeSettings = lazy(() => import('./pages/ThemeSettings'))
 
 export default function App() {
@@ -42,6 +43,7 @@ export default function App() {
                     <Route path="/images/:view" element={<ImageStudio />} />
                     <Route path="/prompt-filter" element={<Navigate to="/prompt-filter/overview" replace />} />
                     <Route path="/prompt-filter/:view" element={<PromptFilter />} />
+                    <Route path="/security-events" element={<SecurityEvents />} />
                     <Route path="/ops" element={<Navigate to="/ops/overview" replace />} />
                     <Route path="/ops/overview" element={<Operations />} />
                     <Route path="/ops/runtime" element={<RuntimeStatus />} />

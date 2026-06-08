@@ -46,6 +46,7 @@ func TestExchangeOAuthCodeSeedsAccessTokenFromExchangeResponse(t *testing.T) {
 		State:        "state-test",
 		CodeVerifier: "verifier-test",
 		RedirectURI:  oauthDefaultRedirectURI,
+		ProxyURL:     "http://127.0.0.1:51081",
 		Name:         "oauth-primary",
 		CreatedAt:    time.Now(),
 	})
@@ -117,6 +118,77 @@ func TestGenerateOAuthURLRejectsBlankName(t *testing.T) {
 	}
 }
 
+func TestGenerateOAuthURLRejectsBlankProxy(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	handler := &Handler{}
+
+	body := `{"name":"oauth-primary","proxy_url":" "}`
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/oauth/generate-auth-url", strings.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.GenerateOAuthURL(ctx)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "OAuth 授权代理地址为必填") {
+		t.Fatalf("body missing proxy required message: %s", recorder.Body.String())
+	}
+}
+
+func TestOAuthCallbackDoesNotFallbackToGlobalProxy(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	store := auth.NewStore(db, cache.NewMemory(1), nil)
+	store.SetProxyURL("http://global-proxy:8080")
+	handler := &Handler{db: db, store: store}
+
+	calledTokenServer := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calledTokenServer = true
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	oldResinCfg := proxy.GetResinConfig()
+	proxy.SetResinConfig(&proxy.ResinConfig{BaseURL: server.URL, PlatformName: "codex2api"})
+	t.Cleanup(func() {
+		proxy.SetResinConfig(oldResinCfg)
+	})
+
+	sessionID := "oauth-no-session-proxy"
+	globalOAuthStore.set(sessionID, &oauthSession{
+		State:        "state-test",
+		CodeVerifier: "verifier-test",
+		RedirectURI:  oauthDefaultRedirectURI,
+		Name:         "oauth-primary",
+		CreatedAt:    time.Now(),
+	})
+	t.Cleanup(func() {
+		globalOAuthStore.delete(sessionID)
+	})
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/auth/callback?code=code-test&state=state-test", nil)
+
+	handler.OAuthCallback(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if calledTokenServer {
+		t.Fatal("OAuth callback used token exchange after falling back to the global proxy")
+	}
+	if !strings.Contains(recorder.Body.String(), "OAuth 授权代理地址为必填") {
+		t.Fatalf("body missing proxy required message: %s", recorder.Body.String())
+	}
+}
+
 func TestExchangeOAuthCodeRejectsBlankName(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -145,5 +217,70 @@ func TestExchangeOAuthCodeRejectsBlankName(t *testing.T) {
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+}
+
+func TestExchangeOAuthCodeReturnsCompletedCallbackResult(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	handler := &Handler{}
+
+	calledTokenServer := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calledTokenServer = true
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	oldResinCfg := proxy.GetResinConfig()
+	proxy.SetResinConfig(&proxy.ResinConfig{BaseURL: server.URL, PlatformName: "codex2api"})
+	t.Cleanup(func() {
+		proxy.SetResinConfig(oldResinCfg)
+	})
+
+	sessionID := "oauth-completed-session"
+	globalOAuthStore.set(sessionID, &oauthSession{
+		State:        "state-test",
+		CodeVerifier: "verifier-test",
+		RedirectURI:  oauthDefaultRedirectURI,
+		Name:         "oauth-primary",
+		CreatedAt:    time.Now(),
+		ExchangeResult: &oauthExchangeResult{
+			Success:  true,
+			Message:  "账号 oauth-primary 添加成功",
+			ID:       42,
+			Email:    "owner@example.com",
+			PlanType: "plus",
+		},
+	})
+	t.Cleanup(func() {
+		globalOAuthStore.delete(sessionID)
+	})
+
+	body := `{"session_id":"oauth-completed-session","code":"code-test","state":"state-test","name":"oauth-primary"}`
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/oauth/exchange-code", strings.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.ExchangeOAuthCode(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if calledTokenServer {
+		t.Fatal("token exchange server was called for completed OAuth session")
+	}
+
+	var payload struct {
+		ID       int64  `json:"id"`
+		Email    string `json:"email"`
+		PlanType string `json:"plan_type"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.ID != 42 || payload.Email != "owner@example.com" || payload.PlanType != "plus" {
+		t.Fatalf("payload = %+v, want completed callback result", payload)
 	}
 }

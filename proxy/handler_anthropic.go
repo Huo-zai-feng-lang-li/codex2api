@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 	"github.com/codex2api/security"
+	"github.com/codex2api/security/upstreamguard"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )
@@ -202,6 +204,11 @@ func (h *Handler) Messages(c *gin.Context) {
 		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
 		lastUpstreamCancel = upstreamCancel
 		ttftGuard := newFirstTokenTimeoutGuard(currentFirstTokenTimeout(), upstreamCancel)
+		if verdict := h.inspectUpstreamGuardRequest(c.Request.Context(), "/v1/messages", effectiveModel, account, codexBody, isStream, c.GetHeader("X-Request-Id")); shouldBlockUpstreamGuard(verdict) {
+			h.store.Release(account)
+			sendAnthropicError(c, http.StatusForbidden, "permission_error", upstreamGuardBlockMessage(verdict))
+			return
+		}
 		resp, reqErr := ExecuteRequest(upstreamCtx, account, codexBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, useWebsocket)
 		durationMs := int(time.Since(start).Milliseconds())
 
@@ -314,6 +321,7 @@ func (h *Handler) Messages(c *gin.Context) {
 		var readErr error
 		var writeErr error
 		wroteAnyBody := false
+		var upstreamGuardBlockedVerdict *upstreamguard.Verdict
 		var terminalFailurePayload []byte
 
 		if isStream {
@@ -337,6 +345,12 @@ func (h *Handler) Messages(c *gin.Context) {
 			var pendingFirstTokenEvents bytes.Buffer
 
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
+				if verdict := h.inspectUpstreamGuardResponse(c.Request.Context(), "/v1/messages", effectiveModel, account, data, true, c.GetHeader("X-Request-Id")); shouldBlockUpstreamGuard(verdict) {
+					sendAnthropicStreamError(c, "permission_error", upstreamGuardBlockMessage(verdict))
+					wroteAnyBody = true
+					gotTerminal = true
+					return false
+				}
 				parsed := gjson.ParseBytes(data)
 				eventType := parsed.Get("type").String()
 
@@ -420,6 +434,12 @@ func (h *Handler) Messages(c *gin.Context) {
 			accumulator := newAnthropicResponseAccumulator(originalModel)
 
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
+				if verdict := h.inspectUpstreamGuardResponse(c.Request.Context(), "/v1/messages", effectiveModel, account, data, false, c.GetHeader("X-Request-Id")); shouldBlockUpstreamGuard(verdict) {
+					verdictCopy := verdict
+					upstreamGuardBlockedVerdict = &verdictCopy
+					gotTerminal = true
+					return false
+				}
 				parsed := gjson.ParseBytes(data)
 				eventType := parsed.Get("type").String()
 				accumulator.apply(translator.translateEvent(data))
@@ -449,8 +469,20 @@ func (h *Handler) Messages(c *gin.Context) {
 				return true
 			})
 
+			if upstreamGuardBlockedVerdict != nil {
+				h.store.Release(account)
+				sendAnthropicError(c, http.StatusForbidden, "permission_error", upstreamGuardBlockMessage(*upstreamGuardBlockedVerdict))
+				return
+			}
 			if lastCompletedData != nil {
 				anthropicResp := accumulator.build(lastCompletedData)
+				if responseBody, err := json.Marshal(anthropicResp); err == nil {
+					if verdict := h.inspectUpstreamGuardResponse(c.Request.Context(), "/v1/messages", effectiveModel, account, responseBody, false, c.GetHeader("X-Request-Id")); shouldBlockUpstreamGuard(verdict) {
+						h.store.Release(account)
+						sendAnthropicError(c, http.StatusForbidden, "permission_error", upstreamGuardBlockMessage(verdict))
+						return
+					}
+				}
 				c.JSON(http.StatusOK, anthropicResp)
 			} else {
 				sendAnthropicError(c, http.StatusBadGateway, "api_error", "No complete response received from upstream")

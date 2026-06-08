@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/codex2api/admin"
 	"github.com/gin-gonic/gin"
 )
 
@@ -71,5 +72,42 @@ func TestNewHTTPServerSetsReadAndIdleTimeouts(t *testing.T) {
 	}
 	if server.WriteTimeout != 0*time.Second {
 		t.Fatalf("WriteTimeout = %v, want zero to preserve long streaming responses", server.WriteTimeout)
+	}
+}
+
+func TestOAuthCallbackRouterShowsInfoForNonCallbackPaths(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	router := newOAuthCallbackRouter(&admin.Handler{}, "http://127.0.0.1:18080/admin/")
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/admin/accounts", nil)
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	body := w.Body.String()
+	for _, expected := range []string{"OAuth 回调端口", "http://127.0.0.1:18080/admin/"} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("body missing %q: %s", expected, body)
+		}
+	}
+}
+
+func TestOAuthCallbackRouterKeepsCallbackEndpoint(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	router := newOAuthCallbackRouter(&admin.Handler{}, "http://127.0.0.1:18080/admin/")
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/auth/callback", nil)
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "缺少 code 或 state 参数") {
+		t.Fatalf("body missing callback validation message: %s", w.Body.String())
 	}
 }

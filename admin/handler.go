@@ -35,6 +35,7 @@ import (
 	"github.com/codex2api/proxy"
 	"github.com/codex2api/security"
 	"github.com/codex2api/security/promptfilter"
+	"github.com/codex2api/security/upstreamguard"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )
@@ -294,6 +295,9 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.DELETE("/prompt-filter/logs", h.ClearPromptFilterLogs)
 	api.POST("/prompt-filter/test", h.TestPromptFilter)
 	api.GET("/prompt-filter/rules", h.GetPromptFilterRules)
+	api.GET("/security-events", h.ListSecurityEvents)
+	api.POST("/security-events/:id/suppress", h.SuppressSecurityEvent)
+	api.DELETE("/security-events", h.ClearSecurityEvents)
 	api.GET("/models", h.ListModels)
 	api.POST("/models/sync", h.SyncModels)
 	api.GET("/image-prompts", h.ListImagePromptTemplates)
@@ -4392,6 +4396,9 @@ type settingsResponse struct {
 	PromptFilterSensitiveWords       string `json:"prompt_filter_sensitive_words"`
 	PromptFilterCustomPatterns       string `json:"prompt_filter_custom_patterns"`
 	PromptFilterDisabledPatterns     string `json:"prompt_filter_disabled_patterns"`
+	UpstreamGuardMode                string `json:"upstream_guard_mode"`
+	UpstreamGuardSuppressions        string `json:"upstream_guard_suppressions"`
+	SecurityEventRetentionDays       int    `json:"security_event_retention_days"`
 	ClientCompatMode                 string `json:"client_compat_mode"`
 	CodexMinCLIVersion               string `json:"codex_min_cli_version"`
 	UsageLogMode                     string `json:"usage_log_mode"`
@@ -4457,6 +4464,9 @@ type updateSettingsReq struct {
 	PromptFilterSensitiveWords       *string `json:"prompt_filter_sensitive_words"`
 	PromptFilterCustomPatterns       *string `json:"prompt_filter_custom_patterns"`
 	PromptFilterDisabledPatterns     *string `json:"prompt_filter_disabled_patterns"`
+	UpstreamGuardMode                *string `json:"upstream_guard_mode"`
+	UpstreamGuardSuppressions        *string `json:"upstream_guard_suppressions"`
+	SecurityEventRetentionDays       *int    `json:"security_event_retention_days"`
 	ClientCompatMode                 *string `json:"client_compat_mode"`
 	CodexMinCLIVersion               *string `json:"codex_min_cli_version"`
 	UsageLogMode                     *string `json:"usage_log_mode"`
@@ -4484,6 +4494,21 @@ type brandingResponse struct {
 	BackgroundBlur         int    `json:"background_blur"`
 	BackgroundGlassOpacity int    `json:"background_glass_opacity"`
 	BackgroundGlassBlur    int    `json:"background_glass_blur"`
+}
+
+func normalizeUpstreamGuardSuppressionsJSON(raw string) (string, []upstreamguard.SuppressionRule, error) {
+	rules, err := upstreamguard.ParseSuppressions(raw)
+	if err != nil {
+		return "", nil, err
+	}
+	if len(rules) == 0 {
+		return "[]", nil, nil
+	}
+	data, err := json.Marshal(rules)
+	if err != nil {
+		return "", nil, err
+	}
+	return string(data), rules, nil
 }
 
 const maxSiteLogoBytes = 600 * 1024
@@ -4948,6 +4973,8 @@ func (h *Handler) GetSettings(c *gin.Context) {
 	var resinURL, resinPlatformName string
 	branding := brandingFromSettings(dbSettings)
 	showFullUsageNumbers := false
+	upstreamGuardSuppressions := "[]"
+	securityEventRetentionDays := database.DefaultSecurityEventRetentionDays
 	if dbSettings != nil && adminAuthSource != "env" {
 		adminSecret = dbSettings.AdminSecret
 	}
@@ -4955,8 +4982,14 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		resinURL = dbSettings.ResinURL
 		resinPlatformName = dbSettings.ResinPlatformName
 		showFullUsageNumbers = dbSettings.ShowFullUsageNumbers
+		upstreamGuardSuppressions = strings.TrimSpace(dbSettings.UpstreamGuardSuppressions)
+		if upstreamGuardSuppressions == "" {
+			upstreamGuardSuppressions = "[]"
+		}
+		securityEventRetentionDays = database.NormalizeSecurityEventRetentionDays(dbSettings.SecurityEventRetentionDays)
 	}
 	promptFilterCfg := h.store.GetPromptFilterConfig()
+	upstreamGuardCfg := h.store.GetUpstreamGuardConfig()
 	runtimeCfg := proxy.CurrentRuntimeSettings()
 	imgCfg := imagestore.CurrentConfig()
 	imgPrefix := strings.TrimSuffix(imgCfg.Prefix, "/")
@@ -5015,6 +5048,9 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		PromptFilterSensitiveWords:       promptFilterCfg.SensitiveWords,
 		PromptFilterCustomPatterns:       promptfilter.MarshalCustomPatterns(promptFilterCfg.CustomPatterns),
 		PromptFilterDisabledPatterns:     promptfilter.MarshalDisabledPatterns(promptFilterCfg.DisabledPatterns),
+		UpstreamGuardMode:                upstreamGuardCfg.Mode,
+		UpstreamGuardSuppressions:        upstreamGuardSuppressions,
+		SecurityEventRetentionDays:       securityEventRetentionDays,
 		ClientCompatMode:                 runtimeCfg.ClientCompatMode,
 		CodexMinCLIVersion:               runtimeCfg.CodexMinCLIVersion,
 		UsageLogMode:                     h.db.GetUsageLogMode(),
@@ -5048,6 +5084,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	siteLogo := ""
 	bgCfg := defaultBackgroundConfig()
 	showFullUsageNumbers := false
+	upstreamGuardSuppressions := "[]"
+	securityEventRetentionDays := database.DefaultSecurityEventRetentionDays
 	existingSettings, _ := h.db.GetSystemSettings(c.Request.Context())
 	if existingSettings != nil {
 		currentAdminSecret = existingSettings.AdminSecret
@@ -5055,6 +5093,11 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		siteLogo = strings.TrimSpace(existingSettings.SiteLogo)
 		bgCfg = decodeBackgroundConfig(existingSettings.BackgroundConfig)
 		showFullUsageNumbers = existingSettings.ShowFullUsageNumbers
+		upstreamGuardSuppressions = strings.TrimSpace(existingSettings.UpstreamGuardSuppressions)
+		if upstreamGuardSuppressions == "" {
+			upstreamGuardSuppressions = "[]"
+		}
+		securityEventRetentionDays = database.NormalizeSecurityEventRetentionDays(existingSettings.SecurityEventRetentionDays)
 	}
 	if req.AdminSecret != nil {
 		if h.adminSecretEnv == "" {
@@ -5445,6 +5488,30 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		log.Printf("设置已更新: prompt_filter enabled=%t mode=%s threshold=%d", promptFilterCfg.Enabled, promptFilterCfg.Mode, promptFilterCfg.Threshold)
 	}
 
+	upstreamGuardCfg := h.store.GetUpstreamGuardConfig()
+	if req.UpstreamGuardMode != nil {
+		upstreamGuardCfg.Mode = database.NormalizeUpstreamGuardMode(*req.UpstreamGuardMode)
+		log.Printf("设置已更新: upstream_guard_mode = %s", upstreamGuardCfg.Mode)
+	}
+	if req.UpstreamGuardSuppressions != nil {
+		normalized, rules, err := normalizeUpstreamGuardSuppressionsJSON(*req.UpstreamGuardSuppressions)
+		if err != nil {
+			writeError(c, http.StatusBadRequest, "上游防护抑制规则无效: "+err.Error())
+			return
+		}
+		upstreamGuardSuppressions = normalized
+		upstreamGuardCfg.Suppressions = rules
+		log.Printf("设置已更新: upstream_guard_suppressions count=%d", len(rules))
+	}
+	if req.UpstreamGuardMode != nil || req.UpstreamGuardSuppressions != nil {
+		h.store.SetUpstreamGuardConfig(upstreamGuardCfg)
+		upstreamGuardCfg = h.store.GetUpstreamGuardConfig()
+	}
+	if req.SecurityEventRetentionDays != nil {
+		securityEventRetentionDays = database.NormalizeSecurityEventRetentionDays(*req.SecurityEventRetentionDays)
+		log.Printf("设置已更新: security_event_retention_days = %d", securityEventRetentionDays)
+	}
+
 	// Resin 粘性代理池配置
 	resinURL := ""
 	resinPlatformName := ""
@@ -5567,6 +5634,9 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		PromptFilterSensitiveWords:       promptFilterCfg.SensitiveWords,
 		PromptFilterCustomPatterns:       promptfilter.MarshalCustomPatterns(promptFilterCfg.CustomPatterns),
 		PromptFilterDisabledPatterns:     promptfilter.MarshalDisabledPatterns(promptFilterCfg.DisabledPatterns),
+		UpstreamGuardMode:                upstreamGuardCfg.Mode,
+		UpstreamGuardSuppressions:        upstreamGuardSuppressions,
+		SecurityEventRetentionDays:       securityEventRetentionDays,
 		ClientCompatMode:                 runtimeCfg.ClientCompatMode,
 		CodexMinCLIVersion:               runtimeCfg.CodexMinCLIVersion,
 		UsageLogMode:                     usageLogMode,
@@ -5648,6 +5718,9 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		PromptFilterSensitiveWords:       promptFilterCfg.SensitiveWords,
 		PromptFilterCustomPatterns:       promptfilter.MarshalCustomPatterns(promptFilterCfg.CustomPatterns),
 		PromptFilterDisabledPatterns:     promptfilter.MarshalDisabledPatterns(promptFilterCfg.DisabledPatterns),
+		UpstreamGuardMode:                upstreamGuardCfg.Mode,
+		UpstreamGuardSuppressions:        upstreamGuardSuppressions,
+		SecurityEventRetentionDays:       securityEventRetentionDays,
 		ClientCompatMode:                 runtimeCfg.ClientCompatMode,
 		CodexMinCLIVersion:               runtimeCfg.CodexMinCLIVersion,
 		UsageLogMode:                     usageLogMode,

@@ -60,8 +60,9 @@ func NewUTLSTransport(proxyURL string) http.RoundTripper {
 // NewUTLSHttpClient 创建使用 Chrome TLS 指纹的 HTTP 客户端
 func NewUTLSHttpClient(proxyURL string) *http.Client {
 	return &http.Client{
-		Transport: NewUTLSTransport(proxyURL),
-		Timeout:   0, // 不设置全局超时，由请求上下文控制
+		Transport:     NewUTLSTransport(proxyURL),
+		Timeout:       0, // 不设置全局超时，由请求上下文控制
+		CheckRedirect: noFollowUpstreamRedirect,
 	}
 }
 

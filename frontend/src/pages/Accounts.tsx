@@ -96,6 +96,8 @@ import ChipInput from "../components/ChipInput";
 const ACCOUNT_BATCH_CONCURRENCY = 6;
 const OPERATION_PROGRESS_FLUSH_INTERVAL_MS = 200;
 const ACCOUNTS_VISIBLE_REFRESH_INTERVAL_MS = 15_000;
+const DEFAULT_OFFICIAL_ACCOUNT_PROXY_URL = "http://127.0.0.1:51081";
+const DEFAULT_OAUTH_PROXY_URL = DEFAULT_OFFICIAL_ACCOUNT_PROXY_URL;
 const ACCOUNT_ANALYSIS_VISIBILITY_KEY = "codex2api:accounts:analysis-visible";
 const ACCOUNT_VISIBLE_COLUMNS_KEY = "codex2api:accounts:visible-columns";
 const ACCOUNT_VISIBLE_COLUMNS_VERSION_KEY =
@@ -457,7 +459,7 @@ export default function Accounts() {
     name: "",
     refresh_token: "",
     session_token: "",
-    proxy_url: "",
+    proxy_url: DEFAULT_OFFICIAL_ACCOUNT_PROXY_URL,
   });
   const [addTags, setAddTags] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
@@ -554,7 +556,7 @@ export default function Accounts() {
   const [atForm, setAtForm] = useState<AddATAccountRequest>({
     name: "",
     access_token: "",
-    proxy_url: "",
+    proxy_url: DEFAULT_OFFICIAL_ACCOUNT_PROXY_URL,
   });
   const [openAIForm, setOpenAIForm] =
     useState<AddOpenAIResponsesAccountRequest>({
@@ -572,7 +574,7 @@ export default function Accounts() {
     session_id: string;
     auth_url: string;
   } | null>(null);
-  const [oauthProxyUrl, setOauthProxyUrl] = useState("");
+  const [oauthProxyUrl, setOauthProxyUrl] = useState(DEFAULT_OAUTH_PROXY_URL);
   const [oauthCallbackUrl, setOauthCallbackUrl] = useState("");
   const [oauthName, setOauthName] = useState("");
   const [oauthGenerating, setOauthGenerating] = useState(false);
@@ -797,8 +799,62 @@ export default function Accounts() {
   const lastPageRefreshLabel = lastPageRefreshAt
     ? formatPageRefreshTime(lastPageRefreshAt)
     : "--:--:--";
+  const oauthEffectiveProxyUrl = oauthProxyUrl.trim();
 
   useVisiblePolling(() => reloadSilently(), ACCOUNTS_VISIBLE_REFRESH_INTERVAL_MS);
+
+  useEffect(() => {
+    if (!oauthSession || oauthStep !== "exchange") return;
+
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const response = await api.pollOAuthCallback(oauthSession.session_id);
+        if (cancelled || response.status !== "completed" || !response.result)
+          return;
+
+        if (response.result.success) {
+          showToast(
+            response.result.email
+              ? t("accounts.oauthSuccess", { email: response.result.email })
+              : t("accounts.oauthSuccessNoEmail"),
+          );
+          setShowAdd(false);
+          setAddMethod("rt");
+          setOauthStep("generate");
+          setOauthSession(null);
+          setOauthCallbackUrl("");
+          setOauthName("");
+          setOauthCompleting(false);
+          setAddTags([]);
+          void reload();
+          return;
+        }
+
+        showToast(
+          t("accounts.oauthFailed", {
+            error:
+              response.result.error ||
+              response.result.message ||
+              t("accounts.oauthParseError"),
+          }),
+          "error",
+        );
+        setOauthStep("generate");
+        setOauthSession(null);
+        setOauthCompleting(false);
+      } catch {
+        // Polling is a convenience path; manual URL paste remains available.
+      }
+    };
+
+    const timer = window.setInterval(() => void poll(), 2000);
+    void poll();
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [oauthSession, oauthStep, reload, showToast, t]);
 
   useEffect(() => {
     persistAnalysisVisibility(showAnalysisCharts);
@@ -1148,7 +1204,7 @@ export default function Accounts() {
         name: "",
         refresh_token: "",
         session_token: "",
-        proxy_url: "",
+        proxy_url: DEFAULT_OFFICIAL_ACCOUNT_PROXY_URL,
       });
       setAddTags([]);
       void reload();
@@ -1173,7 +1229,11 @@ export default function Accounts() {
       });
       showToast(t("accounts.addSuccess"));
       setShowAdd(false);
-      setAtForm({ name: "", access_token: "", proxy_url: "" });
+      setAtForm({
+        name: "",
+        access_token: "",
+        proxy_url: DEFAULT_OFFICIAL_ACCOUNT_PROXY_URL,
+      });
       setAddTags([]);
       void reload();
     } catch (error) {
@@ -1345,11 +1405,15 @@ export default function Accounts() {
 
   const handleOAuthGenerate = async () => {
     if (!oauthName.trim()) return;
+    if (!oauthEffectiveProxyUrl) {
+      showToast(t("accounts.oauthProxyRequired"), "error");
+      return;
+    }
     setOauthGenerating(true);
     try {
       const result = await api.generateOAuthURL({
         name: oauthName.trim(),
-        proxy_url: oauthProxyUrl.trim() || undefined,
+        proxy_url: oauthEffectiveProxyUrl,
         tags: addTags,
       });
       setOauthSession(result);
@@ -1390,7 +1454,7 @@ export default function Accounts() {
         code,
         state,
         name: oauthName.trim(),
-        proxy_url: oauthProxyUrl.trim() || undefined,
+        proxy_url: oauthEffectiveProxyUrl || undefined,
         tags: addTags,
       });
       showToast(
@@ -3618,14 +3682,19 @@ export default function Accounts() {
               setOauthSession(null);
               setOauthCallbackUrl("");
               setOauthName("");
+              setOauthProxyUrl(DEFAULT_OAUTH_PROXY_URL);
               setAddTags([]);
               setAddForm({
                 name: "",
                 refresh_token: "",
                 session_token: "",
-                proxy_url: "",
+                proxy_url: DEFAULT_OFFICIAL_ACCOUNT_PROXY_URL,
               });
-              setAtForm({ name: "", access_token: "", proxy_url: "" });
+              setAtForm({
+                name: "",
+                access_token: "",
+                proxy_url: DEFAULT_OFFICIAL_ACCOUNT_PROXY_URL,
+              });
               setOpenAIForm({
                 name: "",
                 base_url: "https://api.openai.com",
@@ -3646,14 +3715,19 @@ export default function Accounts() {
                     setOauthSession(null);
                     setOauthCallbackUrl("");
                     setOauthName("");
+                    setOauthProxyUrl(DEFAULT_OAUTH_PROXY_URL);
                     setAddTags([]);
                     setAddForm({
                       name: "",
                       refresh_token: "",
                       session_token: "",
-                      proxy_url: "",
+                      proxy_url: DEFAULT_OFFICIAL_ACCOUNT_PROXY_URL,
                     });
-                    setAtForm({ name: "", access_token: "", proxy_url: "" });
+                    setAtForm({
+                      name: "",
+                      access_token: "",
+                      proxy_url: DEFAULT_OFFICIAL_ACCOUNT_PROXY_URL,
+                    });
                     setOpenAIForm({
                       name: "",
                       base_url: "https://api.openai.com",
@@ -3714,7 +3788,11 @@ export default function Accounts() {
                 ) : oauthStep === "generate" ? (
                   <Button
                     onClick={() => void handleOAuthGenerate()}
-                    disabled={oauthGenerating || !oauthName.trim()}
+                    disabled={
+                      oauthGenerating ||
+                      !oauthName.trim() ||
+                      !oauthEffectiveProxyUrl
+                    }
                   >
                     {oauthGenerating
                       ? t("accounts.oauthGenerating")
@@ -3785,6 +3863,7 @@ export default function Accounts() {
                   setOauthStep("generate");
                   setOauthSession(null);
                   setOauthCallbackUrl("");
+                  setOauthProxyUrl((prev) => prev.trim() || DEFAULT_OAUTH_PROXY_URL);
                 }}
                 className={`min-w-0 flex-1 flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-sm font-semibold whitespace-nowrap transition-all ${
                   addMethod === "oauth"
@@ -4108,7 +4187,7 @@ export default function Accounts() {
                     </div>
                     <div>
                       <label className="block mb-2 text-sm font-semibold text-muted-foreground">
-                        {t("accounts.oauthProxyUrl")}
+                        {t("accounts.oauthProxyUrl")} *
                       </label>
                       <Input
                         placeholder={t("accounts.oauthProxyUrlPlaceholder")}

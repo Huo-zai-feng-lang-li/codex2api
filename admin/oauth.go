@@ -31,6 +31,9 @@ const (
 	oauthDefaultRedirectURI = "http://localhost:1455/auth/callback"
 	oauthDefaultScopes      = "openid profile email offline_access"
 	oauthSessionTTL         = 30 * time.Minute
+
+	OAuthCallbackPort       = 1455
+	OAuthCallbackListenAddr = "127.0.0.1:1455"
 )
 
 // ==================== 内存 Session 存储 ====================
@@ -152,6 +155,15 @@ func (h *Handler) GenerateOAuthURL(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, err.Error())
 		return
 	}
+	proxyURL := strings.TrimSpace(security.SanitizeInput(req.ProxyURL))
+	if proxyURL == "" {
+		writeError(c, http.StatusBadRequest, "OAuth 授权代理地址为必填")
+		return
+	}
+	if err := security.ValidateProxyURL(proxyURL); err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	tags, err := parseOptionalStringSliceField(req.Tags, "tags")
 	if err != nil {
 		writeError(c, http.StatusBadRequest, err.Error())
@@ -185,7 +197,7 @@ func (h *Handler) GenerateOAuthURL(c *gin.Context) {
 		State:        state,
 		CodeVerifier: codeVerifier,
 		RedirectURI:  redirectURI,
-		ProxyURL:     strings.TrimSpace(req.ProxyURL),
+		ProxyURL:     proxyURL,
 		Name:         name,
 		Tags:         append([]string(nil), tags.Values...),
 		CreatedAt:    time.Now(),
@@ -237,6 +249,28 @@ func (h *Handler) ExchangeOAuthCode(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "state 不匹配，请重新发起授权")
 		return
 	}
+	if sess.ExchangeResult != nil {
+		result := sess.ExchangeResult
+		globalOAuthStore.delete(req.SessionID)
+		if !result.Success {
+			errMsg := strings.TrimSpace(result.Error)
+			if errMsg == "" {
+				errMsg = strings.TrimSpace(result.Message)
+			}
+			if errMsg == "" {
+				errMsg = "授权回调已失败"
+			}
+			writeError(c, http.StatusBadGateway, "授权码兑换失败: "+errMsg)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"message":   result.Message,
+			"id":        result.ID,
+			"email":     result.Email,
+			"plan_type": result.PlanType,
+		})
+		return
+	}
 	name := strings.TrimSpace(security.SanitizeInput(req.Name))
 	if name == "" {
 		name = sess.Name
@@ -256,10 +290,15 @@ func (h *Handler) ExchangeOAuthCode(c *gin.Context) {
 
 	proxyURL := sess.ProxyURL
 	if trimmed := strings.TrimSpace(req.ProxyURL); trimmed != "" {
-		proxyURL = trimmed
+		proxyURL = security.SanitizeInput(trimmed)
 	}
 	if proxyURL == "" {
-		proxyURL = h.store.GetProxyURL()
+		writeError(c, http.StatusBadRequest, "OAuth 授权代理地址为必填")
+		return
+	}
+	if err := security.ValidateProxyURL(proxyURL); err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	// Resin 临时身份用于 OAuth 兑换（新账号尚无 DBID）
@@ -411,14 +450,13 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 	state := c.Query("state")
 
 	if code == "" || state == "" {
-		c.HTML(http.StatusBadRequest, "", nil)
-		c.String(http.StatusBadRequest, oauthCallbackPage("授权失败", "缺少 code 或 state 参数", false))
+		writeOAuthCallbackPage(c, http.StatusBadRequest, "授权失败", "缺少 code 或 state 参数", false)
 		return
 	}
 
 	sessionID, sess, ok := globalOAuthStore.findByState(state)
 	if !ok {
-		c.String(http.StatusBadRequest, oauthCallbackPage("授权失败", "OAuth 会话不存在或已过期，请重新发起授权", false))
+		writeOAuthCallbackPage(c, http.StatusBadRequest, "授权失败", "OAuth 会话不存在或已过期，请重新发起授权", false)
 		return
 	}
 
@@ -430,7 +468,20 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 	// 执行 code exchange（Resin 临时身份）
 	proxyURL := sess.ProxyURL
 	if proxyURL == "" {
-		proxyURL = h.store.GetProxyURL()
+		sess.ExchangeResult = &oauthExchangeResult{
+			Success: false,
+			Error:   "OAuth 授权代理地址为必填",
+		}
+		writeOAuthCallbackPage(c, http.StatusOK, "授权失败", "OAuth 授权代理地址为必填", false)
+		return
+	}
+	if err := security.ValidateProxyURL(proxyURL); err != nil {
+		sess.ExchangeResult = &oauthExchangeResult{
+			Success: false,
+			Error:   err.Error(),
+		}
+		writeOAuthCallbackPage(c, http.StatusOK, "授权失败", err.Error(), false)
+		return
 	}
 	resinTempID := "oauth-" + sessionID
 	tokenResp, accountInfo, err := doOAuthCodeExchange(c.Request.Context(), code, sess.CodeVerifier, sess.RedirectURI, proxyURL, resinTempID)
@@ -439,7 +490,7 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 			Success: false,
 			Error:   err.Error(),
 		}
-		c.String(http.StatusOK, oauthCallbackPage("授权失败", "兑换 token 失败: "+err.Error(), false))
+		writeOAuthCallbackPage(c, http.StatusOK, "授权失败", "兑换 token 失败: "+err.Error(), false)
 		return
 	}
 
@@ -448,7 +499,7 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 			Success: false,
 			Error:   "授权服务器未返回 refresh_token",
 		}
-		c.String(http.StatusOK, oauthCallbackPage("授权失败", "未获取到 refresh_token，请确认已开启 offline_access", false))
+		writeOAuthCallbackPage(c, http.StatusOK, "授权失败", "未获取到 refresh_token，请确认已开启 offline_access", false)
 		return
 	}
 	seed := normalizeTokenCredentialSeed(tokenCredentialSeed{
@@ -476,7 +527,7 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 			Success: false,
 			Error:   "账号写入数据库失败: " + err.Error(),
 		}
-		c.String(http.StatusOK, oauthCallbackPage("授权失败", "写入数据库失败: "+err.Error(), false))
+		writeOAuthCallbackPage(c, http.StatusOK, "授权失败", "写入数据库失败: "+err.Error(), false)
 		return
 	}
 	if err := h.db.UpdateCredentials(ctx, id, tokenCredentialMap(seed)); err != nil {
@@ -484,7 +535,7 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 			Success: false,
 			Error:   "Token 写入数据库失败: " + err.Error(),
 		}
-		c.String(http.StatusOK, oauthCallbackPage("授权失败", "写入 token 失败: "+err.Error(), false))
+		writeOAuthCallbackPage(c, http.StatusOK, "授权失败", "写入 token 失败: "+err.Error(), false)
 		return
 	}
 	h.db.InsertAccountEventAsync(id, "added", "oauth_callback")
@@ -513,7 +564,7 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 			Success: false,
 			Error:   "账号标签/分组写入失败: " + err.Error(),
 		}
-		c.String(http.StatusOK, oauthCallbackPage("授权失败", "写入标签/分组失败: "+err.Error(), false))
+		writeOAuthCallbackPage(c, http.StatusOK, "授权失败", "写入标签/分组失败: "+err.Error(), false)
 		return
 	}
 	if len(sess.Tags) > 0 {
@@ -531,7 +582,7 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 	}
 
 	log.Printf("OAuth 回调自动添加账号成功: id=%d email=%s", id, email)
-	c.String(http.StatusOK, oauthCallbackPage("授权成功", fmt.Sprintf("账号 %s 已自动添加，可以关闭此页面。", name), true))
+	writeOAuthCallbackPage(c, http.StatusOK, "授权成功", fmt.Sprintf("账号 %s 已自动添加，可以关闭此页面。", name), true)
 }
 
 // PollOAuthCallback 前端轮询回调结果
@@ -574,6 +625,10 @@ func (h *Handler) PollOAuthCallback(c *gin.Context) {
 }
 
 // oauthCallbackPage 生成简单的 HTML 回调结果页面
+func writeOAuthCallbackPage(c *gin.Context, status int, title, message string, success bool) {
+	c.Data(status, "text/html; charset=utf-8", []byte(oauthCallbackPage(title, message, success)))
+}
+
 func oauthCallbackPage(title, message string, success bool) string {
 	color := "#e53e3e"
 	icon := "&#10060;"

@@ -145,6 +145,9 @@ const (
 	UsageLogModeErrors = "errors"
 	UsageLogModeOff    = "off"
 
+	DefaultUpstreamGuardMode          = "warn"
+	DefaultSecurityEventRetentionDays = 30
+
 	defaultUsageLogMode                 = UsageLogModeFull
 	defaultUsageLogBatchSize            = 200
 	defaultUsageLogFlushIntervalSeconds = 5
@@ -152,6 +155,7 @@ const (
 	maxUsageLogBatchSize                = 10000
 	minUsageLogFlushIntervalSeconds     = 1
 	maxUsageLogFlushIntervalSeconds     = 300
+	maxSecurityEventRetentionDays       = 3650
 )
 
 var ErrDuplicateAccountCredential = errors.New("duplicate account credential")
@@ -187,6 +191,31 @@ func NormalizeUsageLogFlushIntervalSeconds(n int) int {
 		return maxUsageLogFlushIntervalSeconds
 	}
 	return n
+}
+
+func NormalizeUpstreamGuardMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "off":
+		return "off"
+	case "", DefaultUpstreamGuardMode:
+		return DefaultUpstreamGuardMode
+	case "high_block":
+		return "high_block"
+	case "strict":
+		return "strict"
+	default:
+		return DefaultUpstreamGuardMode
+	}
+}
+
+func NormalizeSecurityEventRetentionDays(days int) int {
+	if days <= 0 {
+		return DefaultSecurityEventRetentionDays
+	}
+	if days > maxSecurityEventRetentionDays {
+		return maxSecurityEventRetentionDays
+	}
+	return days
 }
 
 // usageLogEntry 日志缓冲条目
@@ -704,6 +733,9 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS dispatch_queue_limit INT DEFAULT 0;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS image_storage_config TEXT DEFAULT '{}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS show_full_usage_numbers BOOLEAN DEFAULT FALSE;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS upstream_guard_mode VARCHAR(20) DEFAULT 'warn';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS upstream_guard_suppressions TEXT DEFAULT '[]';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS security_event_retention_days INT DEFAULT 30;
 
 			CREATE TABLE IF NOT EXISTS prompt_filter_logs (
 				id               SERIAL PRIMARY KEY,
@@ -725,6 +757,34 @@ func (db *DB) migrate(ctx context.Context) error {
 			);
 			CREATE INDEX IF NOT EXISTS idx_prompt_filter_logs_created_at ON prompt_filter_logs(created_at);
 			CREATE INDEX IF NOT EXISTS idx_prompt_filter_logs_action_created_at ON prompt_filter_logs(action, created_at);
+
+			CREATE TABLE IF NOT EXISTS security_events (
+				id                   SERIAL PRIMARY KEY,
+				created_at           TIMESTAMPTZ DEFAULT NOW(),
+				direction            VARCHAR(20) DEFAULT '',
+				action               VARCHAR(20) DEFAULT '',
+				risk_level           VARCHAR(20) DEFAULT '',
+				risk_score           INT DEFAULT 0,
+				confidence           INT DEFAULT 0,
+				endpoint             VARCHAR(100) DEFAULT '',
+				model                VARCHAR(100) DEFAULT '',
+				account_id           INT DEFAULT 0,
+				account_name         VARCHAR(255) DEFAULT '',
+				base_url             TEXT DEFAULT '',
+				source_type          VARCHAR(30) DEFAULT '',
+				stream               BOOLEAN DEFAULT FALSE,
+				tool_call            BOOLEAN DEFAULT FALSE,
+				rules                TEXT DEFAULT '[]',
+				preview              TEXT DEFAULT '',
+				content_hash          VARCHAR(128) DEFAULT '',
+				request_id            VARCHAR(128) DEFAULT '',
+				scanner_error         TEXT DEFAULT '',
+				false_positive_hints  TEXT DEFAULT '[]'
+			);
+			CREATE INDEX IF NOT EXISTS idx_security_events_created_at ON security_events(created_at);
+			CREATE INDEX IF NOT EXISTS idx_security_events_risk_created_at ON security_events(risk_level, created_at);
+			CREATE INDEX IF NOT EXISTS idx_security_events_direction_created_at ON security_events(direction, created_at);
+			CREATE INDEX IF NOT EXISTS idx_security_events_account_created_at ON security_events(account_id, created_at);
 
 			CREATE TABLE IF NOT EXISTS model_registry (
 				id                     VARCHAR(100) PRIMARY KEY,
@@ -1244,6 +1304,9 @@ type SystemSettings struct {
 	DispatchQueueLimit               int
 	ImageStorageConfig               string // JSON: {"backend":"s3","endpoint":"...","region":"...","bucket":"...","access_key":"...","secret_key":"...","prefix":"...","force_path_style":false}
 	ShowFullUsageNumbers             bool
+	UpstreamGuardMode                string
+	UpstreamGuardSuppressions        string
+	SecurityEventRetentionDays       int
 }
 
 // GetSystemSettings 加载全局设置
@@ -1290,7 +1353,10 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       COALESCE(dispatch_queue_limit, 0),
 		       COALESCE(image_storage_config, '{}'),
 		       COALESCE(background_config, '{}'),
-		       COALESCE(show_full_usage_numbers, false)
+		       COALESCE(show_full_usage_numbers, false),
+		       COALESCE(upstream_guard_mode, 'warn'),
+		       COALESCE(upstream_guard_suppressions, '[]'),
+		       COALESCE(security_event_retention_days, 30)
 		FROM system_settings WHERE id = 1
 	`).Scan(
 		&s.SiteName, &s.SiteLogo,
@@ -1312,6 +1378,9 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.ImageStorageConfig,
 		&s.BackgroundConfig,
 		&s.ShowFullUsageNumbers,
+		&s.UpstreamGuardMode,
+		&s.UpstreamGuardSuppressions,
+		&s.SecurityEventRetentionDays,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -1321,6 +1390,11 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 	if s.DispatchQueueLimit < 0 {
 		s.DispatchQueueLimit = 0
 	}
+	s.UpstreamGuardMode = NormalizeUpstreamGuardMode(s.UpstreamGuardMode)
+	if strings.TrimSpace(s.UpstreamGuardSuppressions) == "" {
+		s.UpstreamGuardSuppressions = "[]"
+	}
+	s.SecurityEventRetentionDays = NormalizeSecurityEventRetentionDays(s.SecurityEventRetentionDays)
 	return s, err
 }
 
@@ -1411,6 +1485,16 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		s.ClientCompatMode, s.CodexMinCLIVersion, s.UsageLogMode, s.UsageLogBatchSize,
 		s.UsageLogFlushIntervalSeconds, s.StreamFlushPolicy, s.StreamFlushIntervalMS,
 		s.FirstTokenTimeoutSeconds, s.DispatchQueueLimit, s.ImageStorageConfig, s.SchedulerMode, normalizeAffinityMode(s.AffinityMode), s.BackgroundConfig, s.ShowFullUsageNumbers)
+	if err != nil {
+		return err
+	}
+	_, err = db.conn.ExecContext(ctx, `
+		UPDATE system_settings
+		SET upstream_guard_mode = $1,
+		    upstream_guard_suppressions = $2,
+		    security_event_retention_days = $3
+		WHERE id = 1
+	`, NormalizeUpstreamGuardMode(s.UpstreamGuardMode), strings.TrimSpace(s.UpstreamGuardSuppressions), NormalizeSecurityEventRetentionDays(s.SecurityEventRetentionDays))
 	return err
 }
 

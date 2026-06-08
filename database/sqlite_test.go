@@ -667,6 +667,72 @@ func TestSQLiteSystemSettingsPersistsRuntimeQueueSettings(t *testing.T) {
 	}
 }
 
+func TestSystemSettingsPersistUpstreamGuardMode(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.UpdateSystemSettings(ctx, &SystemSettings{UpstreamGuardMode: ""}); err != nil {
+		t.Fatalf("UpdateSystemSettings 默认模式返回错误: %v", err)
+	}
+
+	settings, err := db.GetSystemSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSystemSettings 默认模式返回错误: %v", err)
+	}
+	if settings.UpstreamGuardMode != "warn" {
+		t.Fatalf("UpstreamGuardMode default = %q, want warn", settings.UpstreamGuardMode)
+	}
+
+	settings.UpstreamGuardMode = "off"
+	if err := db.UpdateSystemSettings(ctx, settings); err != nil {
+		t.Fatalf("UpdateSystemSettings off 模式返回错误: %v", err)
+	}
+	reloaded, err := db.GetSystemSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSystemSettings off 模式返回错误: %v", err)
+	}
+	if reloaded.UpstreamGuardMode != "off" {
+		t.Fatalf("UpstreamGuardMode = %q, want off", reloaded.UpstreamGuardMode)
+	}
+}
+
+func TestSystemSettingsPersistUpstreamGuardRetentionAndSuppressions(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	suppressions := `[{"rule_id":"response_injection","endpoint":"/v1/responses","account_id":42,"base_url":"https://relay.example.com/v1","action":"downgrade"}]`
+	if err := db.UpdateSystemSettings(ctx, &SystemSettings{
+		UpstreamGuardMode:          "warn",
+		UpstreamGuardSuppressions:  suppressions,
+		SecurityEventRetentionDays: 14,
+	}); err != nil {
+		t.Fatalf("UpdateSystemSettings 返回错误: %v", err)
+	}
+
+	settings, err := db.GetSystemSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSystemSettings 返回错误: %v", err)
+	}
+	if settings.UpstreamGuardSuppressions != suppressions {
+		t.Fatalf("UpstreamGuardSuppressions = %q, want %q", settings.UpstreamGuardSuppressions, suppressions)
+	}
+	if settings.SecurityEventRetentionDays != 14 {
+		t.Fatalf("SecurityEventRetentionDays = %d, want 14", settings.SecurityEventRetentionDays)
+	}
+}
+
 func TestDeleteAccountGroupDoesNotBroadenScopedAPIKey(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
 

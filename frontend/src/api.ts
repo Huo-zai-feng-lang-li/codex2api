@@ -26,6 +26,7 @@ import type {
   ModelSyncResponse,
   ModelsResponse,
   OAuthExchangeResponse,
+  OAuthPollResponse,
   OAuthURLResponse,
   OpenAIResponsesAccountConfig,
   OpsErrorSummary,
@@ -35,6 +36,7 @@ import type {
   PromptFilterTestResponse,
   RuntimeStatusResponse,
   ResetRadarResponse,
+  SecurityEventsResponse,
   ShutdownResponse,
   SiteBranding,
   StatsResponse,
@@ -446,6 +448,28 @@ export const api = {
     request<PromptFilterTestResponse>('/prompt-filter/test', { method: 'POST', body: JSON.stringify(data) }),
   getPromptFilterRules: () =>
     request<PromptFilterRulesResponse>('/prompt-filter/rules'),
+  getSecurityEvents: (params: { page?: number; pageSize?: number; direction?: string; action?: string; riskLevel?: string; endpoint?: string; model?: string; accountId?: string; baseUrl?: string; sourceType?: string; toolCall?: string; start?: string; end?: string; q?: string } = {}) => {
+    const search = new URLSearchParams()
+    if (params.page) search.set('page', String(params.page))
+    if (params.pageSize) search.set('page_size', String(params.pageSize))
+    if (params.direction) search.set('direction', params.direction)
+    if (params.action) search.set('action', params.action)
+    if (params.riskLevel) search.set('risk_level', params.riskLevel)
+    if (params.endpoint) search.set('endpoint', params.endpoint)
+    if (params.model) search.set('model', params.model)
+    if (params.accountId) search.set('account_id', params.accountId)
+    if (params.baseUrl) search.set('base_url', params.baseUrl)
+    if (params.sourceType) search.set('source_type', params.sourceType)
+    if (params.toolCall) search.set('tool_call', params.toolCall)
+    if (params.start) search.set('start', params.start)
+    if (params.end) search.set('end', params.end)
+    if (params.q) search.set('q', params.q)
+    return request<SecurityEventsResponse>(`/security-events?${search.toString()}`)
+  },
+  suppressSecurityEvent: (id: number, data: { rule_id?: string }) =>
+    request<{ upstream_guard_suppressions: string }>(`/security-events/${id}/suppress`, { method: 'POST', body: JSON.stringify(data) }),
+  clearSecurityEvents: () =>
+    request<MessageResponse>('/security-events', { method: 'DELETE' }),
   getModels: () => request<ModelsResponse>('/models'),
   syncModels: () => request<ModelSyncResponse>('/models/sync', { method: 'POST' }),
   batchTestAccounts: (ids?: number[]) =>
@@ -487,6 +511,8 @@ export const api = {
     request<OAuthURLResponse>('/oauth/generate-auth-url', { method: 'POST', body: JSON.stringify(data) }),
   exchangeOAuthCode: (data: { session_id: string; code: string; state: string; name: string; proxy_url?: string; tags?: string[] }) =>
     request<OAuthExchangeResponse>('/oauth/exchange-code', { method: 'POST', body: JSON.stringify(data) }),
+  pollOAuthCallback: (sessionId: string) =>
+    request<OAuthPollResponse>(`/oauth/poll-callback?session_id=${encodeURIComponent(sessionId)}`),
 }
 
 export interface ProxyRow {

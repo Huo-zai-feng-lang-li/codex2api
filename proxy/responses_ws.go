@@ -292,6 +292,11 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				Stream:           true,
 				StartedAt:        start,
 			})
+			if verdict := h.inspectUpstreamGuardRequest(c.Request.Context(), "/v1/responses", effectiveModel, account, openAIResponsesBody, true, c.GetHeader("X-Request-Id")); shouldBlockUpstreamGuard(verdict) {
+				_ = writeResponsesWSError(conn, upstreamGuardBlockAPIError(verdict))
+				h.store.Release(account)
+				return newResponsesWSCloseError(websocket.ClosePolicyViolation, upstreamGuardBlockMessage(verdict), nil)
+			}
 			resp, reqErr := executeOpenAIResponses(upstreamCtx, account, openAIResponsesBody, proxyURL, downstreamHeaders)
 			attemptedUpstream = true
 			durationMs := int(time.Since(start).Milliseconds())
@@ -442,6 +447,11 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		}
 		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
 		lastUpstreamCancel = upstreamCancel
+		if verdict := h.inspectUpstreamGuardRequest(c.Request.Context(), "/v1/responses", effectiveModel, account, codexBody, true, c.GetHeader("X-Request-Id")); shouldBlockUpstreamGuard(verdict) {
+			_ = writeResponsesWSError(conn, upstreamGuardBlockAPIError(verdict))
+			h.store.Release(account)
+			return newResponsesWSCloseError(websocket.ClosePolicyViolation, upstreamGuardBlockMessage(verdict), nil)
+		}
 		resp, reqErr := ExecuteRequest(upstreamCtx, account, codexBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, !forceHTTPFallback)
 		attemptedUpstream = true
 		durationMs := int(time.Since(start).Milliseconds())
@@ -627,6 +637,20 @@ func (h *Handler) streamResponsesWSUpstream(
 	withheldRetryableFailure := false
 
 	readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
+		if verdict := h.inspectUpstreamGuardResponse(c.Request.Context(), "/v1/responses", effectiveModel, account, data, true, c.GetHeader("X-Request-Id")); shouldBlockUpstreamGuard(verdict) {
+			blockEvent := buildUpstreamGuardBlockedEvent(verdict)
+			terminalFailurePayload = blockEvent
+			gotTerminal = true
+			if !clientGone {
+				if err := writeResponsesWSMessage(conn, blockEvent); err != nil {
+					writeErr = err
+					clientGone = true
+				} else {
+					wroteAnyMessage = true
+				}
+			}
+			return false
+		}
 		parsed := gjson.ParseBytes(data)
 		eventType := parsed.Get("type").String()
 		isFirstToken := isFirstTokenEvent(eventType)

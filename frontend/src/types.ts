@@ -585,6 +585,9 @@ export interface SystemSettings {
   prompt_filter_sensitive_words: string
   prompt_filter_custom_patterns: string
   prompt_filter_disabled_patterns: string
+  upstream_guard_mode: 'off' | 'warn' | 'high_block' | 'strict'
+  upstream_guard_suppressions: string
+  security_event_retention_days: number
   client_compat_mode: 'preserve' | 'auto' | 'force' | string
   codex_min_cli_version: string
   usage_log_mode: 'full' | 'errors' | 'off' | string
@@ -671,6 +674,37 @@ export interface PromptFilterLog {
 
 export interface PromptFilterLogsResponse {
   logs: PromptFilterLog[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface SecurityEvent {
+  id: number
+  created_at: ISODateString
+  direction: 'request' | 'response' | 'source' | string
+  action: 'allow' | 'warn' | 'block' | string
+  risk_level: 'none' | 'low' | 'medium' | 'high' | 'critical' | string
+  risk_score: number
+  confidence: number
+  endpoint: string
+  model: string
+  account_id: number
+  account_name: string
+  base_url: string
+  source_type: 'official' | 'third_party' | 'unknown' | string
+  stream: boolean
+  tool_call: boolean
+  rules: string
+  preview: string
+  content_hash: string
+  request_id: string
+  scanner_error: string
+  false_positive_hints: string
+}
+
+export interface SecurityEventsResponse {
+  events: SecurityEvent[]
   total: number
   page: number
   page_size: number
@@ -1087,4 +1121,16 @@ export interface OAuthExchangeResponse {
   id: number
   email: string
   plan_type: string
+}
+
+export interface OAuthPollResponse {
+  status: 'waiting' | 'processing' | 'completed'
+  result?: {
+    success: boolean
+    message?: string
+    id?: number
+    email?: string
+    plan_type?: string
+    error?: string
+  }
 }

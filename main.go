@@ -5,8 +5,10 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"html"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -101,6 +103,7 @@ func main() {
 			FirstTokenTimeoutSeconds:         15,
 			DispatchQueueLimit:               0,
 			ImageStorageConfig:               "{}",
+			UpstreamGuardMode:                database.DefaultUpstreamGuardMode,
 		}
 		_ = db.UpdateSystemSettings(context.Background(), settings)
 	} else if err != nil {
@@ -135,6 +138,7 @@ func main() {
 			StreamFlushIntervalMS:            20,
 			FirstTokenTimeoutSeconds:         15,
 			ImageStorageConfig:               "{}",
+			UpstreamGuardMode:                database.DefaultUpstreamGuardMode,
 		}
 	} else {
 		log.Printf("已加载持久化业务设置: ProxyURL=%s, MaxConcurrency=%d, GlobalRPM=%d, PgMaxConns=%d, RedisPoolSize=%d",
@@ -360,6 +364,8 @@ func main() {
 	log.Println("==========================================")
 
 	server := newHTTPServer(addr, r)
+	adminURL := fmt.Sprintf("http://%s:%d/admin/", displayHost, cfg.Port)
+	oauthCallbackServer := startOAuthCallbackServer(adminHandler, cfg.Port, adminURL)
 
 	// 优雅关闭
 	go func() {
@@ -384,6 +390,11 @@ func main() {
 	defer shutdownCancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("HTTP 服务优雅关闭失败: %v", err)
+	}
+	if oauthCallbackServer != nil {
+		if err := oauthCallbackServer.Shutdown(shutdownCtx); err != nil {
+			log.Printf("OAuth 回调服务优雅关闭失败: %v", err)
+		}
 	}
 	store.Stop()
 	wsrelay.ShutdownExecutor()
@@ -532,4 +543,67 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 		ReadTimeout:       5 * time.Minute,
 		IdleTimeout:       2 * time.Minute,
 	}
+}
+
+func startOAuthCallbackServer(handler *admin.Handler, primaryPort int, adminURL string) *http.Server {
+	if primaryPort == admin.OAuthCallbackPort {
+		log.Printf("OAuth 回调由主服务处理: http://localhost:%d/auth/callback", admin.OAuthCallbackPort)
+		return nil
+	}
+
+	listener, err := net.Listen("tcp", admin.OAuthCallbackListenAddr)
+	if err != nil {
+		log.Printf("OAuth 回调监听启动失败: %v；仍可手动粘贴回调 URL 完成授权", err)
+		return nil
+	}
+
+	server := newHTTPServer(admin.OAuthCallbackListenAddr, newOAuthCallbackRouter(handler, adminURL))
+	go func() {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("OAuth 回调服务异常退出: %v", err)
+		}
+	}()
+
+	log.Printf("  OAuth 回调: http://localhost:%d/auth/callback", admin.OAuthCallbackPort)
+	return server
+}
+
+func newOAuthCallbackRouter(handler *admin.Handler, adminURL string) http.Handler {
+	r := gin.New()
+	r.Use(api.RecoveryMiddleware())
+	r.GET("/auth/callback", handler.OAuthCallback)
+
+	infoPage := func(c *gin.Context) {
+		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(oauthCallbackInfoPage(adminURL)))
+	}
+	r.GET("/", infoPage)
+	r.NoRoute(infoPage)
+	return r
+}
+
+func oauthCallbackInfoPage(adminURL string) string {
+	safeAdminURL := html.EscapeString(adminURL)
+	return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CodexProxy OAuth 回调端口</title>
+  <style>
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #111827; background: #f8fafc; }
+    main { width: min(560px, calc(100vw - 32px)); padding: 32px; border: 1px solid #e5e7eb; border-radius: 12px; background: #fff; box-shadow: 0 18px 45px rgba(15, 23, 42, 0.08); }
+    h1 { margin: 0 0 12px; font-size: 24px; line-height: 1.25; }
+    p { margin: 0 0 16px; line-height: 1.7; color: #4b5563; }
+    a { display: inline-flex; align-items: center; min-height: 40px; padding: 0 16px; border-radius: 8px; color: #fff; background: #2563eb; text-decoration: none; font-weight: 700; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>OAuth 回调端口</h1>
+    <p>这个端口只用于接收 OpenAI 授权回调，不是管理后台入口。完成授权后，本页面会显示授权结果。</p>
+    <p>请返回 CodexProxy 管理后台继续添加或查看账号。</p>
+    <a href="` + safeAdminURL + `">返回管理后台</a>
+  </main>
+</body>
+</html>`
 }
