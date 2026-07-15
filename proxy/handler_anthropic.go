@@ -100,6 +100,7 @@ func (h *Handler) Messages(c *gin.Context) {
 		sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "messages is required")
 		return
 	}
+	rawBody = h.applyAnthropicRequestPromptRewrite(rawBody)
 	if h.inspectPromptFilterAnthropic(c, rawBody, "/v1/messages", model) {
 		return
 	}
@@ -485,6 +486,7 @@ func (h *Handler) Messages(c *gin.Context) {
 						return
 					}
 				}
+				h.rewriteAnthropicResponseForDownstream(anthropicResp)
 				c.JSON(http.StatusOK, anthropicResp)
 			} else {
 				sendAnthropicError(c, http.StatusBadGateway, "api_error", "No complete response received from upstream")

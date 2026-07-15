@@ -29,7 +29,7 @@ import (
 // 设计要点：
 //   - 按账号隔离：避免同一 TCP 连接被不同 token 复用（会被服务端检测）
 //   - TTL 淘汰：只有活跃账号持有连接，不活跃的自动清理，几万账号也不爆内存
-//   - 空闲连接极简：每账号只保留 1 条空闲连接，空闲 30s 后自动关闭
+//   - 突发复用：每账号保留有限空闲连接，避免并发回落后重复握手
 
 // poolEntry 包装 http.Client，追踪最后使用时间用于 TTL 淘汰
 type poolEntry struct {
@@ -101,7 +101,10 @@ func shouldRecyclePooledClient(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "connection is shutting down") ||
 		strings.Contains(msg, "connection reset") ||
-		strings.Contains(msg, "broken pipe")
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "stream error: stream id") ||
+		strings.Contains(msg, "internal_error") ||
+		strings.Contains(msg, "http2:")
 }
 
 func recyclePooledClient(account *auth.Account, proxyURL string) {
@@ -125,8 +128,9 @@ func recyclePooledClientForAccount(account *auth.Account) {
 func newCodexStandardTransport(proxyURL string) http.RoundTripper {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
-	transport.MaxIdleConnsPerHost = 1
-	transport.IdleConnTimeout = 30 * time.Second
+	transport.MaxIdleConnsPerHost = 16
+	transport.IdleConnTimeout = 90 * time.Second
+	transport.ForceAttemptHTTP2 = true
 	baseDialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	transport.DialContext = baseDialer.DialContext
 	if err := auth.ConfigureTransportProxy(transport, proxyURL, baseDialer); err != nil {
@@ -686,7 +690,6 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("Connection", "Keep-Alive")
 	if version != "" {
 		req.Header.Set("Version", version)
 	}

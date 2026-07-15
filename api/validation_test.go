@@ -133,17 +133,103 @@ func TestValidateResponsesAPIRequestMaxOutputTokensCap(t *testing.T) {
 	}
 }
 
-func TestValidateResponsesAPIRequestRejectsUnknownInputType(t *testing.T) {
-	result := ValidateResponsesAPIRequest(
-		[]byte(`{"model":"gpt-5.4","input":[{"type":"unknown_call","call_id":"call_1"}]}`),
-		[]string{"gpt-5.4"},
-	)
+func TestValidateResponsesAPIRequestAllowsFutureInputTypes(t *testing.T) {
+	for _, itemType := range []string{
+		"additional_tools",
+		"compaction_trigger",
+		"future_response_item_v1",
+	} {
+		t.Run(itemType, func(t *testing.T) {
+			body := []byte(`{"model":"gpt-5.4","input":[{"type":"` + itemType + `","payload":{"nested":true}}]}`)
+			result := ValidateResponsesAPIRequest(body, []string{"gpt-5.4"})
 
-	if result.Valid {
-		t.Fatal("expected unknown input type to be invalid")
+			if !result.Valid {
+				t.Fatalf("expected future input type %q to be valid, got %#v", itemType, result.Errors)
+			}
+		})
 	}
-	if len(result.Errors) != 1 || result.Errors[0].Code != "invalid_input_type" {
-		t.Fatalf("expected invalid_input_type, got %#v", result.Errors)
+}
+
+func TestValidateResponsesAPIRequestRejectsMalformedInputItems(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		wantField string
+		wantCode  string
+	}{
+		{
+			name:      "array item must be an object",
+			body:      `{"model":"gpt-5.4","input":["hello"]}`,
+			wantField: "input.0",
+			wantCode:  "invalid_input_item",
+		},
+		{
+			name:      "null item must be an object",
+			body:      `{"model":"gpt-5.4","input":[null]}`,
+			wantField: "input.0",
+			wantCode:  "invalid_input_item",
+		},
+		{
+			name:      "boolean item must be an object",
+			body:      `{"model":"gpt-5.4","input":[true]}`,
+			wantField: "input.0",
+			wantCode:  "invalid_input_item",
+		},
+		{
+			name:      "nested array item must be an object",
+			body:      `{"model":"gpt-5.4","input":[[]]}`,
+			wantField: "input.0",
+			wantCode:  "invalid_input_item",
+		},
+		{
+			name:      "explicit type must be a string",
+			body:      `{"model":"gpt-5.4","input":[{"type":42}]}`,
+			wantField: "input.0.type",
+			wantCode:  "invalid_input_type",
+		},
+		{
+			name:      "explicit type must not be null",
+			body:      `{"model":"gpt-5.4","input":[{"type":null}]}`,
+			wantField: "input.0.type",
+			wantCode:  "invalid_input_type",
+		},
+		{
+			name:      "explicit type must not be an object",
+			body:      `{"model":"gpt-5.4","input":[{"type":{"name":"message"}}]}`,
+			wantField: "input.0.type",
+			wantCode:  "invalid_input_type",
+		},
+		{
+			name:      "explicit type must not be a boolean",
+			body:      `{"model":"gpt-5.4","input":[{"type":false}]}`,
+			wantField: "input.0.type",
+			wantCode:  "invalid_input_type",
+		},
+		{
+			name:      "explicit type must not be blank",
+			body:      `{"model":"gpt-5.4","input":[{"type":"   "}]}`,
+			wantField: "input.0.type",
+			wantCode:  "invalid_input_type",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := ValidateResponsesAPIRequest([]byte(test.body), []string{"gpt-5.4"})
+
+			if result.Valid {
+				t.Fatal("expected malformed input item to be invalid")
+			}
+			if len(result.Errors) != 1 {
+				t.Fatalf("errors length = %d, want 1: %#v", len(result.Errors), result.Errors)
+			}
+			if got := result.Errors[0].Field; got != test.wantField {
+				t.Fatalf("error field = %q, want %q", got, test.wantField)
+			}
+			if got := result.Errors[0].Code; got != test.wantCode {
+				t.Fatalf("error code = %q, want %q", got, test.wantCode)
+			}
+		})
 	}
 }
 

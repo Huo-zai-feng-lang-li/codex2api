@@ -1,6 +1,6 @@
-import { useCallback, useMemo, useState, type ChangeEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useState, type ChangeEvent, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Copy, Download, Eye, FileText, RefreshCw, Search, ShieldCheck, Trash2, X } from 'lucide-react'
+import { Copy, Download, Eye, FileText, RefreshCw, Save, Search, ShieldCheck, Trash2, X } from 'lucide-react'
 import { api } from '../api'
 import PageHeader from '../components/PageHeader'
 import Pagination from '../components/Pagination'
@@ -12,7 +12,7 @@ import { formatBeijingTime, formatRelativeTime } from '../utils/time'
 import { getErrorMessage } from '../utils/error'
 import { summarizeSecurityPreview, type SecurityPreviewSummary } from '../utils/securityPreview'
 import { completeSecurityRuleEvidence, formatSecurityRawBody } from '../utils/securityRawBody'
-import type { SecurityCapture, SecurityEvent } from '../types'
+import type { SecurityCapture, SecurityEvent, SystemSettings } from '../types'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -51,7 +51,16 @@ type SecurityEventFilters = {
   q: string
 }
 
-type SecurityView = 'events' | 'captures'
+type SecurityView = 'events' | 'captures' | 'requestPrompt' | 'responsePrompt'
+
+type PromptSettingsForm = {
+  requestEnabled: boolean
+  requestPrompt: string
+  responseEnabled: boolean
+  responsePrompt: string
+}
+
+type PromptSettingsKind = 'request' | 'response'
 
 type SecurityRule = {
   rule_id?: string
@@ -80,11 +89,44 @@ const emptyFilters: SecurityEventFilters = {
 const tableHeadClass = 'text-[12px] font-semibold'
 const tableTextClass = 'text-[14px]'
 const monoClass = 'font-geist-mono text-[12px] tabular-nums'
+const loadingDelayMs = 220
 const previewToneClass: Record<SecurityPreviewSummary['tone'], string> = {
   error: 'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300',
   json: 'border-slate-500/25 bg-slate-500/10 text-slate-700 dark:text-slate-300',
   text: 'border-border bg-muted text-muted-foreground',
   tool: 'border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300',
+}
+
+const emptyPromptSettings: PromptSettingsForm = {
+  requestEnabled: false,
+  requestPrompt: '',
+  responseEnabled: false,
+  responsePrompt: '',
+}
+
+function toPromptSettings(settings: SystemSettings): PromptSettingsForm {
+  return {
+    requestEnabled: Boolean(settings.proxy_request_system_prompt_enabled),
+    requestPrompt: settings.proxy_request_system_prompt || '',
+    responseEnabled: Boolean(settings.proxy_response_rewrite_enabled),
+    responsePrompt: settings.proxy_response_rewrite_prompt || '',
+  }
+}
+
+function useDelayedLoading(loading: boolean) {
+  const [visible, setVisible] = useState(false)
+
+  useEffect(() => {
+    if (!loading) {
+      setVisible(false)
+      return
+    }
+
+    const timer = window.setTimeout(() => setVisible(true), loadingDelayMs)
+    return () => window.clearTimeout(timer)
+  }, [loading])
+
+  return visible
 }
 
 function parseRules(raw: string): SecurityRule[] {
@@ -214,6 +256,11 @@ export default function SecurityEvents() {
   const [selectedCapture, setSelectedCapture] = useState<SecurityCapture | null>(null)
   const [clearing, setClearing] = useState(false)
   const [suppressingId, setSuppressingId] = useState<number | null>(null)
+  const [promptSettings, setPromptSettings] = useState<PromptSettingsForm>(emptyPromptSettings)
+  const [promptSettingsLoading, setPromptSettingsLoading] = useState(false)
+  const [promptSettingsError, setPromptSettingsError] = useState('')
+  const [savingPromptKind, setSavingPromptKind] = useState<PromptSettingsKind | null>(null)
+  const isPromptView = view === 'requestPrompt' || view === 'responsePrompt'
 
   const loadEvents = useCallback(async () => {
     const result = await api.getSecurityEvents({
@@ -275,12 +322,35 @@ export default function SecurityEvents() {
     load: loadCaptures,
     onError: handleLoadError,
   })
+  const showEventsLoading = useDelayedLoading(loading && data.events.length === 0)
+  const showCaptureLoading = useDelayedLoading(captureLoading && captureData.captures.length === 0)
 
   const totalPages = Math.max(1, Math.ceil(data.total / pageSize))
   const captureTotalPages = Math.max(1, Math.ceil(captureData.total / capturePageSize))
-  const activeTotal = view === 'events' ? data.total : captureData.total
-  const activeReload = view === 'events' ? reload : reloadCaptures
+  const activeTotal = view === 'events' ? data.total : view === 'captures' ? captureData.total : 0
   const hasFilters = useMemo(() => Object.values(filters).some(Boolean), [filters])
+
+  const loadPromptSettings = useCallback(async () => {
+    setPromptSettingsLoading(true)
+    setPromptSettingsError('')
+    try {
+      const settings = await api.getSettings()
+      setPromptSettings(toPromptSettings(settings))
+    } catch (err) {
+      const message = getErrorMessage(err)
+      setPromptSettingsError(message)
+      showToast(message, 'error')
+    } finally {
+      setPromptSettingsLoading(false)
+    }
+  }, [showToast])
+  const activeReload = isPromptView ? () => { void loadPromptSettings() } : view === 'events' ? reload : reloadCaptures
+
+  useEffect(() => {
+    if (isPromptView) {
+      void loadPromptSettings()
+    }
+  }, [isPromptView, loadPromptSettings])
 
   const updateFilter = <K extends keyof SecurityEventFilters>(key: K, value: SecurityEventFilters[K]) => {
     setPage(1)
@@ -298,9 +368,40 @@ export default function SecurityEvents() {
     setView(next)
     setPage(1)
     setCapturePage(1)
-    setFilters((current) => next === 'captures'
-      ? { ...current, riskLevel: '', action: '' }
-      : { ...current, captureReason: '', requestId: '' })
+    setFilters((current) => {
+      if (next === 'captures') return { ...current, riskLevel: '', action: '' }
+      if (next === 'events') return { ...current, captureReason: '', requestId: '' }
+      return current
+    })
+  }
+
+  const updatePromptSettings = <K extends keyof PromptSettingsForm>(key: K, value: PromptSettingsForm[K]) => {
+    setPromptSettings((current) => ({ ...current, [key]: value }))
+  }
+
+  const savePromptSettings = async (kind: PromptSettingsKind) => {
+    setSavingPromptKind(kind)
+    setPromptSettingsError('')
+    try {
+      const payload: Partial<SystemSettings> = kind === 'request'
+        ? {
+            proxy_request_system_prompt_enabled: promptSettings.requestEnabled,
+            proxy_request_system_prompt: promptSettings.requestPrompt,
+          }
+        : {
+            proxy_response_rewrite_enabled: promptSettings.responseEnabled,
+            proxy_response_rewrite_prompt: promptSettings.responsePrompt,
+          }
+      const settings = await api.updateSettings(payload)
+      setPromptSettings(toPromptSettings(settings))
+      showToast(t('securityEvents.promptSaveSuccess'), 'success')
+    } catch (err) {
+      const message = getErrorMessage(err)
+      setPromptSettingsError(message)
+      showToast(message, 'error')
+    } finally {
+      setSavingPromptKind(null)
+    }
   }
 
   const handleClearEvents = async () => {
@@ -340,16 +441,16 @@ export default function SecurityEvents() {
         title={t('securityEvents.title')}
         description={t('securityEvents.description')}
         onRefresh={activeReload}
-        actions={
+        actions={!isPromptView ? (
           <Button variant="outline" onClick={() => void handleClearEvents()} disabled={clearing || activeTotal === 0}>
             {clearing ? <RefreshCw className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
             {t('securityEvents.clear')}
           </Button>
-        }
-        actionMeta={t('securityEvents.total', { count: activeTotal })}
+        ) : undefined}
+        actionMeta={!isPromptView ? t('securityEvents.total', { count: activeTotal }) : undefined}
       />
 
-      <div className="inline-flex rounded-lg border border-border bg-card p-1 shadow-sm">
+      <div className="flex w-fit flex-wrap rounded-lg border border-border bg-card p-1 shadow-sm">
         <Button
           type="button"
           size="sm"
@@ -368,8 +469,27 @@ export default function SecurityEvents() {
           <FileText className="size-4" />
           {t('securityEvents.capturesView')}
         </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant={view === 'requestPrompt' ? 'secondary' : 'ghost'}
+          onClick={() => switchView('requestPrompt')}
+        >
+          <FileText className="size-4" />
+          {t('securityEvents.requestPromptView')}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant={view === 'responsePrompt' ? 'secondary' : 'ghost'}
+          onClick={() => switchView('responsePrompt')}
+        >
+          <FileText className="size-4" />
+          {t('securityEvents.responsePromptView')}
+        </Button>
       </div>
 
+      {!isPromptView ? (
       <div className="rounded-lg border border-border bg-card/80 p-4 shadow-sm">
         <div className="grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3">
           {view === 'events' ? (
@@ -498,10 +618,11 @@ export default function SecurityEvents() {
           </div>
         </div>
       </div>
+      ) : null}
 
       {view === 'events' ? (
       <StateShell
-        loading={loading}
+        loading={showEventsLoading}
         error={error}
         isEmpty={!loading && !error && data.events.length === 0}
         onRetry={reload}
@@ -632,9 +753,9 @@ export default function SecurityEvents() {
           </div>
         </div>
       </StateShell>
-      ) : (
+      ) : view === 'captures' ? (
       <StateShell
-        loading={captureLoading}
+        loading={showCaptureLoading}
         error={captureError}
         isEmpty={!captureLoading && !captureError && captureData.captures.length === 0}
         onRetry={reloadCaptures}
@@ -657,6 +778,17 @@ export default function SecurityEvents() {
           }}
         />
       </StateShell>
+      ) : (
+        <PromptSettingsPanel
+          kind={view === 'requestPrompt' ? 'request' : 'response'}
+          form={promptSettings}
+          loading={promptSettingsLoading}
+          error={promptSettingsError}
+          saving={savingPromptKind === (view === 'requestPrompt' ? 'request' : 'response')}
+          onChange={updatePromptSettings}
+          onSave={savePromptSettings}
+          onRetry={loadPromptSettings}
+        />
       )}
       <SecurityPreviewDialog event={selectedEvent} onClose={() => setSelectedEvent(null)} />
       <SecurityCaptureDialog capture={selectedCapture} onClose={() => setSelectedCapture(null)} />
@@ -696,6 +828,97 @@ function SecurityPreviewCard({ summary, onOpen }: { summary: SecurityPreviewSumm
         </div>
       ) : null}
     </div>
+  )
+}
+
+function PromptSettingsPanel({
+  kind,
+  form,
+  loading,
+  error,
+  saving,
+  onChange,
+  onSave,
+  onRetry,
+}: {
+  kind: PromptSettingsKind
+  form: PromptSettingsForm
+  loading: boolean
+  error: string
+  saving: boolean
+  onChange: <K extends keyof PromptSettingsForm>(key: K, value: PromptSettingsForm[K]) => void
+  onSave: (kind: PromptSettingsKind) => Promise<void>
+  onRetry: () => Promise<void>
+}) {
+  const { t } = useTranslation()
+  const isRequest = kind === 'request'
+  const enabledKey = isRequest ? 'requestEnabled' : 'responseEnabled'
+  const promptKey = isRequest ? 'requestPrompt' : 'responsePrompt'
+  const enabled = form[enabledKey]
+  const prompt = form[promptKey]
+
+  return (
+    <section className="rounded-lg border border-border bg-card/80 p-4 shadow-sm">
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-[15px] font-semibold text-foreground">
+            {t(isRequest ? 'securityEvents.requestPromptTitle' : 'securityEvents.responsePromptTitle')}
+          </div>
+          <div className="mt-1 max-w-3xl text-[13px] leading-5 text-muted-foreground">
+            {t(isRequest ? 'securityEvents.requestPromptDesc' : 'securityEvents.responsePromptDesc')}
+          </div>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => void onRetry()}
+          disabled={loading || saving}
+        >
+          <RefreshCw className={`size-3.5 ${loading ? 'animate-spin' : ''}`} />
+          {t('common.refresh')}
+        </Button>
+      </div>
+
+      {error ? (
+        <div className="mb-4 rounded-md border border-red-500/25 bg-red-500/10 px-3 py-2 text-[13px] text-red-700 dark:text-red-300">
+          {error}
+        </div>
+      ) : null}
+
+      <div className="space-y-4">
+        <label className="flex items-center gap-2 text-[13px] font-medium text-foreground">
+          <input
+            type="checkbox"
+            checked={enabled}
+            disabled={loading || saving}
+            className="size-4 rounded border-border accent-primary"
+            onChange={(event: ChangeEvent<HTMLInputElement>) => onChange(enabledKey, event.target.checked)}
+          />
+          {t('securityEvents.promptEnabled')}
+        </label>
+
+        <textarea
+          value={prompt}
+          disabled={loading || saving}
+          aria-label={t(isRequest ? 'securityEvents.requestPromptTitle' : 'securityEvents.responsePromptTitle')}
+          spellCheck={false}
+          className="min-h-[280px] w-full min-w-0 resize-y rounded-md border border-input bg-transparent px-3 py-2 font-geist-mono text-[13px] leading-5 shadow-xs outline-none transition-[color,box-shadow] placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-60"
+          placeholder={t(isRequest ? 'securityEvents.requestPromptPlaceholder' : 'securityEvents.responsePromptPlaceholder')}
+          onChange={(event: ChangeEvent<HTMLTextAreaElement>) => onChange(promptKey, event.target.value)}
+        />
+
+        <div className="flex justify-end">
+          <Button
+            type="button"
+            onClick={() => void onSave(kind)}
+            disabled={loading || saving}
+          >
+            {saving ? <RefreshCw className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}
+            {saving ? t('securityEvents.promptSaving') : t('securityEvents.promptSave')}
+          </Button>
+        </div>
+      </div>
+    </section>
   )
 }
 
@@ -1043,6 +1266,7 @@ function RawBodyPanel({ capture, onToast, compact = false }: { capture: Security
   const { t } = useTranslation()
   const [query, setQuery] = useState('')
   const [formatted, setFormatted] = useState(true)
+  const hasCaptureError = Boolean(capture.capture_error?.trim())
   const formattedBody = useMemo(() => formatSecurityRawBody(capture.body), [capture.body])
   const body = formatted ? formattedBody.text : capture.body
   const visibleBody = query ? highlightSearchText(body, query) : body
@@ -1063,35 +1287,46 @@ function RawBodyPanel({ capture, onToast, compact = false }: { capture: Security
             {capture.direction} · {formatBytes(capture.body_bytes)} · {capture.body_hash || '-'}
           </div>
         </div>
-        <div className="flex shrink-0 flex-wrap gap-2">
-          <Button type="button" size="sm" variant="outline" onClick={() => setFormatted((value) => !value)}>
-            <FileText className="size-3.5" />
-            {formatted ? t('securityEvents.rawText') : t('securityEvents.reviewFormat')}
-          </Button>
-          <Button type="button" size="sm" variant="outline" onClick={() => void copyBody(capture.body, onToast, t('securityEvents.copySuccess'), t('securityEvents.copyFailed'))}>
-            <Copy className="size-3.5" />
-            {t('securityEvents.copy')}
-          </Button>
-          <Button type="button" size="sm" variant="outline" onClick={() => downloadBody(filename, capture.body)}>
-            <Download className="size-3.5" />
-            {t('securityEvents.download')}
-          </Button>
-        </div>
+        {!hasCaptureError ? (
+          <div className="flex shrink-0 flex-wrap gap-2">
+            <Button type="button" size="sm" variant="outline" onClick={() => setFormatted((value) => !value)}>
+              <FileText className="size-3.5" />
+              {formatted ? t('securityEvents.rawText') : t('securityEvents.reviewFormat')}
+            </Button>
+            <Button type="button" size="sm" variant="outline" onClick={() => void copyBody(capture.body, onToast, t('securityEvents.copySuccess'), t('securityEvents.copyFailed'))}>
+              <Copy className="size-3.5" />
+              {t('securityEvents.copy')}
+            </Button>
+            <Button type="button" size="sm" variant="outline" onClick={() => downloadBody(filename, capture.body)}>
+              <Download className="size-3.5" />
+              {t('securityEvents.download')}
+            </Button>
+          </div>
+        ) : null}
       </div>
-      <Input
-        value={query}
-        placeholder={t('securityEvents.searchRawBody')}
-        className="mb-3"
-        onChange={(e: ChangeEvent<HTMLInputElement>) => setQuery(e.target.value)}
-      />
-      {formattedBody.folded && formatted ? (
+      {hasCaptureError ? (
+        <div className="rounded-md border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-[12px] leading-5 text-amber-800 dark:text-amber-200">
+          <div className="font-semibold">{t('securityEvents.rawUnavailable')}</div>
+          <div className="mt-1 font-geist-mono">{capture.capture_error}</div>
+        </div>
+      ) : (
+        <Input
+          value={query}
+          placeholder={t('securityEvents.searchRawBody')}
+          className="mb-3"
+          onChange={(e: ChangeEvent<HTMLInputElement>) => setQuery(e.target.value)}
+        />
+      )}
+      {!hasCaptureError && formattedBody.folded && formatted ? (
         <div className="mb-3 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-[12px] leading-5 text-amber-800 dark:text-amber-200">
           {t('securityEvents.foldedPayloadHint')}
         </div>
       ) : null}
-      <pre className={`${compact ? 'max-h-[280px]' : 'min-h-[320px] flex-1'} overflow-auto ${preClass} rounded-md border border-border bg-background p-3 font-geist-mono text-[12px] leading-relaxed text-foreground`}>
-        {visibleBody}
-      </pre>
+      {!hasCaptureError ? (
+        <pre className={`${compact ? 'max-h-[280px]' : 'min-h-[320px] flex-1'} overflow-auto ${preClass} rounded-md border border-border bg-background p-3 font-geist-mono text-[12px] leading-relaxed text-foreground`}>
+          {visibleBody}
+        </pre>
+      ) : null}
     </section>
   )
 }

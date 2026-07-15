@@ -87,6 +87,7 @@ type SecurityCapture struct {
 	BodyBytes               int       `json:"body_bytes"`
 	Truncated               bool      `json:"truncated"`
 	ExpiresAt               time.Time `json:"expires_at"`
+	CaptureError            string    `json:"capture_error"`
 	EventAction             string    `json:"event_action"`
 	EventRiskLevel          string    `json:"event_risk_level"`
 	EventRiskScore          int       `json:"event_risk_score"`
@@ -115,6 +116,7 @@ type SecurityCaptureInput struct {
 	BodyBytes       int
 	Truncated       bool
 	ExpiresAt       time.Time
+	CaptureError    string
 }
 
 type SecurityCaptureQuery struct {
@@ -206,7 +208,7 @@ func (db *DB) InsertSecurityCapture(ctx context.Context, input *SecurityCaptureI
 	}
 	expiresAt := input.ExpiresAt
 	if expiresAt.IsZero() {
-		expiresAt = time.Now().Add(7 * 24 * time.Hour)
+		expiresAt = time.Now().Add(time.Duration(DefaultSecurityCaptureRetentionDays) * 24 * time.Hour)
 	}
 	args := []any{
 		input.SecurityEventID, normalizeSecurityCaptureReason(input.CaptureReason),
@@ -214,15 +216,16 @@ func (db *DB) InsertSecurityCapture(ctx context.Context, input *SecurityCaptureI
 		input.AccountID, strings.TrimSpace(input.AccountName), strings.TrimSpace(input.BaseURL),
 		strings.TrimSpace(input.SourceType), input.Stream, input.ToolCall, strings.TrimSpace(input.RequestID),
 		input.Body, strings.TrimSpace(input.BodyHash), input.BodyBytes, input.Truncated, expiresAt,
+		strings.TrimSpace(input.CaptureError),
 	}
 	if !db.isSQLite() {
 		var id int64
 		err := db.conn.QueryRowContext(ctx, `
 			INSERT INTO security_captures (
 				security_event_id, capture_reason, direction, endpoint, model, account_id, account_name,
-				base_url, source_type, stream, tool_call, request_id, body, body_hash, body_bytes, truncated, expires_at
+				base_url, source_type, stream, tool_call, request_id, body, body_hash, body_bytes, truncated, expires_at, capture_error
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 			RETURNING id
 		`, args...).Scan(&id)
 		return id, err
@@ -230,9 +233,9 @@ func (db *DB) InsertSecurityCapture(ctx context.Context, input *SecurityCaptureI
 	result, err := db.conn.ExecContext(ctx, `
 		INSERT INTO security_captures (
 			security_event_id, capture_reason, direction, endpoint, model, account_id, account_name,
-			base_url, source_type, stream, tool_call, request_id, body, body_hash, body_bytes, truncated, expires_at
+			base_url, source_type, stream, tool_call, request_id, body, body_hash, body_bytes, truncated, expires_at, capture_error
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 	`, args...)
 	if err != nil {
 		return 0, err
@@ -304,7 +307,7 @@ func (db *DB) ListSecurityCapturesPage(ctx context.Context, query SecurityCaptur
 	if q := strings.TrimSpace(query.Query); q != "" {
 		args = append(args, "%"+q+"%")
 		ph := sqlPlaceholder(len(args))
-		clauses = append(clauses, "(body LIKE "+ph+" OR body_hash LIKE "+ph+" OR request_id LIKE "+ph+" OR endpoint LIKE "+ph+")")
+		clauses = append(clauses, "(body LIKE "+ph+" OR body_hash LIKE "+ph+" OR request_id LIKE "+ph+" OR endpoint LIKE "+ph+" OR capture_error LIKE "+ph+")")
 	}
 	where := ""
 	if len(clauses) > 0 {
@@ -318,7 +321,7 @@ func (db *DB) ListSecurityCapturesPage(ctx context.Context, query SecurityCaptur
 	rows, err := db.conn.QueryContext(ctx, `
 		SELECT c.id, c.created_at, c.security_event_id, c.capture_reason, c.direction, c.endpoint, c.model,
 		       c.account_id, c.account_name, c.base_url, c.source_type, c.stream, c.tool_call, c.request_id,
-		       c.body, c.body_hash, c.body_bytes, c.truncated, c.expires_at,
+		       c.body, c.body_hash, c.body_bytes, c.truncated, c.expires_at, COALESCE(c.capture_error, ''),
 		       COALESCE(e.action, ''), COALESCE(e.risk_level, ''), COALESCE(e.risk_score, 0),
 		       COALESCE(e.confidence, 0), COALESCE(e.rules, '[]'), COALESCE(e.preview, ''),
 		       COALESCE(e.scanner_error, ''), COALESCE(e.false_positive_hints, '[]')
@@ -336,7 +339,7 @@ func (db *DB) ListSecurityCapturesPage(ctx context.Context, query SecurityCaptur
 		if err := rows.Scan(&item.ID, &item.CreatedAt, &item.SecurityEventID, &item.CaptureReason, &item.Direction,
 			&item.Endpoint, &item.Model, &item.AccountID, &item.AccountName, &item.BaseURL, &item.SourceType,
 			&item.Stream, &item.ToolCall, &item.RequestID, &item.Body, &item.BodyHash, &item.BodyBytes,
-			&item.Truncated, &item.ExpiresAt, &item.EventAction, &item.EventRiskLevel, &item.EventRiskScore,
+			&item.Truncated, &item.ExpiresAt, &item.CaptureError, &item.EventAction, &item.EventRiskLevel, &item.EventRiskScore,
 			&item.EventConfidence, &item.EventRules, &item.EventPreview, &item.EventScannerError,
 			&item.EventFalsePositiveHints); err != nil {
 			return nil, 0, err
@@ -443,6 +446,30 @@ func (db *DB) PruneSecurityCapturesBefore(ctx context.Context, cutoff time.Time)
 		return 0, nil
 	}
 	result, err := db.conn.ExecContext(ctx, `DELETE FROM security_captures WHERE expires_at < $1`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+func (db *DB) PruneSecurityCapturesToMaxBytes(ctx context.Context, maxBytes int64) (int64, error) {
+	if db == nil || maxBytes <= 0 {
+		return 0, nil
+	}
+	result, err := db.conn.ExecContext(ctx, `
+		DELETE FROM security_captures
+		WHERE id IN (
+			SELECT id
+			FROM (
+				SELECT id,
+				       SUM(COALESCE(body_bytes, 0)) OVER (
+				           ORDER BY id DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+				       ) AS retained_bytes
+				FROM security_captures
+			) ranked
+			WHERE retained_bytes > $1
+		)
+	`, maxBytes)
 	if err != nil {
 		return 0, err
 	}

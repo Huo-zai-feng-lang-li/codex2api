@@ -1,12 +1,13 @@
 # Changelog
 
-## Unreleased - 2026-06-01
+## v2.2.6 - 2026-07-16
 
 ### Fixes
 
 - **Blank proxy now means direct connection.** Fixed upstream calls that inherited `HTTP_PROXY`/`HTTPS_PROXY` from the process environment even when no proxy was configured in CodexProxy. This covered both normal `/v1/responses` dispatch and the admin "request `/v1/models`" flow for OpenAI Responses API accounts, preventing failures such as `proxyconnect tcp: dial tcp 127.0.0.1:51081`.
 - **Small account-pool first-token handling.** A single available account no longer triggers first-token timeout account switching; the service waits for the real upstream result instead. Multi-account pools still use first-token timeout as an internal silent failover signal.
 - **WebSocket no-account leak.** Responses WebSocket requests now stop cleanly when the downstream client disconnects or cancels after an upstream attempt, instead of retrying into an empty local pool and emitting `stream disconnected before completion: 无可用账号，请稍后重试`.
+- **Responses continuation recovery.** OpenAI Responses continuations now stay bound to the account that created the response. Relays that reject HTTP `previous_response_id`, or lose the owning connection before producing output, retry once with a bounded in-memory history snapshot instead of silently starting a fresh conversation.
 
 ### Verification
 
@@ -14,6 +15,7 @@
 - Rebuilt `codex2api.exe` and restarted the local service.
 - Verified `/health` returned `status=ok`.
 - Verified the admin `/api/admin/accounts/openai-responses/models` request returned the upstream model list without using the stale environment proxy.
+- Verified both JSON and SSE two-turn continuations against the configured relay with `store=false`.
 
 ## v2.2.4 - 2026-05-28
 

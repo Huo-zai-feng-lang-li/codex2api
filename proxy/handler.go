@@ -640,6 +640,19 @@ func classifyTransportFailure(err error) string {
 	return "transport"
 }
 
+func userFacingStreamFailureMessage(message string) string {
+	trimmed := strings.TrimSpace(message)
+	if trimmed == "" {
+		return "上游流提前结束，未收到终止事件"
+	}
+
+	lower := strings.ToLower(trimmed)
+	if strings.Contains(lower, "stream error: stream id") && strings.Contains(lower, "internal_error") {
+		return "上游 HTTP/2 流被对端重置，请重试或切换上游账号/出口"
+	}
+	return trimmed
+}
+
 func classifyHTTPFailure(statusCode int) string {
 	switch {
 	case statusCode == http.StatusUnauthorized:
@@ -688,10 +701,11 @@ func classifyStreamOutcome(ctxErr, readErr, writeErr error, gotTerminal bool) st
 		if kind == "" {
 			kind = "transport"
 		}
+		message := fmt.Sprintf("上游流读取失败: %v", readErr)
 		return streamOutcome{
 			logStatusCode:  logStatusUpstreamStreamBreak,
 			failureKind:    kind,
-			failureMessage: fmt.Sprintf("上游流读取失败: %v", readErr),
+			failureMessage: userFacingStreamFailureMessage(message),
 			penalize:       true,
 		}
 	}
@@ -1300,6 +1314,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		api.SendMissingFieldError(c, "model")
 		return
 	}
+	rawBody = h.applyResponsesRequestPromptRewrite(rawBody)
 	if h.inspectPromptFilterOpenAI(c, rawBody, "/v1/responses", model) {
 		return
 	}
@@ -1321,14 +1336,15 @@ func (h *Handler) Responses(c *gin.Context) {
 
 	// 2. 准备上游请求体（Unmarshal→map→Marshal，一次序列化）
 	codexBody, expandedInputRaw := PrepareResponsesBody(rawBody)
-	openAIResponsesBody := PrepareOpenAIResponsesBody(rawBody)
+	openAIResponsesBody := newLazyOpenAIResponsesBody(rawBody)
 	if err := validateResponsesImageGenerationSizes(codexBody); err != nil {
 		api.SendError(c, api.NewAPIError(api.ErrCodeInvalidParameter, err.Error(), api.ErrorTypeInvalidRequest))
 		return
 	}
 	effectiveModel := effectiveRequestModel(codexBody, model)
-	accountFilter := accountFilterForResponsesModel(effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
-	accountFilter = h.withModelCooldownFilter(effectiveModel, accountFilter)
+	baseAccountFilter := accountFilterForResponsesModel(effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
+	baseAccountFilter = h.withModelCooldownFilter(effectiveModel, baseAccountFilter)
+	accountFilter, continuationOwnerBound := bindOpenAIResponsesContinuationOwner(rawBody, baseAccountFilter)
 
 	// 3. 带重试的上游请求
 	maxRetries := h.getMaxRetries()
@@ -1339,6 +1355,25 @@ func (h *Handler) Responses(c *gin.Context) {
 	var lastBody []byte
 	retryExclusions := newRetryAccountExclusions()
 	invalidEncryptedContentRetried := false
+	continuationFallbackRetried := false
+	activateContinuationFallback := func(reason string) bool {
+		if continuationFallbackRetried {
+			return false
+		}
+		previousID := gjson.GetBytes(rawBody, "previous_response_id").String()
+		fallbackBody, ok := buildOpenAIResponsesContinuationFallback(rawBody)
+		if !ok {
+			return false
+		}
+		continuationFallbackRetried = true
+		continuationOwnerBound = false
+		rawBody = fallbackBody
+		codexBody, expandedInputRaw = PrepareResponsesBody(rawBody)
+		openAIResponsesBody.Reset(rawBody)
+		accountFilter = baseAccountFilter
+		log.Printf("OpenAI Responses 续链切换为本地完整历史回放: previous_response_id=%s reason=%s", previousID, reason)
+		return true
+	}
 
 	// 上游 ctx 生命周期：每次 attempt 开始前用新的 drainable ctx 替换，
 	// defer 兜底确保函数退出时上游被释放。
@@ -1363,6 +1398,9 @@ func (h *Handler) Responses(c *gin.Context) {
 		pick := h.nextRetryAccountPickForSession(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter)
 		account, stickyProxyURL := pick.account, pick.proxyURL
 		if account == nil {
+			if continuationOwnerBound && activateContinuationFallback("response_owner_unavailable") {
+				continue
+			}
 			if attemptedUpstream && c.Request.Context().Err() != nil {
 				return
 			}
@@ -1390,6 +1428,12 @@ func (h *Handler) Responses(c *gin.Context) {
 		guardFirstTokenTimeout := shouldGuardFirstTokenTimeout(pick.poolSnapshot) &&
 			retryExclusions.FirstTokenTimeoutAttempts() == 0
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
+		if continuationOwnerBound && !account.IsOpenAIResponsesAPI() &&
+			activateContinuationFallback("codex_stateless_continuation") {
+			h.store.Release(account)
+			h.store.UnbindSessionAffinity(affinityKey, account.ID())
+			continue
+		}
 		h.store.BindSessionAffinity(affinityKey, account, proxyURL)
 		useWebsocket := h.shouldUseWebsocketForHTTP() && !forceHTTPFallback
 		activeEnd = h.beginActiveProxyRequest(c, account, auth.ActiveRequestMeta{
@@ -1439,13 +1483,14 @@ func (h *Handler) Responses(c *gin.Context) {
 				Stream:           isStream,
 				StartedAt:        start,
 			})
-			audit := h.newUpstreamGuardAudit(c.Request.Context(), "/v1/responses", effectiveModel, account, openAIResponsesBody, isStream, upstreamGuardRequestID(c))
+			preparedOpenAIResponsesBody := openAIResponsesBody.Bytes()
+			audit := h.newUpstreamGuardAudit(c.Request.Context(), "/v1/responses", effectiveModel, account, preparedOpenAIResponsesBody, isStream, upstreamGuardRequestID(c))
 			defer audit.Finish()
 			if verdict := audit.InspectRequest(); writeUpstreamGuardBlock(c, verdict) {
 				h.store.Release(account)
 				return
 			}
-			resp, reqErr := ExecuteOpenAIResponsesRequest(upstreamCtx, account, openAIResponsesBody, proxyURL, downstreamHeaders)
+			resp, reqErr := ExecuteOpenAIResponsesRequest(upstreamCtx, account, preparedOpenAIResponsesBody, proxyURL, downstreamHeaders)
 			attemptedUpstream = true
 			durationMs := int(time.Since(start).Milliseconds())
 
@@ -1458,6 +1503,11 @@ func (h *Handler) Responses(c *gin.Context) {
 				}
 				if timedOut {
 					reqErr = firstTokenTimeoutError(firstTokenTimeout)
+				}
+				if continuationOwnerBound && activateContinuationFallback("response_owner_transport_failure") {
+					h.store.Release(account)
+					h.store.UnbindSessionAffinity(affinityKey, account.ID())
+					continue
 				}
 				if IsNoAvailableAccountError(reqErr) {
 					h.store.Release(account)
@@ -1509,6 +1559,13 @@ func (h *Handler) Responses(c *gin.Context) {
 				ttftGuard.Stop()
 				errBody, _ := readUpstreamErrorBody(resp)
 				resp.Body.Close()
+				continuationFallbackActivated := shouldReplayOpenAIResponsesContinuationAfterHTTPFailure(resp.StatusCode, preparedOpenAIResponsesBody, errBody) &&
+					activateContinuationFallback("response_owner_http_failure")
+				if continuationFallbackActivated {
+					h.store.Release(account)
+					h.store.UnbindSessionAffinity(affinityKey, account.ID())
+					continue
+				}
 
 				if !invalidEncryptedContentRetried && isInvalidEncryptedContentError(resp.StatusCode, errBody) {
 					strippedRawBody, rawChanged := stripInvalidEncryptedContentFromResponsesBody(rawBody)
@@ -1517,7 +1574,7 @@ func (h *Handler) Responses(c *gin.Context) {
 						invalidEncryptedContentRetried = true
 						if rawChanged {
 							rawBody = strippedRawBody
-							openAIResponsesBody = PrepareOpenAIResponsesBody(rawBody)
+							openAIResponsesBody.Reset(rawBody)
 						}
 						if codexChanged {
 							codexBody = strippedCodexBody
@@ -1633,6 +1690,7 @@ func (h *Handler) Responses(c *gin.Context) {
 						deltaCharCount += len(parsed.Get("delta").String())
 					}
 					if eventType == "response.completed" {
+						cacheOpenAIResponsesContinuation(preparedOpenAIResponsesBody, data, account)
 						usage = extractUsageFromResult(parsed.Get("response.usage"))
 						if tier := parsed.Get("response.service_tier").String(); tier != "" {
 							actualServiceTier = tier
@@ -1691,6 +1749,8 @@ func (h *Handler) Responses(c *gin.Context) {
 						h.store.Release(account)
 						return
 					}
+					cacheOpenAIResponsesContinuation(preparedOpenAIResponsesBody, respBody, account)
+					respBody = h.rewriteResponsesBodyForDownstream(respBody)
 					c.Data(http.StatusOK, contentType, respBody)
 				}
 			}
@@ -1712,6 +1772,12 @@ func (h *Handler) Responses(c *gin.Context) {
 			}
 			if shouldTransparentRetryStream(outcome, attempt, maxRetries, wroteAnyBody, c.Request.Context().Err(), writeErr) {
 				recyclePooledClient(account, proxyURL)
+				if continuationOwnerBound && activateContinuationFallback("response_owner_stream_failure") {
+					resp.Body.Close()
+					h.store.Release(account)
+					h.store.UnbindSessionAffinity(affinityKey, account.ID())
+					continue
+				}
 				transparentRetryAllowed := true
 				if isFirstTokenTimeoutOutcome(outcome) {
 					if !retryExclusions.MarkSoftFirstTokenTimeout(account.ID()) {
@@ -1898,7 +1964,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					invalidEncryptedContentRetried = true
 					if rawChanged {
 						rawBody = strippedRawBody
-						openAIResponsesBody = PrepareOpenAIResponsesBody(rawBody)
+						openAIResponsesBody.Reset(rawBody)
 					}
 					if codexChanged {
 						codexBody = strippedCodexBody
@@ -2038,6 +2104,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					}
 					// 缓存响应上下文，供后续 previous_response_id 展开使用
 					cacheCompletedResponse([]byte(expandedInputRaw), data)
+					cacheOpenAIResponsesContinuation(rawBody, data, account)
 					gotTerminal = true
 				}
 				if eventType == "response.failed" {
@@ -2112,6 +2179,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					}
 					// 缓存响应上下文，供后续 previous_response_id 展开使用
 					cacheCompletedResponse([]byte(expandedInputRaw), data)
+					cacheOpenAIResponsesContinuation(rawBody, data, account)
 					gotTerminal = true
 					lastResponseData = data
 					return false
@@ -2306,6 +2374,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		sendImageOnlyModelError(c, model)
 		return
 	}
+	rawBody = h.applyResponsesRequestPromptRewrite(rawBody)
 	if h.inspectPromptFilterOpenAI(c, rawBody, "/v1/responses/compact", model) {
 		return
 	}
@@ -2329,7 +2398,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 
 	// 准备上游请求体
 	codexBody, _ := PrepareCompactResponsesBody(rawBody)
-	openAIResponsesBody := PrepareOpenAIResponsesBody(rawBody)
+	openAIResponsesBody := newLazyOpenAIResponsesBody(rawBody)
 	if err := validateResponsesImageGenerationSizes(codexBody); err != nil {
 		api.SendError(c, api.NewAPIError(api.ErrCodeInvalidParameter, err.Error(), api.ErrorTypeInvalidRequest))
 		return
@@ -2400,13 +2469,14 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		downstreamHeaders := c.Request.Header.Clone()
 
 		if account.IsOpenAIResponsesAPI() {
-			audit := h.newUpstreamGuardAudit(c.Request.Context(), "/v1/responses/compact", effectiveModel, account, openAIResponsesBody, false, upstreamGuardRequestID(c))
+			preparedOpenAIResponsesBody := openAIResponsesBody.Bytes()
+			audit := h.newUpstreamGuardAudit(c.Request.Context(), "/v1/responses/compact", effectiveModel, account, preparedOpenAIResponsesBody, false, upstreamGuardRequestID(c))
 			defer audit.Finish()
 			if verdict := audit.InspectRequest(); writeUpstreamGuardBlock(c, verdict) {
 				h.store.Release(account)
 				return
 			}
-			resp, reqErr := ExecuteOpenAIResponsesRequest(c.Request.Context(), account, openAIResponsesBody, proxyURL, downstreamHeaders)
+			resp, reqErr := ExecuteOpenAIResponsesRequest(c.Request.Context(), account, preparedOpenAIResponsesBody, proxyURL, downstreamHeaders)
 			durationMs := int(time.Since(start).Milliseconds())
 
 			if reqErr != nil {
@@ -2436,15 +2506,15 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 
 				if !invalidEncryptedContentRetried && isInvalidEncryptedContentError(resp.StatusCode, errBody) {
 					strippedRawBody, rawChanged := stripInvalidEncryptedContentFromResponsesBody(rawBody)
-					strippedOpenAIResponsesBody, openAIChanged := stripInvalidEncryptedContentFromResponsesBody(openAIResponsesBody)
+					strippedOpenAIResponsesBody, openAIChanged := stripInvalidEncryptedContentFromResponsesBody(preparedOpenAIResponsesBody)
 					strippedCodexBody, codexChanged := stripInvalidEncryptedContentFromResponsesBody(codexBody)
 					if rawChanged || openAIChanged || codexChanged {
 						invalidEncryptedContentRetried = true
 						if rawChanged {
 							rawBody = strippedRawBody
-							openAIResponsesBody = PrepareOpenAIResponsesBody(rawBody)
+							openAIResponsesBody.Reset(rawBody)
 						} else if openAIChanged {
-							openAIResponsesBody = strippedOpenAIResponsesBody
+							openAIResponsesBody.SetPrepared(strippedOpenAIResponsesBody)
 						}
 						if codexChanged {
 							codexBody = strippedCodexBody
@@ -2540,6 +2610,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 
 			h.store.Release(account)
 			c.Set("x-service-tier", resolvedServiceTier)
+			respBody = h.rewriteResponsesBodyForDownstream(respBody)
 			c.Data(http.StatusOK, "application/json", respBody)
 			return
 		}
@@ -2679,6 +2750,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		})
 
 		h.store.Release(account)
+		respBody = h.rewriteResponsesBodyForDownstream(respBody)
 		c.Data(http.StatusOK, "application/json", respBody)
 		return
 	}
@@ -2726,6 +2798,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		})
 		return
 	}
+	rawBody = h.applyChatRequestPromptRewrite(rawBody)
 	if h.inspectPromptFilterOpenAI(c, rawBody, "/v1/chat/completions", model) {
 		return
 	}
@@ -3161,6 +3234,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 					h.store.Release(account)
 					return
 				}
+				compactResult = h.rewriteChatBodyForDownstream(compactResult)
 				c.Data(http.StatusOK, "application/json", compactResult)
 			} else {
 				c.JSON(http.StatusBadGateway, gin.H{

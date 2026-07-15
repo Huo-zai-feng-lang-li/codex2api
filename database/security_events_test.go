@@ -165,6 +165,200 @@ func TestSecurityCapturesPersistFullRawBodies(t *testing.T) {
 	}
 }
 
+func TestDefaultSystemSettingsDisableGuardAndUseHitRawOneDayRetention(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) returned error: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.UpdateSystemSettings(ctx, DefaultSystemSettings()); err != nil {
+		t.Fatalf("UpdateSystemSettings returned error: %v", err)
+	}
+	settings, err := db.GetSystemSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSystemSettings returned error: %v", err)
+	}
+	if settings == nil {
+		t.Fatal("settings is nil")
+	}
+	if settings.SecurityAuditEnabled {
+		t.Fatal("SecurityAuditEnabled = true, want default false")
+	}
+	if settings.UpstreamGuardMode != DefaultUpstreamGuardMode {
+		t.Fatalf("UpstreamGuardMode = %q, want %q", settings.UpstreamGuardMode, DefaultUpstreamGuardMode)
+	}
+	if settings.SecurityCaptureMode != DefaultSecurityCaptureMode {
+		t.Fatalf("SecurityCaptureMode = %q, want %q", settings.SecurityCaptureMode, DefaultSecurityCaptureMode)
+	}
+	if settings.SecurityCaptureRetentionDays != 1 {
+		t.Fatalf("SecurityCaptureRetentionDays = %d, want 1", settings.SecurityCaptureRetentionDays)
+	}
+	if settings.SecurityCaptureMaxBodyBytes != DefaultSecurityCaptureMaxBodyBytes {
+		t.Fatalf("SecurityCaptureMaxBodyBytes = %d, want %d", settings.SecurityCaptureMaxBodyBytes, DefaultSecurityCaptureMaxBodyBytes)
+	}
+}
+
+func TestInsertSecurityCaptureDefaultsToOneDayExpiry(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) returned error: %v", err)
+	}
+	defer db.Close()
+
+	before := time.Now()
+	if _, err := db.InsertSecurityCapture(ctx, &SecurityCaptureInput{
+		CaptureReason: SecurityCaptureReasonFull,
+		Direction:     "response",
+		RequestID:     "default-expiry",
+		Body:          "default-expiry",
+		BodyHash:      "default-expiry-hash",
+		BodyBytes:     len("default-expiry"),
+	}); err != nil {
+		t.Fatalf("InsertSecurityCapture returned error: %v", err)
+	}
+
+	captures, err := db.ListSecurityCaptures(ctx, SecurityCaptureQuery{RequestID: "default-expiry"})
+	if err != nil {
+		t.Fatalf("ListSecurityCaptures returned error: %v", err)
+	}
+	if len(captures) != 1 {
+		t.Fatalf("captures len = %d, want 1", len(captures))
+	}
+	remaining := captures[0].ExpiresAt.Sub(before)
+	if remaining < 23*time.Hour || remaining > 25*time.Hour {
+		t.Fatalf("default expiry remaining = %s, want about 1 day", remaining)
+	}
+}
+
+func TestUpgradeLegacySecurityCaptureDefaultsOnlyChangesOldDefaultTuple(t *testing.T) {
+	settings := &SystemSettings{
+		SecurityCaptureMode:          "hit_raw",
+		SecurityCaptureRetentionDays: 7,
+		SecurityCaptureMaxBodyBytes:  1024 * 1024,
+	}
+
+	if !UpgradeLegacySecurityCaptureDefaults(settings) {
+		t.Fatal("UpgradeLegacySecurityCaptureDefaults returned false, want true")
+	}
+	if settings.SecurityCaptureMode != DefaultSecurityCaptureMode ||
+		settings.SecurityCaptureRetentionDays != DefaultSecurityCaptureRetentionDays ||
+		settings.SecurityCaptureMaxBodyBytes != DefaultSecurityCaptureMaxBodyBytes {
+		t.Fatalf("settings = %+v, want new capture defaults", settings)
+	}
+
+	custom := &SystemSettings{
+		SecurityCaptureMode:          "hit_raw",
+		SecurityCaptureRetentionDays: 3,
+		SecurityCaptureMaxBodyBytes:  1024 * 1024,
+	}
+	if UpgradeLegacySecurityCaptureDefaults(custom) {
+		t.Fatal("custom retention tuple was upgraded, want unchanged")
+	}
+	if custom.SecurityCaptureRetentionDays != 3 {
+		t.Fatalf("custom retention changed to %d", custom.SecurityCaptureRetentionDays)
+	}
+}
+
+func TestPruneSecurityCapturesBeforeRemovesExpiredRows(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) returned error: %v", err)
+	}
+	defer db.Close()
+
+	for _, item := range []struct {
+		requestID string
+		expiresAt time.Time
+	}{
+		{requestID: "expired-capture", expiresAt: time.Now().Add(-time.Hour)},
+		{requestID: "fresh-capture", expiresAt: time.Now().Add(time.Hour)},
+	} {
+		if _, err := db.InsertSecurityCapture(ctx, &SecurityCaptureInput{
+			CaptureReason: SecurityCaptureReasonFull,
+			Direction:     "response",
+			RequestID:     item.requestID,
+			Body:          item.requestID,
+			BodyHash:      item.requestID + "-hash",
+			BodyBytes:     len(item.requestID),
+			ExpiresAt:     item.expiresAt,
+		}); err != nil {
+			t.Fatalf("InsertSecurityCapture(%s) returned error: %v", item.requestID, err)
+		}
+	}
+
+	removed, err := db.PruneSecurityCapturesBefore(ctx, time.Now())
+	if err != nil {
+		t.Fatalf("PruneSecurityCapturesBefore returned error: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	captures, err := db.ListSecurityCaptures(ctx, SecurityCaptureQuery{Page: 1, PageSize: 10})
+	if err != nil {
+		t.Fatalf("ListSecurityCaptures returned error: %v", err)
+	}
+	if len(captures) != 1 || captures[0].RequestID != "fresh-capture" {
+		t.Fatalf("captures = %+v, want only fresh-capture", captures)
+	}
+}
+
+func TestPruneSecurityCapturesToMaxBytesRemovesOldestRows(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) returned error: %v", err)
+	}
+	defer db.Close()
+
+	for _, item := range []struct {
+		requestID string
+		bodyBytes int
+	}{
+		{requestID: "old-capture", bodyBytes: 50},
+		{requestID: "middle-capture", bodyBytes: 40},
+		{requestID: "new-capture", bodyBytes: 30},
+	} {
+		if _, err := db.InsertSecurityCapture(ctx, &SecurityCaptureInput{
+			CaptureReason: SecurityCaptureReasonFull,
+			Direction:     "response",
+			RequestID:     item.requestID,
+			Body:          item.requestID,
+			BodyHash:      item.requestID + "-hash",
+			BodyBytes:     item.bodyBytes,
+			ExpiresAt:     time.Now().Add(time.Hour),
+		}); err != nil {
+			t.Fatalf("InsertSecurityCapture(%s) returned error: %v", item.requestID, err)
+		}
+	}
+
+	removed, err := db.PruneSecurityCapturesToMaxBytes(ctx, 70)
+	if err != nil {
+		t.Fatalf("PruneSecurityCapturesToMaxBytes returned error: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	captures, err := db.ListSecurityCaptures(ctx, SecurityCaptureQuery{Page: 1, PageSize: 10})
+	if err != nil {
+		t.Fatalf("ListSecurityCaptures returned error: %v", err)
+	}
+	got := make([]string, 0, len(captures))
+	for _, capture := range captures {
+		got = append(got, capture.RequestID)
+	}
+	if strings.Join(got, ",") != "new-capture,middle-capture" {
+		t.Fatalf("remaining captures = %v, want newest captures under cap", got)
+	}
+}
+
 func TestSecurityCapturesFullRawCanStoreAuditWithoutEvent(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")

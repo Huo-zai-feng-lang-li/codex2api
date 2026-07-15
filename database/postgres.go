@@ -145,11 +145,16 @@ const (
 	UsageLogModeErrors = "errors"
 	UsageLogModeOff    = "off"
 
-	DefaultUpstreamGuardMode            = "warn"
-	DefaultSecurityEventRetentionDays   = 30
-	DefaultSecurityCaptureMode          = "hit_raw"
-	DefaultSecurityCaptureRetentionDays = 7
-	DefaultSecurityCaptureMaxBodyBytes  = 1024 * 1024
+	DefaultUpstreamGuardMode               = "off"
+	DefaultSecurityAuditEnabled            = false
+	DefaultSecurityEventRetentionDays      = 30
+	DefaultSecurityCaptureMode             = "hit_raw"
+	DefaultSecurityCaptureRetentionDays    = 1
+	DefaultSecurityCaptureMaxBodyBytes     = 1024 * 1024
+	DefaultProxyRequestSystemPromptEnabled = false
+	DefaultProxyRequestSystemPrompt        = ""
+	DefaultProxyResponseRewriteEnabled     = false
+	DefaultProxyResponseRewritePrompt      = ""
 
 	defaultUsageLogMode                 = UsageLogModeFull
 	defaultUsageLogBatchSize            = 200
@@ -161,6 +166,10 @@ const (
 	maxSecurityEventRetentionDays       = 3650
 	maxSecurityCaptureRetentionDays     = 365
 	maxSecurityCaptureMaxBodyBytes      = 64 * 1024 * 1024
+
+	legacyDefaultSecurityCaptureMode          = "hit_raw"
+	legacyDefaultSecurityCaptureRetentionDays = 7
+	legacyDefaultSecurityCaptureMaxBodyBytes  = 1024 * 1024
 )
 
 var ErrDuplicateAccountCredential = errors.New("duplicate account credential")
@@ -200,10 +209,10 @@ func NormalizeUsageLogFlushIntervalSeconds(n int) int {
 
 func NormalizeUpstreamGuardMode(mode string) string {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "off":
-		return "off"
 	case "", DefaultUpstreamGuardMode:
 		return DefaultUpstreamGuardMode
+	case "warn":
+		return "warn"
 	case "high_block":
 		return "high_block"
 	case "strict":
@@ -252,6 +261,70 @@ func NormalizeSecurityCaptureMaxBodyBytes(bytes int) int {
 		return maxSecurityCaptureMaxBodyBytes
 	}
 	return bytes
+}
+
+func DefaultSystemSettings() *SystemSettings {
+	return &SystemSettings{
+		SiteName:                         DefaultSiteName,
+		MaxConcurrency:                   2,
+		GlobalRPM:                        0,
+		TestModel:                        "gpt-5.4",
+		TestConcurrency:                  50,
+		ProxyURL:                         "",
+		PgMaxConns:                       50,
+		RedisPoolSize:                    30,
+		MaxRetries:                       2,
+		MaxRateLimitRetries:              1,
+		BackgroundRefreshIntervalMinutes: 2,
+		UsageProbeMaxAgeMinutes:          10,
+		UsageProbeConcurrency:            16,
+		RecoveryProbeIntervalMinutes:     30,
+		SchedulerMode:                    "round_robin",
+		AffinityMode:                     "bounded",
+		PromptFilterMode:                 "monitor",
+		PromptFilterThreshold:            50,
+		PromptFilterStrictThreshold:      90,
+		PromptFilterLogMatches:           true,
+		PromptFilterMaxTextLength:        81920,
+		PromptFilterCustomPatterns:       "[]",
+		PromptFilterDisabledPatterns:     "[]",
+		ClientCompatMode:                 "preserve",
+		CodexMinCLIVersion:               "0.118.0",
+		UsageLogMode:                     UsageLogModeFull,
+		UsageLogBatchSize:                defaultUsageLogBatchSize,
+		UsageLogFlushIntervalSeconds:     defaultUsageLogFlushIntervalSeconds,
+		StreamFlushPolicy:                "immediate",
+		StreamFlushIntervalMS:            20,
+		FirstTokenTimeoutSeconds:         15,
+		ImageStorageConfig:               "{}",
+		BackgroundConfig:                 "{}",
+		SecurityAuditEnabled:             DefaultSecurityAuditEnabled,
+		UpstreamGuardMode:                DefaultUpstreamGuardMode,
+		UpstreamGuardSuppressions:        "[]",
+		SecurityEventRetentionDays:       DefaultSecurityEventRetentionDays,
+		SecurityCaptureMode:              DefaultSecurityCaptureMode,
+		SecurityCaptureRetentionDays:     DefaultSecurityCaptureRetentionDays,
+		SecurityCaptureMaxBodyBytes:      DefaultSecurityCaptureMaxBodyBytes,
+		ProxyRequestSystemPromptEnabled:  DefaultProxyRequestSystemPromptEnabled,
+		ProxyRequestSystemPrompt:         DefaultProxyRequestSystemPrompt,
+		ProxyResponseRewriteEnabled:      DefaultProxyResponseRewriteEnabled,
+		ProxyResponseRewritePrompt:       DefaultProxyResponseRewritePrompt,
+	}
+}
+
+func UpgradeLegacySecurityCaptureDefaults(s *SystemSettings) bool {
+	if s == nil {
+		return false
+	}
+	if strings.ToLower(strings.TrimSpace(s.SecurityCaptureMode)) != legacyDefaultSecurityCaptureMode ||
+		s.SecurityCaptureRetentionDays != legacyDefaultSecurityCaptureRetentionDays ||
+		s.SecurityCaptureMaxBodyBytes != legacyDefaultSecurityCaptureMaxBodyBytes {
+		return false
+	}
+	s.SecurityCaptureMode = DefaultSecurityCaptureMode
+	s.SecurityCaptureRetentionDays = DefaultSecurityCaptureRetentionDays
+	s.SecurityCaptureMaxBodyBytes = DefaultSecurityCaptureMaxBodyBytes
+	return true
 }
 
 // usageLogEntry 日志缓冲条目
@@ -769,12 +842,17 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS dispatch_queue_limit INT DEFAULT 0;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS image_storage_config TEXT DEFAULT '{}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS show_full_usage_numbers BOOLEAN DEFAULT FALSE;
-	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS upstream_guard_mode VARCHAR(20) DEFAULT 'warn';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS security_audit_enabled BOOLEAN DEFAULT FALSE;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS upstream_guard_mode VARCHAR(20) DEFAULT 'off';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS upstream_guard_suppressions TEXT DEFAULT '[]';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS security_event_retention_days INT DEFAULT 30;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS security_capture_mode VARCHAR(20) DEFAULT 'hit_raw';
-	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS security_capture_retention_days INT DEFAULT 7;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS security_capture_retention_days INT DEFAULT 1;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS security_capture_max_body_bytes INT DEFAULT 1048576;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS proxy_request_system_prompt_enabled BOOLEAN DEFAULT FALSE;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS proxy_request_system_prompt TEXT DEFAULT '';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS proxy_response_rewrite_enabled BOOLEAN DEFAULT FALSE;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS proxy_response_rewrite_prompt TEXT DEFAULT '';
 
 			CREATE TABLE IF NOT EXISTS prompt_filter_logs (
 				id               SERIAL PRIMARY KEY,
@@ -844,8 +922,10 @@ func (db *DB) migrate(ctx context.Context) error {
 				body_hash            VARCHAR(128) DEFAULT '',
 				body_bytes           INT DEFAULT 0,
 				truncated            BOOLEAN DEFAULT FALSE,
-				expires_at           TIMESTAMPTZ NULL
+				expires_at           TIMESTAMPTZ NULL,
+				capture_error        TEXT DEFAULT ''
 			);
+			ALTER TABLE security_captures ADD COLUMN IF NOT EXISTS capture_error TEXT DEFAULT '';
 			CREATE INDEX IF NOT EXISTS idx_security_captures_event_id ON security_captures(security_event_id);
 			CREATE INDEX IF NOT EXISTS idx_security_captures_request_id ON security_captures(request_id);
 			CREATE INDEX IF NOT EXISTS idx_security_captures_expires_at ON security_captures(expires_at);
@@ -1368,12 +1448,17 @@ type SystemSettings struct {
 	DispatchQueueLimit               int
 	ImageStorageConfig               string // JSON: {"backend":"s3","endpoint":"...","region":"...","bucket":"...","access_key":"...","secret_key":"...","prefix":"...","force_path_style":false}
 	ShowFullUsageNumbers             bool
+	SecurityAuditEnabled             bool
 	UpstreamGuardMode                string
 	UpstreamGuardSuppressions        string
 	SecurityEventRetentionDays       int
 	SecurityCaptureMode              string
 	SecurityCaptureRetentionDays     int
 	SecurityCaptureMaxBodyBytes      int
+	ProxyRequestSystemPromptEnabled  bool
+	ProxyRequestSystemPrompt         string
+	ProxyResponseRewriteEnabled      bool
+	ProxyResponseRewritePrompt       string
 }
 
 // GetSystemSettings 加载全局设置
@@ -1421,12 +1506,17 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       COALESCE(image_storage_config, '{}'),
 		       COALESCE(background_config, '{}'),
 	       COALESCE(show_full_usage_numbers, false),
-	       COALESCE(upstream_guard_mode, 'warn'),
+	       COALESCE(security_audit_enabled, false),
+	       COALESCE(upstream_guard_mode, 'off'),
 	       COALESCE(upstream_guard_suppressions, '[]'),
 	       COALESCE(security_event_retention_days, 30),
 	       COALESCE(security_capture_mode, 'hit_raw'),
-	       COALESCE(security_capture_retention_days, 7),
-	       COALESCE(security_capture_max_body_bytes, 1048576)
+	       COALESCE(security_capture_retention_days, 1),
+	       COALESCE(security_capture_max_body_bytes, 1048576),
+	       COALESCE(proxy_request_system_prompt_enabled, false),
+	       COALESCE(proxy_request_system_prompt, ''),
+	       COALESCE(proxy_response_rewrite_enabled, false),
+	       COALESCE(proxy_response_rewrite_prompt, '')
 		FROM system_settings WHERE id = 1
 	`).Scan(
 		&s.SiteName, &s.SiteLogo,
@@ -1448,12 +1538,17 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.ImageStorageConfig,
 		&s.BackgroundConfig,
 		&s.ShowFullUsageNumbers,
+		&s.SecurityAuditEnabled,
 		&s.UpstreamGuardMode,
 		&s.UpstreamGuardSuppressions,
 		&s.SecurityEventRetentionDays,
 		&s.SecurityCaptureMode,
 		&s.SecurityCaptureRetentionDays,
 		&s.SecurityCaptureMaxBodyBytes,
+		&s.ProxyRequestSystemPromptEnabled,
+		&s.ProxyRequestSystemPrompt,
+		&s.ProxyResponseRewriteEnabled,
+		&s.ProxyResponseRewritePrompt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -1471,6 +1566,8 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 	s.SecurityCaptureMode = NormalizeSecurityCaptureMode(s.SecurityCaptureMode)
 	s.SecurityCaptureRetentionDays = NormalizeSecurityCaptureRetentionDays(s.SecurityCaptureRetentionDays)
 	s.SecurityCaptureMaxBodyBytes = NormalizeSecurityCaptureMaxBodyBytes(s.SecurityCaptureMaxBodyBytes)
+	s.ProxyRequestSystemPrompt = strings.TrimSpace(s.ProxyRequestSystemPrompt)
+	s.ProxyResponseRewritePrompt = strings.TrimSpace(s.ProxyResponseRewritePrompt)
 	return s, err
 }
 
@@ -1566,16 +1663,23 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 	}
 	_, err = db.conn.ExecContext(ctx, `
 		UPDATE system_settings
-		SET upstream_guard_mode = $1,
-		    upstream_guard_suppressions = $2,
-		    security_event_retention_days = $3,
-		    security_capture_mode = $4,
-		    security_capture_retention_days = $5,
-		    security_capture_max_body_bytes = $6
+		SET security_audit_enabled = $1,
+		    upstream_guard_mode = $2,
+		    upstream_guard_suppressions = $3,
+		    security_event_retention_days = $4,
+		    security_capture_mode = $5,
+		    security_capture_retention_days = $6,
+		    security_capture_max_body_bytes = $7,
+		    proxy_request_system_prompt_enabled = $8,
+		    proxy_request_system_prompt = $9,
+		    proxy_response_rewrite_enabled = $10,
+		    proxy_response_rewrite_prompt = $11
 		WHERE id = 1
-	`, NormalizeUpstreamGuardMode(s.UpstreamGuardMode), strings.TrimSpace(s.UpstreamGuardSuppressions),
+	`, s.SecurityAuditEnabled, NormalizeUpstreamGuardMode(s.UpstreamGuardMode), strings.TrimSpace(s.UpstreamGuardSuppressions),
 		NormalizeSecurityEventRetentionDays(s.SecurityEventRetentionDays), NormalizeSecurityCaptureMode(s.SecurityCaptureMode),
-		NormalizeSecurityCaptureRetentionDays(s.SecurityCaptureRetentionDays), NormalizeSecurityCaptureMaxBodyBytes(s.SecurityCaptureMaxBodyBytes))
+		NormalizeSecurityCaptureRetentionDays(s.SecurityCaptureRetentionDays), NormalizeSecurityCaptureMaxBodyBytes(s.SecurityCaptureMaxBodyBytes),
+		s.ProxyRequestSystemPromptEnabled, strings.TrimSpace(s.ProxyRequestSystemPrompt),
+		s.ProxyResponseRewriteEnabled, strings.TrimSpace(s.ProxyResponseRewritePrompt))
 	return err
 }
 

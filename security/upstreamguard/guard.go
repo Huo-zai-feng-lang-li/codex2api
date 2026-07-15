@@ -23,6 +23,11 @@ var (
 	dbURLPattern              = regexp.MustCompile(`(?i)\b(?:postgres|postgresql|mysql|mongodb|redis)://[^:\s/@]+:[^@\s]+@[^)\s'"<>]+`)
 	envLinePattern            = regexp.MustCompile(`(?m)^[A-Z][A-Z0-9_]{2,64}\s*=\s*\S+`)
 	jsonPathIdentifierPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	scriptBehaviorPatterns    = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)\b(?:curl|wget)\b[^\r\n|]{0,240}\|\s*(?:sh|bash|zsh)\b`),
+		regexp.MustCompile(`(?i)\b(?:powershell|pwsh)(?:\.exe)?\b[^\r\n]{0,240}-(?:enc|encodedcommand)\b`),
+		regexp.MustCompile(`(?i)\b(?:certutil|bitsadmin)\b[^\r\n]{0,240}\b(?:urlcache|transfer|https?://)\b`),
+	}
 )
 
 func InspectRequest(body []byte, ctx ScanContext, cfg Config) Verdict {
@@ -131,7 +136,7 @@ func normalizeConfig(cfg Config) Config {
 	switch cfg.CaptureMode {
 	case CaptureModeOff, CaptureModeHitRaw, CaptureModeFullRaw:
 	default:
-		cfg.CaptureMode = CaptureModeHitRaw
+		cfg.CaptureMode = defaults.CaptureMode
 	}
 	if cfg.CaptureRetentionDays <= 0 {
 		cfg.CaptureRetentionDays = defaults.CaptureRetentionDays
@@ -195,6 +200,9 @@ func matchResponseRules(verdict *Verdict, text string, cfg Config) {
 	}
 	if hasInjectionIntent(lower) && !hasHint(verdict.FalsePositiveHints, HintSecurityAnalysis) {
 		addRule(verdict, RuleResponseInjection, "response combines unsafe instruction, sensitive target, and concealment/bypass intent", 92, 88, evidenceForInjection(text))
+	}
+	if match := scriptBehaviorMatch(text); match != "" && !shouldSkipScriptBehavior(verdict) {
+		addRule(verdict, RuleScriptBehavior, "response contains suspicious script download or execution behavior", 88, 86, evidenceForMatch(text, match))
 	}
 	if field := unknownResponseField(lower); field != "" {
 		addRule(verdict, RuleUnknownField, "response contains non-standard top-level fields", 25, 60, evidenceForMatch(text, field))
@@ -416,6 +424,19 @@ func hasToolCall(lower string) bool {
 	return strings.Contains(lower, `"tool_calls"`) ||
 		strings.Contains(lower, `"function_call"`) ||
 		(strings.Contains(lower, `"type"`) && strings.Contains(lower, `"function_call"`))
+}
+
+func scriptBehaviorMatch(text string) string {
+	for _, pattern := range scriptBehaviorPatterns {
+		if match := pattern.FindString(text); match != "" {
+			return match
+		}
+	}
+	return ""
+}
+
+func shouldSkipScriptBehavior(verdict *Verdict) bool {
+	return hasHint(verdict.FalsePositiveHints, HintDocumentation) || hasHint(verdict.FalsePositiveHints, HintSecurityAnalysis)
 }
 
 func unknownResponseField(lower string) string {

@@ -148,12 +148,17 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 				show_full_usage_numbers INTEGER DEFAULT 0,
 				scheduler_mode TEXT DEFAULT 'round_robin',
 				affinity_mode TEXT DEFAULT 'bounded',
-				upstream_guard_mode TEXT DEFAULT 'warn',
+				security_audit_enabled INTEGER DEFAULT 0,
+				upstream_guard_mode TEXT DEFAULT 'off',
 				upstream_guard_suppressions TEXT DEFAULT '[]',
 				security_event_retention_days INTEGER DEFAULT 30,
 				security_capture_mode TEXT DEFAULT 'hit_raw',
-				security_capture_retention_days INTEGER DEFAULT 7,
-				security_capture_max_body_bytes INTEGER DEFAULT 1048576
+				security_capture_retention_days INTEGER DEFAULT 1,
+				security_capture_max_body_bytes INTEGER DEFAULT 1048576,
+				proxy_request_system_prompt_enabled INTEGER DEFAULT 0,
+				proxy_request_system_prompt TEXT DEFAULT '',
+				proxy_response_rewrite_enabled INTEGER DEFAULT 0,
+				proxy_response_rewrite_prompt TEXT DEFAULT ''
 			);`,
 		`CREATE TABLE IF NOT EXISTS model_registry (
 			id TEXT PRIMARY KEY,
@@ -296,7 +301,8 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 			body_hash TEXT DEFAULT '',
 			body_bytes INTEGER DEFAULT 0,
 			truncated INTEGER DEFAULT 0,
-			expires_at TIMESTAMP NULL
+			expires_at TIMESTAMP NULL,
+			capture_error TEXT DEFAULT ''
 		);`,
 	}
 	for _, stmt := range statements {
@@ -398,12 +404,18 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "show_full_usage_numbers", "INTEGER DEFAULT 0"},
 		{"system_settings", "scheduler_mode", "TEXT DEFAULT 'round_robin'"},
 		{"system_settings", "affinity_mode", "TEXT DEFAULT 'bounded'"},
-		{"system_settings", "upstream_guard_mode", "TEXT DEFAULT 'warn'"},
+		{"system_settings", "security_audit_enabled", "INTEGER DEFAULT 0"},
+		{"system_settings", "upstream_guard_mode", "TEXT DEFAULT 'off'"},
 		{"system_settings", "upstream_guard_suppressions", "TEXT DEFAULT '[]'"},
 		{"system_settings", "security_event_retention_days", "INTEGER DEFAULT 30"},
 		{"system_settings", "security_capture_mode", "TEXT DEFAULT 'hit_raw'"},
-		{"system_settings", "security_capture_retention_days", "INTEGER DEFAULT 7"},
+		{"system_settings", "security_capture_retention_days", "INTEGER DEFAULT 1"},
 		{"system_settings", "security_capture_max_body_bytes", "INTEGER DEFAULT 1048576"},
+		{"system_settings", "proxy_request_system_prompt_enabled", "INTEGER DEFAULT 0"},
+		{"system_settings", "proxy_request_system_prompt", "TEXT DEFAULT ''"},
+		{"system_settings", "proxy_response_rewrite_enabled", "INTEGER DEFAULT 0"},
+		{"system_settings", "proxy_response_rewrite_prompt", "TEXT DEFAULT ''"},
+		{"security_captures", "capture_error", "TEXT DEFAULT ''"},
 		{"accounts", "enabled", "INTEGER DEFAULT 1"},
 		{"accounts", "locked", "INTEGER DEFAULT 0"},
 		{"accounts", "credit_enabled", "INTEGER DEFAULT 0"},

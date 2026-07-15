@@ -658,48 +658,28 @@ func ValidateInput() ValidationRule {
 			}
 		}
 
-		validTypes := map[string]bool{
-			"message":                 true,
-			"reasoning":               true,
-			"function_call":           true,
-			"function_call_output":    true,
-			"tool_call":               true,
-			"local_shell_call":        true,
-			"local_shell_call_output": true,
-			"tool_search_call":        true,
-			"tool_search_output":      true,
-			"custom_tool_call":        true,
-			"custom_tool_call_output": true,
-			"mcp_tool_call":           true,
-			"mcp_tool_call_output":    true,
-			"item_reference":          true,
-			"image_generation_call":   true,
-			"web_search_call":         true,
-			"compaction":              true,
-			"input_text":              true,
-			"input_image":             true,
-			"output_text":             true,
-			"refusal":                 true,
-			"input_file":              true,
-			"computer_screenshot":     true,
-			"summary_text":            true,
-			"file":                    true,
-			"image":                   true,
-		}
-
 		for i := 0; i < int(value.Get("#").Int()); i++ {
-			itemType := value.Get(fmt.Sprintf("%d.type", i)).String()
-			// If no explicit type is provided, accept the item. This allows
-			// message-style inputs (e.g., {role, content}) and other variants
-			// that are handled elsewhere in the codebase without requiring
-			// clients to set type explicitly.
-			if itemType == "" {
+			itemPath := fmt.Sprintf("%s.%d", path, i)
+			item := value.Get(strconv.Itoa(i))
+			if item.Type != gjson.JSON || item.IsArray() {
+				return &ValidationError{
+					Field:   itemPath,
+					Message: fmt.Sprintf("Input item at index %d must be an object", i),
+					Code:    "invalid_input_item",
+				}
+			}
+
+			// Responses input items are an open union that evolves upstream.
+			// Validate the envelope here and leave semantic type support to the
+			// selected upstream. Message-style inputs may omit type entirely.
+			itemType := item.Get("type")
+			if !itemType.Exists() {
 				continue
 			}
-			if !validTypes[itemType] {
+			if itemType.Type != gjson.String || strings.TrimSpace(itemType.String()) == "" {
 				return &ValidationError{
-					Field:   fmt.Sprintf("%s.%d.type", path, i),
-					Message: fmt.Sprintf("Invalid input type '%s' at index %d", itemType, i),
+					Field:   itemPath + ".type",
+					Message: fmt.Sprintf("Input item type at index %d must be a non-empty string", i),
 					Code:    "invalid_input_type",
 				}
 			}

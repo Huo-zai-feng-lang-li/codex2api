@@ -31,6 +31,7 @@ const (
 	RuleDLPDatabaseURL     = "dlp_database_url"
 	RuleDLPEnvBulk         = "dlp_env_bulk"
 	RuleResponseInjection  = "response_injection"
+	RuleScriptBehavior     = "script_behavior"
 	RuleToolCall           = "tool_call"
 	RuleUnknownField       = "unknown_field"
 	RuleSourceOfficial     = "source_official"
@@ -120,7 +121,7 @@ func DefaultConfig() Config {
 		MaxScanBytes:         128 * 1024,
 		MaxPreviewChars:      500,
 		CaptureMode:          CaptureModeHitRaw,
-		CaptureRetentionDays: 7,
+		CaptureRetentionDays: 1,
 		CaptureMaxBodyBytes:  1024 * 1024,
 		OfficialHostSuffix:   []string{"api.openai.com", "api.anthropic.com"},
 	}

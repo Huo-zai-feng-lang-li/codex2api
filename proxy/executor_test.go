@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/codex2api/auth"
 )
@@ -159,6 +160,11 @@ func TestShouldRecyclePooledClient(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "http2 stream internal error",
+			err:  errors.New("stream error: stream ID 17; INTERNAL_ERROR; received from peer"),
+			want: true,
+		},
+		{
 			name: "plain timeout",
 			err:  errors.New("read timeout"),
 			want: false,
@@ -194,6 +200,22 @@ func TestNewCodexStandardTransportIgnoresEnvironmentProxyWhenProxyURLBlank(t *te
 	}
 	if proxyURL != nil {
 		t.Fatalf("blank proxyURL should ignore environment proxy, got %s", proxyURL)
+	}
+}
+
+func TestNewCodexStandardTransportKeepsBurstConnectionsReusable(t *testing.T) {
+	transport, ok := newCodexStandardTransport("").(*http.Transport)
+	if !ok {
+		t.Fatalf("newCodexStandardTransport() = %T, want *http.Transport", newCodexStandardTransport(""))
+	}
+	if transport.MaxIdleConnsPerHost < 16 {
+		t.Fatalf("MaxIdleConnsPerHost = %d, want at least 16", transport.MaxIdleConnsPerHost)
+	}
+	if transport.IdleConnTimeout < 90*time.Second {
+		t.Fatalf("IdleConnTimeout = %s, want at least 90s", transport.IdleConnTimeout)
+	}
+	if !transport.ForceAttemptHTTP2 {
+		t.Fatal("ForceAttemptHTTP2 = false, want HTTP/2 reuse enabled with custom DialContext")
 	}
 }
 
@@ -297,6 +319,9 @@ func TestApplyCodexRequestHeadersUsesMinimalFallbackByDefault(t *testing.T) {
 	}
 	if got := req.Header.Get("Version"); got != latestCodexCLIVersion {
 		t.Fatalf("Version = %q, want %q", got, latestCodexCLIVersion)
+	}
+	if got := req.Header.Get("Connection"); got != "" {
+		t.Fatalf("Connection = %q, want empty because upstream may use HTTP/2", got)
 	}
 }
 

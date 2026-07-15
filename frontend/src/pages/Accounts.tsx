@@ -92,11 +92,13 @@ import Sub2APIImportModal from "../components/Sub2APIImportModal";
 import AccountQuotaDistributionChart from "../components/AccountQuotaDistributionChart";
 import AccountRateLimitRecoveryChart from "../components/AccountRateLimitRecoveryChart";
 import ChipInput from "../components/ChipInput";
+import ProxyUrlInput from "../components/ProxyUrlInput";
+import { DEFAULT_PROXY_URL, isValidProxyUrl } from "../utils/proxyUrl";
 
 const ACCOUNT_BATCH_CONCURRENCY = 6;
 const OPERATION_PROGRESS_FLUSH_INTERVAL_MS = 200;
 const ACCOUNTS_VISIBLE_REFRESH_INTERVAL_MS = 15_000;
-const DEFAULT_OFFICIAL_ACCOUNT_PROXY_URL = "http://127.0.0.1:51081";
+const DEFAULT_OFFICIAL_ACCOUNT_PROXY_URL = DEFAULT_PROXY_URL;
 const DEFAULT_OAUTH_PROXY_URL = DEFAULT_OFFICIAL_ACCOUNT_PROXY_URL;
 const ACCOUNT_ANALYSIS_VISIBILITY_KEY = "codex2api:accounts:analysis-visible";
 const ACCOUNT_VISIBLE_COLUMNS_KEY = "codex2api:accounts:visible-columns";
@@ -800,6 +802,17 @@ export default function Accounts() {
     ? formatPageRefreshTime(lastPageRefreshAt)
     : "--:--:--";
   const oauthEffectiveProxyUrl = oauthProxyUrl.trim();
+  const addAccountProxyInvalid =
+    Boolean(addForm.proxy_url?.trim()) && !isValidProxyUrl(addForm.proxy_url);
+  const atAccountProxyInvalid =
+    Boolean(atForm.proxy_url?.trim()) && !isValidProxyUrl(atForm.proxy_url);
+  const openAIProxyInvalid =
+    Boolean(openAIForm.proxy_url?.trim()) && !isValidProxyUrl(openAIForm.proxy_url);
+  const oauthProxyInvalid = !isValidProxyUrl(oauthEffectiveProxyUrl, false);
+  const editProxyInvalid =
+    Boolean(editProxyUrl.trim()) && !isValidProxyUrl(editProxyUrl);
+  const editOpenAIProxyInvalid =
+    Boolean(editOpenAIForm.proxy_url?.trim()) && !isValidProxyUrl(editOpenAIForm.proxy_url);
 
   useVisiblePolling(() => reloadSilently(), ACCOUNTS_VISIBLE_REFRESH_INTERVAL_MS);
 
@@ -1185,6 +1198,10 @@ export default function Accounts() {
   }, [allPageSelected, pagedAccountIds]);
 
   const handleAdd = async (credential: "rt" | "st" = "rt") => {
+    if (addAccountProxyInvalid) {
+      showToast(t("proxyInput.invalidUrl"), "error");
+      return;
+    }
     const payload: AddAccountRequest =
       credential === "st"
         ? { ...addForm, refresh_token: "", tags: addTags }
@@ -1219,6 +1236,10 @@ export default function Accounts() {
   };
 
   const handleAddAT = async () => {
+    if (atAccountProxyInvalid) {
+      showToast(t("proxyInput.invalidUrl"), "error");
+      return;
+    }
     if (!atForm.name.trim() || !atForm.access_token.trim()) return;
     setSubmitting(true);
     try {
@@ -1281,6 +1302,10 @@ export default function Accounts() {
   }, []);
 
   const handleFetchOpenAIModels = async () => {
+    if (openAIProxyInvalid) {
+      showToast(t("proxyInput.invalidUrl"), "error");
+      return;
+    }
     if (!openAIForm.api_key.trim()) return;
     setOpenAIModelsLoading(true);
     try {
@@ -1311,6 +1336,10 @@ export default function Accounts() {
   };
 
   const handleAddOpenAIResponses = async () => {
+    if (openAIProxyInvalid) {
+      showToast(t("proxyInput.invalidUrl"), "error");
+      return;
+    }
     const models = openAIForm.models;
     if (!openAIForm.name.trim() || !openAIForm.api_key.trim() || models.length === 0) return;
     setSubmitting(true);
@@ -1344,6 +1373,10 @@ export default function Accounts() {
   };
 
   const handleFetchEditOpenAIModels = async () => {
+    if (editOpenAIProxyInvalid) {
+      showToast(t("proxyInput.invalidUrl"), "error");
+      return;
+    }
     if (!editingAccount?.openai_responses_api) return;
     setEditOpenAIModelsLoading(true);
     try {
@@ -1376,6 +1409,10 @@ export default function Accounts() {
 
   const handleSaveOpenAIAccountSettings = async () => {
     if (!editingAccount?.openai_responses_api) return;
+    if (editOpenAIProxyInvalid) {
+      showToast(t("proxyInput.invalidUrl"), "error");
+      return;
+    }
     if (!editOpenAIForm.name.trim() || !editOpenAIForm.base_url.trim() || editOpenAIForm.models.length === 0) {
       showToast(t("accounts.openaiAccountInvalid"), "error");
       return;
@@ -1405,6 +1442,10 @@ export default function Accounts() {
 
   const handleOAuthGenerate = async () => {
     if (!oauthName.trim()) return;
+    if (oauthProxyInvalid) {
+      showToast(t("proxyInput.invalidUrl"), "error");
+      return;
+    }
     if (!oauthEffectiveProxyUrl) {
       showToast(t("accounts.oauthProxyRequired"), "error");
       return;
@@ -2444,6 +2485,10 @@ export default function Accounts() {
 
   const handleSaveScheduler = async () => {
     if (!editingAccount) return;
+    if (editProxyInvalid) {
+      showToast(t("proxyInput.invalidUrl"), "error");
+      return;
+    }
     if (scoreInputInvalid || concurrencyInputInvalid) {
       showToast(t("accounts.schedulerInvalidInput"), "error");
       return;
@@ -3746,7 +3791,8 @@ export default function Accounts() {
                     disabled={
                       submitting ||
                       !addForm.name.trim() ||
-                      !addForm.refresh_token?.trim()
+                      !addForm.refresh_token?.trim() ||
+                      addAccountProxyInvalid
                     }
                   >
                     {submitting ? t("accounts.adding") : t("accounts.submit")}
@@ -3757,7 +3803,8 @@ export default function Accounts() {
                     disabled={
                       submitting ||
                       !addForm.name.trim() ||
-                      !addForm.session_token?.trim()
+                      !addForm.session_token?.trim() ||
+                      addAccountProxyInvalid
                     }
                   >
                     {submitting ? t("accounts.adding") : t("accounts.submit")}
@@ -3768,7 +3815,8 @@ export default function Accounts() {
                     disabled={
                       submitting ||
                       !atForm.name.trim() ||
-                      !atForm.access_token.trim()
+                      !atForm.access_token.trim() ||
+                      atAccountProxyInvalid
                     }
                   >
                     {submitting ? t("accounts.adding") : t("accounts.submit")}
@@ -3780,7 +3828,8 @@ export default function Accounts() {
                       submitting ||
                       !openAIForm.name.trim() ||
                       !openAIForm.api_key.trim() ||
-                      openAIForm.models.length === 0
+                      openAIForm.models.length === 0 ||
+                      openAIProxyInvalid
                     }
                   >
                     {submitting ? t("accounts.adding") : t("accounts.submit")}
@@ -3791,7 +3840,8 @@ export default function Accounts() {
                     disabled={
                       oauthGenerating ||
                       !oauthName.trim() ||
-                      !oauthEffectiveProxyUrl
+                      !oauthEffectiveProxyUrl ||
+                      oauthProxyInvalid
                     }
                   >
                     {oauthGenerating
@@ -3910,21 +3960,14 @@ export default function Accounts() {
                     rows={6}
                   />
                 </div>
-                <div>
-                  <label className="block mb-2 text-sm font-semibold text-muted-foreground">
-                    {t("accounts.proxyUrl")}
-                  </label>
-                  <Input
-                    placeholder={t("accounts.proxyUrlPlaceholder")}
-                    value={addForm.proxy_url}
-                    onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                      setAddForm((form) => ({
-                        ...form,
-                        proxy_url: event.target.value,
-                      }))
-                    }
-                  />
-                </div>
+                <ProxyUrlInput
+                  label={t("accounts.proxyUrl")}
+                  placeholder={t("accounts.proxyUrlPlaceholder")}
+                  value={addForm.proxy_url}
+                  onChange={(proxy_url) =>
+                    setAddForm((form) => ({ ...form, proxy_url }))
+                  }
+                />
               </div>
             ) : addMethod === "st" ? (
               <div className="space-y-4">
@@ -3960,21 +4003,14 @@ export default function Accounts() {
                     rows={6}
                   />
                 </div>
-                <div>
-                  <label className="block mb-2 text-sm font-semibold text-muted-foreground">
-                    {t("accounts.proxyUrl")}
-                  </label>
-                  <Input
-                    placeholder={t("accounts.proxyUrlPlaceholder")}
-                    value={addForm.proxy_url}
-                    onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                      setAddForm((form) => ({
-                        ...form,
-                        proxy_url: event.target.value,
-                      }))
-                    }
-                  />
-                </div>
+                <ProxyUrlInput
+                  label={t("accounts.proxyUrl")}
+                  placeholder={t("accounts.proxyUrlPlaceholder")}
+                  value={addForm.proxy_url}
+                  onChange={(proxy_url) =>
+                    setAddForm((form) => ({ ...form, proxy_url }))
+                  }
+                />
               </div>
             ) : addMethod === "at" ? (
               <div className="space-y-4">
@@ -4013,21 +4049,14 @@ export default function Accounts() {
                     rows={6}
                   />
                 </div>
-                <div>
-                  <label className="block mb-2 text-sm font-semibold text-muted-foreground">
-                    {t("accounts.proxyUrl")}
-                  </label>
-                  <Input
-                    placeholder={t("accounts.proxyUrlPlaceholder")}
-                    value={atForm.proxy_url}
-                    onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                      setAtForm((form) => ({
-                        ...form,
-                        proxy_url: event.target.value,
-                      }))
-                    }
-                  />
-                </div>
+                <ProxyUrlInput
+                  label={t("accounts.proxyUrl")}
+                  placeholder={t("accounts.proxyUrlPlaceholder")}
+                  value={atForm.proxy_url}
+                  onChange={(proxy_url) =>
+                    setAtForm((form) => ({ ...form, proxy_url }))
+                  }
+                />
               </div>
             ) : addMethod === "openai" ? (
               <div className="space-y-4">
@@ -4147,21 +4176,14 @@ export default function Accounts() {
                     })}
                   </p>
                 </div>
-                <div>
-                  <label className="block mb-2 text-sm font-semibold text-muted-foreground">
-                    {t("accounts.proxyUrl")}
-                  </label>
-                  <Input
-                    placeholder={t("accounts.proxyUrlPlaceholder")}
-                    value={openAIForm.proxy_url}
-                    onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                      setOpenAIForm((form) => ({
-                        ...form,
-                        proxy_url: event.target.value,
-                      }))
-                    }
-                  />
-                </div>
+                <ProxyUrlInput
+                  label={t("accounts.proxyUrl")}
+                  placeholder={t("accounts.proxyUrlPlaceholder")}
+                  value={openAIForm.proxy_url}
+                  onChange={(proxy_url) =>
+                    setOpenAIForm((form) => ({ ...form, proxy_url }))
+                  }
+                />
               </div>
             ) : (
               <div className="space-y-5">
@@ -4185,18 +4207,14 @@ export default function Accounts() {
                         }
                       />
                     </div>
-                    <div>
-                      <label className="block mb-2 text-sm font-semibold text-muted-foreground">
-                        {t("accounts.oauthProxyUrl")} *
-                      </label>
-                      <Input
-                        placeholder={t("accounts.oauthProxyUrlPlaceholder")}
-                        value={oauthProxyUrl}
-                        onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                          setOauthProxyUrl(e.target.value)
-                        }
-                      />
-                    </div>
+                    <ProxyUrlInput
+                      label={t("accounts.oauthProxyUrl")}
+                      placeholder={t("accounts.oauthProxyUrlPlaceholder")}
+                      value={oauthProxyUrl}
+                      onChange={setOauthProxyUrl}
+                      required
+                      allowEmpty={false}
+                    />
                   </>
                 ) : (
                   <>
@@ -4608,8 +4626,9 @@ export default function Accounts() {
                   disabled={
                     editSubmitting ||
                     (editTab === "scheduler" &&
-                      (scoreInputInvalid || concurrencyInputInvalid)) ||
-                    openAIAccountInputInvalid
+                      (scoreInputInvalid || concurrencyInputInvalid || editProxyInvalid)) ||
+                    openAIAccountInputInvalid ||
+                    (editTab === "account" && editOpenAIProxyInvalid)
                   }
                 >
                   {editSubmitting ? t("common.saving") : t("common.save")}
@@ -4800,21 +4819,14 @@ export default function Accounts() {
                         })}
                       </p>
                     </div>
-                    <div>
-                      <label className="block mb-2 text-sm font-semibold text-muted-foreground">
-                        {t("accounts.proxyUrl")}
-                      </label>
-                      <Input
-                        placeholder={t("accounts.proxyUrlPlaceholder")}
-                        value={editOpenAIForm.proxy_url}
-                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                          setEditOpenAIForm((form) => ({
-                            ...form,
-                            proxy_url: event.target.value,
-                          }))
-                        }
-                      />
-                    </div>
+                    <ProxyUrlInput
+                      label={t("accounts.proxyUrl")}
+                      placeholder={t("accounts.proxyUrlPlaceholder")}
+                      value={editOpenAIForm.proxy_url ?? ""}
+                      onChange={(proxy_url) =>
+                        setEditOpenAIForm((form) => ({ ...form, proxy_url }))
+                      }
+                    />
                   </div>
                 ) : (
                   <>
@@ -4985,18 +4997,12 @@ export default function Accounts() {
                     </div>
 
                     <div className="rounded-xl border border-border p-4">
-                      <div className="text-sm font-semibold text-foreground">
-                        {t("accounts.proxyUrl")}
-                      </div>
-                      <div className="mt-3">
-                        <Input
-                          placeholder={t("accounts.proxyUrlPlaceholder")}
-                          value={editProxyUrl}
-                          onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                            setEditProxyUrl(event.target.value)
-                          }
-                        />
-                      </div>
+                      <ProxyUrlInput
+                        label={t("accounts.proxyUrl")}
+                        placeholder={t("accounts.proxyUrlPlaceholder")}
+                        value={editProxyUrl}
+                        onChange={setEditProxyUrl}
+                      />
                     </div>
 
                     <div className="grid gap-4 md:grid-cols-2">
@@ -7567,7 +7573,7 @@ function UsageWindowLine({
   const clampedPct = hasPct ? Math.min(100, Math.max(0, pct)) : null;
   const remainingPct = clampedPct === null ? null : Math.max(0, 100 - clampedPct);
   const usedPrefix = t("accounts.usageUsed") === "已用"
-    ? "用"
+    ? "用 "
     : `${t("accounts.usageUsed")} `;
   const hasDetail = hasUsageWindowDetail(detail);
   const costText =
@@ -7582,7 +7588,7 @@ function UsageWindowLine({
       title={[
         label,
         clampedPct !== null ? `${t("accounts.usageUsed")} ${formatUsagePercent(clampedPct)}` : showStatsLabel ? t("accounts.usageNoPercent") : "",
-        remainingPct !== null ? `${t("accounts.usageRemainingShort")}${formatUsagePercent(remainingPct)}` : "",
+        remainingPct !== null ? `${t("accounts.usageRemainingShort")} ${formatUsagePercent(remainingPct)}` : "",
         hasDetail
           ? `${formatCompactUsageNumber(detail?.requests)} ${t("accounts.usageReqUnit")} / ${formatCompactUsageNumber(detail?.tokens)} ${t("accounts.usageTokUnit")}`
           : "",
@@ -7598,7 +7604,7 @@ function UsageWindowLine({
           {clampedPct !== null ? (
             <span className="text-[11px] font-semibold text-muted-foreground">
               {showStatsLabel ? (
-                <span className="text-[11px] italic">
+                <span className="inline-flex items-center text-[11px] leading-[14px]">
                   {usedPrefix}
                 </span>
               ) : null}
@@ -7612,12 +7618,12 @@ function UsageWindowLine({
         </div>
         {remainingPct !== null && (
           <span
-            className={`inline-flex shrink-0 items-baseline gap-0.5 rounded-md border px-1.5 py-0.5 font-bold shadow-sm ring-1 ring-inset ${usageRemainingTone(remainingPct)}`}
+            className={`inline-flex shrink-0 items-center gap-0.5 rounded-md border px-1.5 py-0.5 font-bold shadow-sm ring-1 ring-inset ${usageRemainingTone(remainingPct)}`}
           >
-            <span className="text-[11px] italic leading-none">
-              {t("accounts.usageRemainingShort")}
+            <span className="inline-flex items-center text-[11px] leading-[14px]">
+              {t("accounts.usageRemainingShort")}{" "}
             </span>
-            <span className="text-[13px] leading-none">
+            <span className="text-[13px] leading-[14px]">
               {formatUsagePercent(remainingPct)}
             </span>
           </span>

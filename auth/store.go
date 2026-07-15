@@ -44,6 +44,13 @@ const (
 
 const UpstreamOpenAIResponses = "openai_responses"
 
+type PromptRewriteConfig struct {
+	RequestSystemPromptEnabled bool
+	RequestSystemPrompt        string
+	ResponseRewriteEnabled     bool
+	ResponseRewritePrompt      string
+}
+
 // Account 运行时账号状态
 type Account struct {
 	mu             sync.RWMutex
@@ -1586,6 +1593,7 @@ type Store struct {
 	affinityMode         atomic.Value // string: "bounded" / "off" / "strict"
 	promptFilterConfig   atomic.Value // promptfilter.Config
 	upstreamGuardConfig  atomic.Value // upstreamguard.Config
+	promptRewriteConfig  atomic.Value // PromptRewriteConfig
 	sessionMu            sync.RWMutex
 	sessionBindings      map[string]sessionAffinity
 	activeRequestSeq     int64
@@ -2090,10 +2098,15 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 			ProxyURL:                         "",
 			MaxRateLimitRetries:              1,
 			SchedulerMode:                    "round_robin",
+			SecurityAuditEnabled:             database.DefaultSecurityAuditEnabled,
 			UpstreamGuardMode:                database.DefaultUpstreamGuardMode,
 			SecurityCaptureMode:              database.DefaultSecurityCaptureMode,
 			SecurityCaptureRetentionDays:     database.DefaultSecurityCaptureRetentionDays,
 			SecurityCaptureMaxBodyBytes:      database.DefaultSecurityCaptureMaxBodyBytes,
+			ProxyRequestSystemPromptEnabled:  database.DefaultProxyRequestSystemPromptEnabled,
+			ProxyRequestSystemPrompt:         database.DefaultProxyRequestSystemPrompt,
+			ProxyResponseRewriteEnabled:      database.DefaultProxyResponseRewriteEnabled,
+			ProxyResponseRewritePrompt:       database.DefaultProxyResponseRewritePrompt,
 		}
 	}
 	s := &Store{
@@ -2138,6 +2151,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	}
 	s.SetPromptFilterConfig(promptFilterConfigFromSettings(settings))
 	s.SetUpstreamGuardConfig(upstreamGuardConfigFromSettings(settings))
+	s.SetPromptRewriteConfig(promptRewriteConfigFromSettings(settings))
 	// 环境变量优先，否则读数据库设置
 	fastEnabled := fastSchedulerEnabledFromEnv() || settings.FastSchedulerEnabled
 	s.fastSchedulerEnabled.Store(fastEnabled)
@@ -3796,6 +3810,7 @@ func upstreamGuardConfigFromSettings(settings *database.SystemSettings) upstream
 	if settings == nil {
 		return cfg
 	}
+	cfg.Enabled = settings.SecurityAuditEnabled
 	cfg.Mode = database.NormalizeUpstreamGuardMode(settings.UpstreamGuardMode)
 	cfg.CaptureMode = database.NormalizeSecurityCaptureMode(settings.SecurityCaptureMode)
 	cfg.CaptureRetentionDays = database.NormalizeSecurityCaptureRetentionDays(settings.SecurityCaptureRetentionDays)
@@ -3825,6 +3840,31 @@ func (s *Store) GetUpstreamGuardConfig() upstreamguard.Config {
 		return upstreamguard.NormalizeConfig(v)
 	}
 	return upstreamguard.DefaultConfig()
+}
+
+func promptRewriteConfigFromSettings(settings *database.SystemSettings) PromptRewriteConfig {
+	if settings == nil {
+		return PromptRewriteConfig{}
+	}
+	return PromptRewriteConfig{
+		RequestSystemPromptEnabled: settings.ProxyRequestSystemPromptEnabled,
+		RequestSystemPrompt:        settings.ProxyRequestSystemPrompt,
+		ResponseRewriteEnabled:     settings.ProxyResponseRewriteEnabled,
+		ResponseRewritePrompt:      settings.ProxyResponseRewritePrompt,
+	}
+}
+
+func (s *Store) SetPromptRewriteConfig(cfg PromptRewriteConfig) {
+	cfg.RequestSystemPrompt = strings.TrimSpace(cfg.RequestSystemPrompt)
+	cfg.ResponseRewritePrompt = strings.TrimSpace(cfg.ResponseRewritePrompt)
+	s.promptRewriteConfig.Store(cfg)
+}
+
+func (s *Store) GetPromptRewriteConfig() PromptRewriteConfig {
+	if v, ok := s.promptRewriteConfig.Load().(PromptRewriteConfig); ok {
+		return v
+	}
+	return PromptRewriteConfig{}
 }
 
 // AddAccount 热加载新账号到内存池（前端添加后即刻生效）

@@ -4398,12 +4398,17 @@ type settingsResponse struct {
 	PromptFilterSensitiveWords       string `json:"prompt_filter_sensitive_words"`
 	PromptFilterCustomPatterns       string `json:"prompt_filter_custom_patterns"`
 	PromptFilterDisabledPatterns     string `json:"prompt_filter_disabled_patterns"`
+	SecurityAuditEnabled             bool   `json:"security_audit_enabled"`
 	UpstreamGuardMode                string `json:"upstream_guard_mode"`
 	UpstreamGuardSuppressions        string `json:"upstream_guard_suppressions"`
 	SecurityEventRetentionDays       int    `json:"security_event_retention_days"`
 	SecurityCaptureMode              string `json:"security_capture_mode"`
 	SecurityCaptureRetentionDays     int    `json:"security_capture_retention_days"`
 	SecurityCaptureMaxBodyBytes      int    `json:"security_capture_max_body_bytes"`
+	ProxyRequestSystemPromptEnabled  bool   `json:"proxy_request_system_prompt_enabled"`
+	ProxyRequestSystemPrompt         string `json:"proxy_request_system_prompt"`
+	ProxyResponseRewriteEnabled      bool   `json:"proxy_response_rewrite_enabled"`
+	ProxyResponseRewritePrompt       string `json:"proxy_response_rewrite_prompt"`
 	ClientCompatMode                 string `json:"client_compat_mode"`
 	CodexMinCLIVersion               string `json:"codex_min_cli_version"`
 	UsageLogMode                     string `json:"usage_log_mode"`
@@ -4469,12 +4474,17 @@ type updateSettingsReq struct {
 	PromptFilterSensitiveWords       *string `json:"prompt_filter_sensitive_words"`
 	PromptFilterCustomPatterns       *string `json:"prompt_filter_custom_patterns"`
 	PromptFilterDisabledPatterns     *string `json:"prompt_filter_disabled_patterns"`
+	SecurityAuditEnabled             *bool   `json:"security_audit_enabled"`
 	UpstreamGuardMode                *string `json:"upstream_guard_mode"`
 	UpstreamGuardSuppressions        *string `json:"upstream_guard_suppressions"`
 	SecurityEventRetentionDays       *int    `json:"security_event_retention_days"`
 	SecurityCaptureMode              *string `json:"security_capture_mode"`
 	SecurityCaptureRetentionDays     *int    `json:"security_capture_retention_days"`
 	SecurityCaptureMaxBodyBytes      *int    `json:"security_capture_max_body_bytes"`
+	ProxyRequestSystemPromptEnabled  *bool   `json:"proxy_request_system_prompt_enabled"`
+	ProxyRequestSystemPrompt         *string `json:"proxy_request_system_prompt"`
+	ProxyResponseRewriteEnabled      *bool   `json:"proxy_response_rewrite_enabled"`
+	ProxyResponseRewritePrompt       *string `json:"proxy_response_rewrite_prompt"`
 	ClientCompatMode                 *string `json:"client_compat_mode"`
 	CodexMinCLIVersion               *string `json:"codex_min_cli_version"`
 	UsageLogMode                     *string `json:"usage_log_mode"`
@@ -4986,6 +4996,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 	securityCaptureMode := database.DefaultSecurityCaptureMode
 	securityCaptureRetentionDays := database.DefaultSecurityCaptureRetentionDays
 	securityCaptureMaxBodyBytes := database.DefaultSecurityCaptureMaxBodyBytes
+	promptRewriteCfg := h.store.GetPromptRewriteConfig()
 	if dbSettings != nil && adminAuthSource != "env" {
 		adminSecret = dbSettings.AdminSecret
 	}
@@ -5001,6 +5012,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		securityCaptureMode = database.NormalizeSecurityCaptureMode(dbSettings.SecurityCaptureMode)
 		securityCaptureRetentionDays = database.NormalizeSecurityCaptureRetentionDays(dbSettings.SecurityCaptureRetentionDays)
 		securityCaptureMaxBodyBytes = database.NormalizeSecurityCaptureMaxBodyBytes(dbSettings.SecurityCaptureMaxBodyBytes)
+		promptRewriteCfg = h.store.GetPromptRewriteConfig()
 	}
 	promptFilterCfg := h.store.GetPromptFilterConfig()
 	upstreamGuardCfg := h.store.GetUpstreamGuardConfig()
@@ -5062,12 +5074,17 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		PromptFilterSensitiveWords:       promptFilterCfg.SensitiveWords,
 		PromptFilterCustomPatterns:       promptfilter.MarshalCustomPatterns(promptFilterCfg.CustomPatterns),
 		PromptFilterDisabledPatterns:     promptfilter.MarshalDisabledPatterns(promptFilterCfg.DisabledPatterns),
+		SecurityAuditEnabled:             upstreamGuardCfg.Enabled,
 		UpstreamGuardMode:                upstreamGuardCfg.Mode,
 		UpstreamGuardSuppressions:        upstreamGuardSuppressions,
 		SecurityEventRetentionDays:       securityEventRetentionDays,
 		SecurityCaptureMode:              securityCaptureMode,
 		SecurityCaptureRetentionDays:     securityCaptureRetentionDays,
 		SecurityCaptureMaxBodyBytes:      securityCaptureMaxBodyBytes,
+		ProxyRequestSystemPromptEnabled:  promptRewriteCfg.RequestSystemPromptEnabled,
+		ProxyRequestSystemPrompt:         promptRewriteCfg.RequestSystemPrompt,
+		ProxyResponseRewriteEnabled:      promptRewriteCfg.ResponseRewriteEnabled,
+		ProxyResponseRewritePrompt:       promptRewriteCfg.ResponseRewritePrompt,
 		ClientCompatMode:                 runtimeCfg.ClientCompatMode,
 		CodexMinCLIVersion:               runtimeCfg.CodexMinCLIVersion,
 		UsageLogMode:                     h.db.GetUsageLogMode(),
@@ -5101,11 +5118,13 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	siteLogo := ""
 	bgCfg := defaultBackgroundConfig()
 	showFullUsageNumbers := false
+	securityAuditEnabled := database.DefaultSecurityAuditEnabled
 	upstreamGuardSuppressions := "[]"
 	securityEventRetentionDays := database.DefaultSecurityEventRetentionDays
 	securityCaptureMode := database.DefaultSecurityCaptureMode
 	securityCaptureRetentionDays := database.DefaultSecurityCaptureRetentionDays
 	securityCaptureMaxBodyBytes := database.DefaultSecurityCaptureMaxBodyBytes
+	promptRewriteCfg := h.store.GetPromptRewriteConfig()
 	existingSettings, _ := h.db.GetSystemSettings(c.Request.Context())
 	if existingSettings != nil {
 		currentAdminSecret = existingSettings.AdminSecret
@@ -5113,6 +5132,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		siteLogo = strings.TrimSpace(existingSettings.SiteLogo)
 		bgCfg = decodeBackgroundConfig(existingSettings.BackgroundConfig)
 		showFullUsageNumbers = existingSettings.ShowFullUsageNumbers
+		securityAuditEnabled = existingSettings.SecurityAuditEnabled
 		upstreamGuardSuppressions = strings.TrimSpace(existingSettings.UpstreamGuardSuppressions)
 		if upstreamGuardSuppressions == "" {
 			upstreamGuardSuppressions = "[]"
@@ -5121,6 +5141,12 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		securityCaptureMode = database.NormalizeSecurityCaptureMode(existingSettings.SecurityCaptureMode)
 		securityCaptureRetentionDays = database.NormalizeSecurityCaptureRetentionDays(existingSettings.SecurityCaptureRetentionDays)
 		securityCaptureMaxBodyBytes = database.NormalizeSecurityCaptureMaxBodyBytes(existingSettings.SecurityCaptureMaxBodyBytes)
+		promptRewriteCfg = auth.PromptRewriteConfig{
+			RequestSystemPromptEnabled: existingSettings.ProxyRequestSystemPromptEnabled,
+			RequestSystemPrompt:        existingSettings.ProxyRequestSystemPrompt,
+			ResponseRewriteEnabled:     existingSettings.ProxyResponseRewriteEnabled,
+			ResponseRewritePrompt:      existingSettings.ProxyResponseRewritePrompt,
+		}
 	}
 	if req.AdminSecret != nil {
 		if h.adminSecretEnv == "" {
@@ -5512,6 +5538,12 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	}
 
 	upstreamGuardCfg := h.store.GetUpstreamGuardConfig()
+	securityAuditEnabled = upstreamGuardCfg.Enabled
+	if req.SecurityAuditEnabled != nil {
+		upstreamGuardCfg.Enabled = *req.SecurityAuditEnabled
+		securityAuditEnabled = upstreamGuardCfg.Enabled
+		log.Printf("设置已更新: security_audit_enabled = %t", securityAuditEnabled)
+	}
 	if req.UpstreamGuardMode != nil {
 		upstreamGuardCfg.Mode = database.NormalizeUpstreamGuardMode(*req.UpstreamGuardMode)
 		log.Printf("设置已更新: upstream_guard_mode = %s", upstreamGuardCfg.Mode)
@@ -5526,9 +5558,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		upstreamGuardCfg.Suppressions = rules
 		log.Printf("设置已更新: upstream_guard_suppressions count=%d", len(rules))
 	}
-	if req.UpstreamGuardMode != nil || req.UpstreamGuardSuppressions != nil {
+	if req.SecurityAuditEnabled != nil || req.UpstreamGuardMode != nil || req.UpstreamGuardSuppressions != nil {
 		h.store.SetUpstreamGuardConfig(upstreamGuardCfg)
 		upstreamGuardCfg = h.store.GetUpstreamGuardConfig()
+		securityAuditEnabled = upstreamGuardCfg.Enabled
 	}
 	if req.SecurityEventRetentionDays != nil {
 		securityEventRetentionDays = database.NormalizeSecurityEventRetentionDays(*req.SecurityEventRetentionDays)
@@ -5552,9 +5585,35 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	if req.SecurityCaptureMode != nil || req.SecurityCaptureRetentionDays != nil || req.SecurityCaptureMaxBodyBytes != nil {
 		h.store.SetUpstreamGuardConfig(upstreamGuardCfg)
 		upstreamGuardCfg = h.store.GetUpstreamGuardConfig()
+		securityAuditEnabled = upstreamGuardCfg.Enabled
 		securityCaptureMode = upstreamGuardCfg.CaptureMode
 		securityCaptureRetentionDays = upstreamGuardCfg.CaptureRetentionDays
 		securityCaptureMaxBodyBytes = upstreamGuardCfg.CaptureMaxBodyBytes
+	}
+	promptRewriteChanged := false
+	if req.ProxyRequestSystemPromptEnabled != nil {
+		promptRewriteCfg.RequestSystemPromptEnabled = *req.ProxyRequestSystemPromptEnabled
+		promptRewriteChanged = true
+		log.Printf("设置已更新: proxy_request_system_prompt_enabled = %t", promptRewriteCfg.RequestSystemPromptEnabled)
+	}
+	if req.ProxyRequestSystemPrompt != nil {
+		promptRewriteCfg.RequestSystemPrompt = strings.TrimSpace(*req.ProxyRequestSystemPrompt)
+		promptRewriteChanged = true
+		log.Printf("设置已更新: proxy_request_system_prompt (长度=%d)", len(promptRewriteCfg.RequestSystemPrompt))
+	}
+	if req.ProxyResponseRewriteEnabled != nil {
+		promptRewriteCfg.ResponseRewriteEnabled = *req.ProxyResponseRewriteEnabled
+		promptRewriteChanged = true
+		log.Printf("设置已更新: proxy_response_rewrite_enabled = %t", promptRewriteCfg.ResponseRewriteEnabled)
+	}
+	if req.ProxyResponseRewritePrompt != nil {
+		promptRewriteCfg.ResponseRewritePrompt = strings.TrimSpace(*req.ProxyResponseRewritePrompt)
+		promptRewriteChanged = true
+		log.Printf("设置已更新: proxy_response_rewrite_prompt (长度=%d)", len(promptRewriteCfg.ResponseRewritePrompt))
+	}
+	if promptRewriteChanged {
+		h.store.SetPromptRewriteConfig(promptRewriteCfg)
+		promptRewriteCfg = h.store.GetPromptRewriteConfig()
 	}
 
 	// Resin 粘性代理池配置
@@ -5679,12 +5738,17 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		PromptFilterSensitiveWords:       promptFilterCfg.SensitiveWords,
 		PromptFilterCustomPatterns:       promptfilter.MarshalCustomPatterns(promptFilterCfg.CustomPatterns),
 		PromptFilterDisabledPatterns:     promptfilter.MarshalDisabledPatterns(promptFilterCfg.DisabledPatterns),
+		SecurityAuditEnabled:             securityAuditEnabled,
 		UpstreamGuardMode:                upstreamGuardCfg.Mode,
 		UpstreamGuardSuppressions:        upstreamGuardSuppressions,
 		SecurityEventRetentionDays:       securityEventRetentionDays,
 		SecurityCaptureMode:              securityCaptureMode,
 		SecurityCaptureRetentionDays:     securityCaptureRetentionDays,
 		SecurityCaptureMaxBodyBytes:      securityCaptureMaxBodyBytes,
+		ProxyRequestSystemPromptEnabled:  promptRewriteCfg.RequestSystemPromptEnabled,
+		ProxyRequestSystemPrompt:         promptRewriteCfg.RequestSystemPrompt,
+		ProxyResponseRewriteEnabled:      promptRewriteCfg.ResponseRewriteEnabled,
+		ProxyResponseRewritePrompt:       promptRewriteCfg.ResponseRewritePrompt,
 		ClientCompatMode:                 runtimeCfg.ClientCompatMode,
 		CodexMinCLIVersion:               runtimeCfg.CodexMinCLIVersion,
 		UsageLogMode:                     usageLogMode,
@@ -5766,12 +5830,17 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		PromptFilterSensitiveWords:       promptFilterCfg.SensitiveWords,
 		PromptFilterCustomPatterns:       promptfilter.MarshalCustomPatterns(promptFilterCfg.CustomPatterns),
 		PromptFilterDisabledPatterns:     promptfilter.MarshalDisabledPatterns(promptFilterCfg.DisabledPatterns),
+		SecurityAuditEnabled:             securityAuditEnabled,
 		UpstreamGuardMode:                upstreamGuardCfg.Mode,
 		UpstreamGuardSuppressions:        upstreamGuardSuppressions,
 		SecurityEventRetentionDays:       securityEventRetentionDays,
 		SecurityCaptureMode:              securityCaptureMode,
 		SecurityCaptureRetentionDays:     securityCaptureRetentionDays,
 		SecurityCaptureMaxBodyBytes:      securityCaptureMaxBodyBytes,
+		ProxyRequestSystemPromptEnabled:  promptRewriteCfg.RequestSystemPromptEnabled,
+		ProxyRequestSystemPrompt:         promptRewriteCfg.RequestSystemPrompt,
+		ProxyResponseRewriteEnabled:      promptRewriteCfg.ResponseRewriteEnabled,
+		ProxyResponseRewritePrompt:       promptRewriteCfg.ResponseRewritePrompt,
 		ClientCompatMode:                 runtimeCfg.ClientCompatMode,
 		CodexMinCLIVersion:               runtimeCfg.CodexMinCLIVersion,
 		UsageLogMode:                     usageLogMode,

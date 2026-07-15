@@ -20,22 +20,16 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api, type ProxyRow, type ProxyTestResult } from "../api";
 import Modal from "../components/Modal";
+import ProxyUrlInput from "../components/ProxyUrlInput";
 import { useToast } from "../hooks/useToast";
 import { getErrorMessage } from "../utils/error";
+import { DEFAULT_PROXY_URL, isValidProxyUrl } from "../utils/proxyUrl";
 
 const PAGE_SIZE = 10;
 const TEST_ALL_CONCURRENCY = 4;
 
 function validateProxyInput(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    return (
-      Boolean(parsed.hostname) &&
-      ["http:", "https:", "socks5:", "socks5h:"].includes(parsed.protocol)
-    );
-  } catch {
-    return false;
-  }
+  return isValidProxyUrl(url, false);
 }
 
 function latencyColor(ms: number): string {
@@ -71,6 +65,8 @@ export default function Proxies() {
   const [loading, setLoading] = useState(true);
   const [poolEnabled, setPoolEnabled] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
+  const [addMode, setAddMode] = useState<"single" | "batch">("single");
+  const [addUrl, setAddUrl] = useState(DEFAULT_PROXY_URL);
   const [addInput, setAddInput] = useState("");
   const [addLabel, setAddLabel] = useState("");
   const [addLoading, setAddLoading] = useState(false);
@@ -112,6 +108,8 @@ export default function Proxies() {
 
   const totalPages = Math.max(1, Math.ceil(proxies.length / PAGE_SIZE));
   const pagedProxies = proxies.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const addDisabled =
+    addLoading || !(addMode === "single" ? addUrl : addInput).trim();
 
   useEffect(() => {
     if (page > totalPages) setPage(totalPages);
@@ -128,10 +126,13 @@ export default function Proxies() {
   };
 
   const handleAdd = async () => {
-    const urls = addInput
-      .split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const urls =
+      addMode === "single"
+        ? [addUrl.trim()].filter(Boolean)
+        : addInput
+            .split("\n")
+            .map((s) => s.trim())
+            .filter(Boolean);
     if (urls.length === 0) return;
     const invalidUrl = urls.find((url) => !validateProxyInput(url));
     if (invalidUrl) {
@@ -141,6 +142,7 @@ export default function Proxies() {
     setAddLoading(true);
     try {
       await api.addProxies({ urls, label: addLabel });
+      setAddUrl(DEFAULT_PROXY_URL);
       setAddInput("");
       setAddLabel("");
       setShowAdd(false);
@@ -440,7 +442,11 @@ export default function Proxies() {
           )}
 
           <button
-            onClick={() => setShowAdd(!showAdd)}
+            onClick={() => {
+              const nextOpen = !showAdd;
+              if (nextOpen) setAddUrl((url) => url.trim() || DEFAULT_PROXY_URL);
+              setShowAdd(nextOpen);
+            }}
             className="flex items-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground shadow-sm transition-colors hover:bg-primary/90"
           >
             <Plus className="size-4" />
@@ -517,12 +523,46 @@ export default function Proxies() {
             <p className="text-sm text-muted-foreground">
               {t("proxies.addProxyDesc")}
             </p>
-            <textarea
-              value={addInput}
-              onChange={(e) => setAddInput(e.target.value)}
-              placeholder={"http://user:pass@ip:port\nsocks5://ip:port"}
-              className="w-full h-32 px-3 py-2 text-sm rounded-md border border-border bg-background text-foreground placeholder:text-muted-foreground resize-none outline-none focus:ring-2 focus:ring-primary/30 font-mono"
-            />
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                variant={addMode === "single" ? "secondary" : "outline"}
+                size="sm"
+                onClick={() => setAddMode("single")}
+              >
+                {t("proxies.singleAdd")}
+              </Button>
+              <Button
+                type="button"
+                variant={addMode === "batch" ? "secondary" : "outline"}
+                size="sm"
+                onClick={() => setAddMode("batch")}
+              >
+                {t("proxies.batchAdd")}
+              </Button>
+            </div>
+            {addMode === "single" ? (
+              <ProxyUrlInput
+                label={t("proxies.editUrlLabel")}
+                value={addUrl}
+                onChange={setAddUrl}
+                placeholder="http://user:pass@ip:port"
+                required
+                allowEmpty={false}
+              />
+            ) : (
+              <label className="block space-y-1.5">
+                <span className="text-xs font-semibold text-muted-foreground">
+                  {t("proxies.batchUrlLabel")}
+                </span>
+                <textarea
+                  value={addInput}
+                  onChange={(e) => setAddInput(e.target.value)}
+                  placeholder={"http://user:pass@ip:port\nsocks5://ip:port"}
+                  className="w-full h-32 px-3 py-2 text-sm rounded-md border border-border bg-background text-foreground placeholder:text-muted-foreground resize-none outline-none focus:ring-2 focus:ring-primary/30 font-mono"
+                />
+              </label>
+            )}
             <div className="flex items-center gap-3">
               <input
                 type="text"
@@ -533,7 +573,7 @@ export default function Proxies() {
               />
               <button
                 onClick={handleAdd}
-                disabled={addLoading || !addInput.trim()}
+                disabled={addDisabled}
                 className="px-5 py-2 rounded-md text-sm font-semibold bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50 shadow-sm"
               >
                 {addLoading ? t("proxies.adding") : t("proxies.confirmAdd")}
@@ -848,21 +888,18 @@ export default function Proxies() {
         }
       >
         <div className="space-y-4">
-          <label className="block space-y-1.5">
-            <span className="text-xs font-semibold text-muted-foreground">
-              {t("proxies.editUrlLabel")}
-            </span>
-            <Input
-              type="text"
-              value={editUrl}
-              onChange={(e) => {
-                setEditUrl(e.target.value);
-                setEditError("");
-              }}
-              className="font-mono"
-              placeholder="http://user:pass@ip:port"
-            />
-          </label>
+          <ProxyUrlInput
+            label={t("proxies.editUrlLabel")}
+            value={editUrl}
+            onChange={(url) => {
+              setEditUrl(url);
+              setEditError("");
+            }}
+            placeholder="http://user:pass@ip:port"
+            required
+            allowEmpty={false}
+            error={editError || undefined}
+          />
           <label className="block space-y-1.5">
             <span className="text-xs font-semibold text-muted-foreground">
               {t("proxies.editLabelLabel")}
@@ -874,12 +911,6 @@ export default function Proxies() {
               placeholder={t("proxies.labelPlaceholder")}
             />
           </label>
-          {editError && (
-            <div className="flex items-center gap-2 rounded-md border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm font-medium text-destructive">
-              <AlertTriangle className="size-4 shrink-0" />
-              {editError}
-            </div>
-          )}
         </div>
       </Modal>
 

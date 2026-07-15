@@ -9,24 +9,37 @@ import (
 
 func TestStoreLoadsUpstreamGuardConfigFromSystemSettings(t *testing.T) {
 	store := NewStore(nil, nil, &database.SystemSettings{
-		UpstreamGuardMode: upstreamguard.ModeOff,
+		SecurityAuditEnabled: true,
+		UpstreamGuardMode:    upstreamguard.ModeWarn,
 	})
 
 	cfg := store.GetUpstreamGuardConfig()
-	if cfg.Mode != upstreamguard.ModeOff {
-		t.Fatalf("Mode = %q, want %q", cfg.Mode, upstreamguard.ModeOff)
+	if !cfg.Enabled {
+		t.Fatal("Enabled = false, want true")
 	}
-}
-
-func TestStoreDefaultsUpstreamGuardConfigToWarnMode(t *testing.T) {
-	store := NewStore(nil, nil, nil)
-
-	cfg := store.GetUpstreamGuardConfig()
 	if cfg.Mode != upstreamguard.ModeWarn {
 		t.Fatalf("Mode = %q, want %q", cfg.Mode, upstreamguard.ModeWarn)
 	}
-	if !cfg.Enabled {
-		t.Fatal("Enabled = false, want true for default warn mode")
+}
+
+func TestStoreDefaultsUpstreamGuardConfigToOffMode(t *testing.T) {
+	store := NewStore(nil, nil, nil)
+
+	cfg := store.GetUpstreamGuardConfig()
+	if cfg.Enabled {
+		t.Fatal("Enabled = true, want default false")
+	}
+	if cfg.Mode != upstreamguard.ModeOff {
+		t.Fatalf("Mode = %q, want %q", cfg.Mode, upstreamguard.ModeOff)
+	}
+	if cfg.CaptureMode != upstreamguard.CaptureModeHitRaw {
+		t.Fatalf("CaptureMode = %q, want %q", cfg.CaptureMode, upstreamguard.CaptureModeHitRaw)
+	}
+	if cfg.CaptureRetentionDays != 1 {
+		t.Fatalf("CaptureRetentionDays = %d, want 1", cfg.CaptureRetentionDays)
+	}
+	if cfg.CaptureMaxBodyBytes != 1024*1024 {
+		t.Fatalf("CaptureMaxBodyBytes = %d, want 1048576", cfg.CaptureMaxBodyBytes)
 	}
 }
 

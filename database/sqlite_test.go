@@ -685,8 +685,8 @@ func TestSystemSettingsPersistUpstreamGuardMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSystemSettings 默认模式返回错误: %v", err)
 	}
-	if settings.UpstreamGuardMode != "warn" {
-		t.Fatalf("UpstreamGuardMode default = %q, want warn", settings.UpstreamGuardMode)
+	if settings.UpstreamGuardMode != "off" {
+		t.Fatalf("UpstreamGuardMode default = %q, want off", settings.UpstreamGuardMode)
 	}
 
 	settings.UpstreamGuardMode = "off"
@@ -730,6 +730,37 @@ func TestSystemSettingsPersistUpstreamGuardRetentionAndSuppressions(t *testing.T
 	}
 	if settings.SecurityEventRetentionDays != 14 {
 		t.Fatalf("SecurityEventRetentionDays = %d, want 14", settings.SecurityEventRetentionDays)
+	}
+}
+
+func TestSystemSettingsPersistProxyPromptRewrite(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.UpdateSystemSettings(ctx, &SystemSettings{
+		ProxyRequestSystemPromptEnabled: true,
+		ProxyRequestSystemPrompt:        " request prompt ",
+		ProxyResponseRewriteEnabled:     true,
+		ProxyResponseRewritePrompt:      " response prompt ",
+	}); err != nil {
+		t.Fatalf("UpdateSystemSettings 返回错误: %v", err)
+	}
+
+	settings, err := db.GetSystemSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSystemSettings 返回错误: %v", err)
+	}
+	if !settings.ProxyRequestSystemPromptEnabled || settings.ProxyRequestSystemPrompt != "request prompt" {
+		t.Fatalf("request prompt settings = enabled:%t prompt:%q", settings.ProxyRequestSystemPromptEnabled, settings.ProxyRequestSystemPrompt)
+	}
+	if !settings.ProxyResponseRewriteEnabled || settings.ProxyResponseRewritePrompt != "response prompt" {
+		t.Fatalf("response rewrite settings = enabled:%t prompt:%q", settings.ProxyResponseRewriteEnabled, settings.ProxyResponseRewritePrompt)
 	}
 }
 

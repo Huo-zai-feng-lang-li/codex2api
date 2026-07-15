@@ -1548,6 +1548,31 @@ func PrepareOpenAIResponsesBody(rawBody []byte) []byte {
 	return result
 }
 
+type lazyOpenAIResponsesBody struct {
+	raw      []byte
+	prepared []byte
+}
+
+func newLazyOpenAIResponsesBody(raw []byte) *lazyOpenAIResponsesBody {
+	return &lazyOpenAIResponsesBody{raw: raw}
+}
+
+func (b *lazyOpenAIResponsesBody) Bytes() []byte {
+	if b.prepared == nil {
+		b.prepared = PrepareOpenAIResponsesBody(b.raw)
+	}
+	return b.prepared
+}
+
+func (b *lazyOpenAIResponsesBody) Reset(raw []byte) {
+	b.raw = raw
+	b.prepared = nil
+}
+
+func (b *lazyOpenAIResponsesBody) SetPrepared(prepared []byte) {
+	b.prepared = prepared
+}
+
 func PrepareOpenAIResponsesWebSocketBody(rawBody []byte) []byte {
 	body := PrepareOpenAIResponsesBody(rawBody)
 	body, _ = sjson.SetBytes(body, "type", "response.create")

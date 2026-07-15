@@ -585,12 +585,17 @@ export interface SystemSettings {
   prompt_filter_sensitive_words: string
   prompt_filter_custom_patterns: string
   prompt_filter_disabled_patterns: string
+  security_audit_enabled: boolean
   upstream_guard_mode: 'off' | 'warn' | 'high_block' | 'strict'
   upstream_guard_suppressions: string
   security_event_retention_days: number
   security_capture_mode: 'off' | 'hit_raw' | 'full_raw' | string
   security_capture_retention_days: number
   security_capture_max_body_bytes: number
+  proxy_request_system_prompt_enabled?: boolean
+  proxy_request_system_prompt?: string
+  proxy_response_rewrite_enabled?: boolean
+  proxy_response_rewrite_prompt?: string
   client_compat_mode: 'preserve' | 'auto' | 'force' | string
   codex_min_cli_version: string
   usage_log_mode: 'full' | 'errors' | 'off' | string
@@ -733,6 +738,7 @@ export interface SecurityCapture {
   body_bytes: number
   truncated: boolean
   expires_at: ISODateString
+  capture_error: string
   event_action: string
   event_risk_level: string
   event_risk_score: number

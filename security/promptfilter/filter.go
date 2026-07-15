@@ -218,7 +218,11 @@ func BuiltinPatternConfigs() []PatternConfig {
 }
 
 func Inspect(body []byte, endpoint string, cfg Config) Verdict {
-	text := ExtractText(body, endpoint, NormalizeConfig(cfg).MaxTextLength)
+	cfg = NormalizeConfig(cfg)
+	if !cfg.Enabled {
+		return InspectText("", cfg)
+	}
+	text := ExtractText(body, endpoint, cfg.MaxTextLength)
 	return InspectText(text, cfg)
 }
 

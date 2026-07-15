@@ -64,12 +64,18 @@ func (h *Handler) newUpstreamGuardAudit(ctx context.Context, endpoint, model str
 	requestInput.DeferCapture = true
 	responseInput := h.newUpstreamGuardInput(upstreamguard.DirectionResponse, endpoint, model, account, nil, stream, requestID)
 	responseInput.DeferCapture = true
+	var capturedRequestBody []byte
+	if shouldKeepUpstreamGuardRequestBody(requestInput.Config) {
+		capturedRequestBody = append([]byte(nil), requestBody...)
+	} else {
+		requestInput.Body = nil
+	}
 	return &upstreamGuardAudit{
 		h:             h,
 		ctx:           ctx,
 		requestInput:  requestInput,
 		responseInput: responseInput,
-		requestBody:   append([]byte(nil), requestBody...),
+		requestBody:   capturedRequestBody,
 	}
 }
 
@@ -95,7 +101,7 @@ func (a *upstreamGuardAudit) InspectRequest() upstreamguard.Verdict {
 		return upstreamguard.Verdict{}
 	}
 	input := a.requestInput
-	input.Body = a.requestBody
+	input.Body = a.requestInput.Body
 	verdict, eventID := a.h.inspectUpstreamGuardWithEventID(a.ctx, input)
 	if eventID > 0 {
 		a.requestEventID = eventID
@@ -108,8 +114,11 @@ func (a *upstreamGuardAudit) InspectResponseBody(body []byte, stream bool) upstr
 	if a == nil || a.h == nil {
 		return upstreamguard.Verdict{}
 	}
-	a.responseBody.Write(body)
-	return a.inspectResponseForVerdict(body, stream)
+	verdict := a.inspectResponseForVerdict(body, stream)
+	if a.shouldBufferResponseBody() {
+		a.responseBody.Write(body)
+	}
+	return verdict
 }
 
 func (a *upstreamGuardAudit) ScanResponseBody(body []byte, stream bool) upstreamguard.Verdict {
@@ -133,15 +142,17 @@ func (a *upstreamGuardAudit) InspectResponseSSE(data []byte) upstreamguard.Verdi
 	if a == nil || a.h == nil {
 		return upstreamguard.Verdict{}
 	}
-	a.responseBody.WriteString("data: ")
-	a.responseBody.Write(data)
-	a.responseBody.WriteString("\n\n")
 	input := a.responseInput
 	input.Body = data
 	input.Stream = true
 	input.DeferCapture = true
 	verdict, eventID := a.h.inspectUpstreamGuardWithEventID(a.ctx, input)
 	a.observeResponseVerdict(verdict, eventID)
+	if a.shouldBufferResponseBody() {
+		a.responseBody.WriteString("data: ")
+		a.responseBody.Write(data)
+		a.responseBody.WriteString("\n\n")
+	}
 	return verdict
 }
 
@@ -153,6 +164,17 @@ func (a *upstreamGuardAudit) observeResponseVerdict(verdict upstreamguard.Verdic
 	if verdict.ToolCall {
 		a.toolCall = true
 	}
+}
+
+func (a *upstreamGuardAudit) shouldBufferResponseBody() bool {
+	if a == nil {
+		return false
+	}
+	cfg := upstreamguard.NormalizeConfig(a.responseInput.Config)
+	if !cfg.Enabled {
+		return false
+	}
+	return cfg.CaptureMode == upstreamguard.CaptureModeFullRaw || (a.hit && shouldCaptureHitRaw(cfg))
 }
 
 func (a *upstreamGuardAudit) Finish() {
@@ -207,18 +229,23 @@ func (h *Handler) inspectUpstreamGuard(ctx context.Context, input upstreamGuardI
 func (h *Handler) inspectUpstreamGuardWithEventID(ctx context.Context, input upstreamGuardInput) (upstreamguard.Verdict, int64) {
 	cfg := upstreamguard.NormalizeConfig(input.Config)
 	input.Config = cfg
-	if cfg.Mode == upstreamguard.ModeOff || !cfg.Enabled {
+	if !cfg.Enabled {
+		return upstreamguard.Verdict{Enabled: false, Direction: input.Direction, Action: "allow", RiskLevel: upstreamguard.RiskNone}, 0
+	}
+	if cfg.Mode == upstreamguard.ModeOff {
 		verdict := upstreamguard.Verdict{Enabled: false, Direction: input.Direction, Action: "allow", RiskLevel: upstreamguard.RiskNone}
 		if shouldCaptureFullRaw(cfg) && !input.DeferCapture {
 			h.recordUpstreamGuardCapture(ctx, input, verdict, 0, database.SecurityCaptureReasonFull)
 		}
 		return verdict, 0
 	}
-	scanner := input.Scanner
-	if scanner == nil {
-		scanner = defaultUpstreamGuardScanner
+	var verdict upstreamguard.Verdict
+	var err error
+	if input.Scanner == nil {
+		verdict, err = defaultUpstreamGuardScanner(ctx, input)
+	} else {
+		verdict, err = runUpstreamGuardScanner(ctx, input.Scanner, input)
 	}
-	verdict, err := runUpstreamGuardScanner(ctx, scanner, input)
 	if err != nil {
 		verdict = upstreamguard.Verdict{
 			Enabled:      true,
@@ -337,7 +364,17 @@ func defaultUpstreamGuardScanner(_ context.Context, input upstreamGuardInput) (u
 }
 
 func shouldRecordUpstreamGuardEvent(verdict upstreamguard.Verdict) bool {
+	if isToolCallOnlyVerdict(verdict) {
+		return false
+	}
 	return verdict.ScannerError != "" || verdict.RiskLevel != upstreamguard.RiskNone || len(verdict.RuleIDs) > 0
+}
+
+func isToolCallOnlyVerdict(verdict upstreamguard.Verdict) bool {
+	return verdict.ScannerError == "" &&
+		verdict.ToolCall &&
+		len(verdict.RuleIDs) == 1 &&
+		verdict.RuleIDs[0] == upstreamguard.RuleToolCall
 }
 
 func shouldBlockUpstreamGuard(verdict upstreamguard.Verdict) bool {
@@ -350,6 +387,14 @@ func shouldCaptureHitRaw(cfg upstreamguard.Config) bool {
 
 func shouldCaptureFullRaw(cfg upstreamguard.Config) bool {
 	return cfg.CaptureMode == upstreamguard.CaptureModeFullRaw
+}
+
+func shouldKeepUpstreamGuardRequestBody(cfg upstreamguard.Config) bool {
+	cfg = upstreamguard.NormalizeConfig(cfg)
+	if !cfg.Enabled {
+		return false
+	}
+	return cfg.Mode != upstreamguard.ModeOff || shouldCaptureFullRaw(cfg)
 }
 
 func upstreamGuardBlockMessage(verdict upstreamguard.Verdict) string {
@@ -448,11 +493,11 @@ func (h *Handler) recordUpstreamGuardCapture(ctx context.Context, input upstream
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	body, truncated := captureBody(input.Body, input.Config.CaptureMaxBodyBytes)
 	sourceType := verdict.Source
 	if sourceType == "" {
 		sourceType = input.Source
 	}
+	body, truncated := inlineSecurityCaptureBody(input.Body, input.Config.CaptureMaxBodyBytes)
 	_, _ = h.db.InsertSecurityCapture(ctx, &database.SecurityCaptureInput{
 		SecurityEventID: eventID,
 		CaptureReason:   reason,
@@ -474,11 +519,11 @@ func (h *Handler) recordUpstreamGuardCapture(ctx context.Context, input upstream
 	})
 }
 
-func captureBody(body []byte, maxBytes int) (string, bool) {
-	if maxBytes > 0 && len(body) > maxBytes {
-		return string(body[:maxBytes]), true
+func inlineSecurityCaptureBody(body []byte, maxBytes int) (string, bool) {
+	if maxBytes < 0 || maxBytes >= len(body) {
+		return string(body), false
 	}
-	return string(body), false
+	return string(body[:maxBytes]), true
 }
 
 func marshalUpstreamGuardRules(verdict upstreamguard.Verdict) string {

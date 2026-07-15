@@ -16,6 +16,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
+import ProxyUrlInput from '@/components/ProxyUrlInput'
 import {
   Table,
   TableBody,
@@ -445,11 +446,12 @@ export default function Settings() {
     prompt_filter_sensitive_words: '',
     prompt_filter_custom_patterns: '[]',
     prompt_filter_disabled_patterns: '[]',
-    upstream_guard_mode: 'warn',
+    security_audit_enabled: false,
+    upstream_guard_mode: 'off',
     upstream_guard_suppressions: '[]',
     security_event_retention_days: 30,
     security_capture_mode: 'hit_raw',
-    security_capture_retention_days: 7,
+    security_capture_retention_days: 1,
     security_capture_max_body_bytes: 1048576,
     client_compat_mode: 'preserve',
     codex_min_cli_version: '0.118.0',
@@ -683,6 +685,7 @@ export default function Settings() {
   const isExternalCache = settingsForm.cache_driver === 'redis'
   const showConnectionPool = isExternalDatabase || isExternalCache
   const canConfigureRemoteMigration = settingsForm.admin_auth_source === 'env' || settingsForm.admin_secret.trim() !== ''
+  const securityAuditEnabled = settingsForm.security_audit_enabled
   const saveButtonLabel = savingSettings ? t('common.saving') : t('settings.saveSettings')
   const siteLogoPreview = sanitizeBrandingLogo(settingsForm.site_logo) || DEFAULT_SITE_LOGO
   const backgroundImagePreview = sanitizeBrandingImage(settingsForm.background_image)
@@ -759,10 +762,10 @@ export default function Settings() {
 
           <SettingsCard title={t('settings.proxyUrl')} description={t('settings.proxyUrlDesc')}>
             <SettingField label={t('settings.proxyUrlLabel')}>
-              <Input
-                placeholder="http://127.0.0.1:51081"
+              <ProxyUrlInput
                 value={settingsForm.proxy_url ?? ''}
-                onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, proxy_url: e.target.value }))}
+                onChange={(proxy_url) => setSettingsForm(f => ({ ...f, proxy_url }))}
+                placeholder={t('proxyInput.urlPlaceholder')}
               />
             </SettingField>
           </SettingsCard>
@@ -1152,9 +1155,28 @@ export default function Settings() {
                     ]}
                   />
                 </SettingField>
+                <SettingField
+                  label={t('settings.securityAuditEnabled')}
+                  description={t('settings.securityAuditEnabledDesc')}
+                  warning={!securityAuditEnabled ? t('settings.securityAuditDisabledWarning') : undefined}
+                >
+                  <Select
+                    value={securityAuditEnabled ? 'true' : 'false'}
+                    onValueChange={(value) => {
+                      const enabled = value === 'true'
+                      setSettingsForm((f) => ({
+                        ...f,
+                        security_audit_enabled: enabled,
+                        upstream_guard_mode: enabled && f.upstream_guard_mode === 'off' ? 'warn' : f.upstream_guard_mode,
+                      }))
+                    }}
+                    options={booleanOptions}
+                  />
+                </SettingField>
                 <SettingField label={t('settings.upstreamGuardMode')} description={t('settings.upstreamGuardModeDesc')}>
                   <Select
                     value={settingsForm.upstream_guard_mode}
+                    disabled={!securityAuditEnabled}
                     onValueChange={(value) => setSettingsForm((f) => ({ ...f, upstream_guard_mode: value as SystemSettings['upstream_guard_mode'] }))}
                     options={[
                       { label: t('settings.upstreamGuardOff'), value: 'off' },
@@ -1177,6 +1199,7 @@ export default function Settings() {
                 <SettingField label={t('settings.securityCaptureMode')} description={t('settings.securityCaptureModeDesc')}>
                   <Select
                     value={settingsForm.security_capture_mode}
+                    disabled={!securityAuditEnabled}
                     onValueChange={(value) => setSettingsForm((f) => ({ ...f, security_capture_mode: value as SystemSettings['security_capture_mode'] }))}
                     options={[
                       { label: t('settings.securityCaptureOff'), value: 'off' },
@@ -1191,8 +1214,9 @@ export default function Settings() {
                     min={1}
                     max={365}
                     value={settingsForm.security_capture_retention_days}
+                    disabled={!securityAuditEnabled}
                     aria-label={t('settings.securityCaptureRetentionDays')}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm((f) => ({ ...f, security_capture_retention_days: parseInt(e.target.value) || 7 }))}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm((f) => ({ ...f, security_capture_retention_days: parseInt(e.target.value) || 1 }))}
                   />
                 </SettingField>
                 <SettingField label={t('settings.securityCaptureMaxBodyBytes')} description={t('settings.securityCaptureMaxBodyBytesDesc')}>
@@ -1201,8 +1225,9 @@ export default function Settings() {
                     min={0}
                     max={67108864}
                     value={settingsForm.security_capture_max_body_bytes}
+                    disabled={!securityAuditEnabled}
                     aria-label={t('settings.securityCaptureMaxBodyBytes')}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm((f) => ({ ...f, security_capture_max_body_bytes: parseInt(e.target.value) || 0 }))}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm((f) => ({ ...f, security_capture_max_body_bytes: parseInt(e.target.value) || 1048576 }))}
                   />
                 </SettingField>
                 <SettingField
@@ -1212,6 +1237,7 @@ export default function Settings() {
                 >
                   <textarea
                     value={settingsForm.upstream_guard_suppressions}
+                    disabled={!securityAuditEnabled}
                     aria-label={t('settings.upstreamGuardSuppressions')}
                     spellCheck={false}
                     className={cn(

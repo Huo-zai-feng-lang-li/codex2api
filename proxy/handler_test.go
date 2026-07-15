@@ -610,6 +610,57 @@ func TestResponsesStreamSendsResponseFailedWhenStreamBreaksAfterFirstToken(t *te
 	}
 }
 
+func TestResponsesStreamMasksHTTP2InternalStreamError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	previousExec := WebsocketExecuteFunc
+	t.Cleanup(func() {
+		WebsocketExecuteFunc = previousExec
+	})
+
+	WebsocketExecuteFunc = func(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header) (*http.Response, error) {
+		sse := `data: {"type":"response.created","response":{"id":"resp_http2_rst"}}` + "\n\n"
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       &errorAfterReader{Reader: strings.NewReader(sse), err: errors.New("stream error: stream ID 17; INTERNAL_ERROR; received from peer")},
+		}, nil
+	}
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4", MaxRetries: 0})
+	store.AddAccount(&auth.Account{DBID: 1, AccessToken: "at", PlanType: "plus", AccountID: "acct-1"})
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true, UseWebsocket: true}, nil)
+
+	router := gin.New()
+	handler.RegisterRoutes(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	reqBody := strings.NewReader(`{"model":"gpt-5.4","input":"hello","stream":true}`)
+	resp, err := http.Post(server.URL+"/v1/responses", "application/json", reqBody)
+	if err != nil {
+		t.Fatalf("post responses: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), `"type":"response.failed"`) {
+		t.Fatalf("terminal response.failed missing: %s", body)
+	}
+	if !strings.Contains(string(body), "上游 HTTP/2 流被对端重置") {
+		t.Fatalf("normalized failure message missing: %s", body)
+	}
+	if strings.Contains(string(body), "stream ID 17") || strings.Contains(string(body), "INTERNAL_ERROR") {
+		t.Fatalf("raw http2 stream error leaked to downstream: %s", body)
+	}
+}
+
 func TestOpenAIResponsesStreamSingleAccountDoesNotApplyFirstTokenTimeout(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

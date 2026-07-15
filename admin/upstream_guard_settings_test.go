@@ -22,7 +22,10 @@ func TestSettingsRoutesExposeAndUpdateUpstreamGuardMode(t *testing.T) {
 	db := newTestAdminDB(t)
 	tc := cache.NewMemory(1)
 	defer tc.Close()
-	store := auth.NewStore(db, tc, &database.SystemSettings{UpstreamGuardMode: upstreamguard.ModeWarn})
+	store := auth.NewStore(db, tc, &database.SystemSettings{
+		SecurityAuditEnabled: true,
+		UpstreamGuardMode:    upstreamguard.ModeWarn,
+	})
 	handler := NewHandler(store, db, tc, proxy.NewRateLimiter(0), "admin-secret")
 	router := gin.New()
 	handler.RegisterRoutes(router)
@@ -42,8 +45,11 @@ func TestSettingsRoutesExposeAndUpdateUpstreamGuardMode(t *testing.T) {
 	if getPayload["upstream_guard_mode"] != upstreamguard.ModeWarn {
 		t.Fatalf("GET upstream_guard_mode = %v, want %s", getPayload["upstream_guard_mode"], upstreamguard.ModeWarn)
 	}
+	if getPayload["security_audit_enabled"] != true {
+		t.Fatalf("GET security_audit_enabled = %v, want true", getPayload["security_audit_enabled"])
+	}
 
-	body := bytes.NewBufferString(`{"upstream_guard_mode":"off","upstream_guard_suppressions":"[{\"rule_id\":\"response_injection\",\"endpoint\":\"/v1/responses\",\"account_id\":42,\"base_url\":\"https://relay.example.com/v1\",\"action\":\"downgrade\"}]","security_event_retention_days":14}`)
+	body := bytes.NewBufferString(`{"security_audit_enabled":false,"upstream_guard_mode":"off","upstream_guard_suppressions":"[{\"rule_id\":\"response_injection\",\"endpoint\":\"/v1/responses\",\"account_id\":42,\"base_url\":\"https://relay.example.com/v1\",\"action\":\"downgrade\"}]","security_event_retention_days":14}`)
 	req = httptest.NewRequest(http.MethodPut, "/api/admin/settings", body)
 	req.Header.Set("X-Admin-Key", "admin-secret")
 	req.Header.Set("Content-Type", "application/json")
@@ -53,7 +59,9 @@ func TestSettingsRoutesExposeAndUpdateUpstreamGuardMode(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("put status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
 	}
-	if cfg := store.GetUpstreamGuardConfig(); cfg.Mode != upstreamguard.ModeOff {
+	if cfg := store.GetUpstreamGuardConfig(); cfg.Enabled {
+		t.Fatal("store Enabled = true, want false")
+	} else if cfg.Mode != upstreamguard.ModeOff {
 		t.Fatalf("store Mode = %q, want %q", cfg.Mode, upstreamguard.ModeOff)
 	} else if len(cfg.Suppressions) != 1 {
 		t.Fatalf("store Suppressions len = %d, want 1", len(cfg.Suppressions))
@@ -64,6 +72,9 @@ func TestSettingsRoutesExposeAndUpdateUpstreamGuardMode(t *testing.T) {
 	}
 	if settings.UpstreamGuardMode != upstreamguard.ModeOff {
 		t.Fatalf("db UpstreamGuardMode = %q, want %q", settings.UpstreamGuardMode, upstreamguard.ModeOff)
+	}
+	if settings.SecurityAuditEnabled {
+		t.Fatal("db SecurityAuditEnabled = true, want false")
 	}
 	if settings.SecurityEventRetentionDays != 14 {
 		t.Fatalf("db SecurityEventRetentionDays = %d, want 14", settings.SecurityEventRetentionDays)
@@ -131,5 +142,66 @@ func TestSettingsRoutesExposeAndUpdateSecurityCaptureConfig(t *testing.T) {
 	}
 	if settings.SecurityCaptureRetentionDays != 3 || settings.SecurityCaptureMaxBodyBytes != 2097152 {
 		t.Fatalf("db capture retention/max = %d/%d", settings.SecurityCaptureRetentionDays, settings.SecurityCaptureMaxBodyBytes)
+	}
+}
+
+func TestSettingsRoutesExposeAndUpdateProxyPromptRewriteConfig(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	tc := cache.NewMemory(1)
+	defer tc.Close()
+	store := auth.NewStore(db, tc, &database.SystemSettings{
+		ProxyRequestSystemPromptEnabled: true,
+		ProxyRequestSystemPrompt:        "initial request prompt",
+		ProxyResponseRewriteEnabled:     false,
+		ProxyResponseRewritePrompt:      "initial response prompt",
+	})
+	handler := NewHandler(store, db, tc, proxy.NewRateLimiter(0), "admin-secret")
+	router := gin.New()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/settings", nil)
+	req.Header.Set("X-Admin-Key", "admin-secret")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("get status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	var getPayload map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &getPayload); err != nil {
+		t.Fatalf("decode get response: %v", err)
+	}
+	if getPayload["proxy_request_system_prompt_enabled"] != true || getPayload["proxy_request_system_prompt"] != "initial request prompt" {
+		t.Fatalf("GET request prompt config mismatch: %#v", getPayload)
+	}
+
+	body := bytes.NewBufferString(`{"proxy_request_system_prompt_enabled":false,"proxy_request_system_prompt":" rewritten request ","proxy_response_rewrite_enabled":true,"proxy_response_rewrite_prompt":" rewritten response "}`)
+	req = httptest.NewRequest(http.MethodPut, "/api/admin/settings", body)
+	req.Header.Set("X-Admin-Key", "admin-secret")
+	req.Header.Set("Content-Type", "application/json")
+	recorder = httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("put status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	cfg := store.GetPromptRewriteConfig()
+	if cfg.RequestSystemPromptEnabled || cfg.RequestSystemPrompt != "rewritten request" {
+		t.Fatalf("store request prompt config = enabled:%t prompt:%q", cfg.RequestSystemPromptEnabled, cfg.RequestSystemPrompt)
+	}
+	if !cfg.ResponseRewriteEnabled || cfg.ResponseRewritePrompt != "rewritten response" {
+		t.Fatalf("store response prompt config = enabled:%t prompt:%q", cfg.ResponseRewriteEnabled, cfg.ResponseRewritePrompt)
+	}
+	settings, err := db.GetSystemSettings(context.Background())
+	if err != nil {
+		t.Fatalf("GetSystemSettings returned error: %v", err)
+	}
+	if settings.ProxyRequestSystemPromptEnabled || settings.ProxyRequestSystemPrompt != "rewritten request" {
+		t.Fatalf("db request prompt config = enabled:%t prompt:%q", settings.ProxyRequestSystemPromptEnabled, settings.ProxyRequestSystemPrompt)
+	}
+	if !settings.ProxyResponseRewriteEnabled || settings.ProxyResponseRewritePrompt != "rewritten response" {
+		t.Fatalf("db response prompt config = enabled:%t prompt:%q", settings.ProxyResponseRewriteEnabled, settings.ProxyResponseRewritePrompt)
 	}
 }

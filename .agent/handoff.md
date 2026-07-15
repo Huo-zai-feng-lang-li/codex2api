@@ -1,21 +1,25 @@
-# 最新接续状态 (2026-06-08 22:01)
+# 最新接续状态 (2026-07-16)
 
 ## 核心进展
-- 安全事件原文取证已完成“命中依据 + 请求/响应原文 + 审阅格式”闭环：`security/upstreamguard/guard.go` 写入 `field/match` 证据，`proxy/upstream_guard.go` 落库规则证据，`frontend/src/pages/SecurityEvents.tsx` 展示规则、字段、命中值和格式化原文。
+- `v2.2.6` 已完成 Responses 上下文断连修复：响应 ID 绑定生成账号；第三方不支持 HTTP 续链、原账号传输失败或账号不可用时，仅在本地完整历史可重放时删除 `previous_response_id` 并重建 `input`。
+- Codex 与 OpenAI Responses 两类账号的成功响应都会登记进程内完整历史；普通请求、未知 Responses 输入项、安全审计与现有工具续链缓存保持原行为。
+- 真实中转双轮验收通过：首轮记忆 `RELEASE-226-Q5`，首次续接准确返回同一 token；日志确认触发 `response_owner_http_failure` 本地历史回放。
+- 发布验证通过：前端 typecheck、代理 URL 单测、`VITE_APP_VERSION=v2.2.6` 生产构建、`go test ./... -count=1`、`git diff --check` 和 Go release build 均成功。
+- 发布产物：`codex2api.v2.2.6.exe`，SHA256 `04C6891C1F5A49D4E1267C824122FE6E8FFFBD3827DB4AA37E0C684FC670003A`。
 
 ## 变更决策
-- 新命中事件的规则 JSON 增加 `field` 与 `match`，用于解释命中了哪个字段和值；旧记录无字段时，前端通过 `frontend/src/utils/securityRawBody.ts` 基于原文和规则类型即时反查。
-- 原文详情默认使用审阅格式：JSON/SSE/JSONL/嵌套 JSON 会自动展开，超长 base64/二进制文本会折叠提示；原文视图、复制、下载仍保留完整未处理正文。
-- 事件详情和原文详情改为近全屏固定头尾、左右独立滚动；首屏优先看告警摘要、命中证据和关联 request/response 原文，不再让原文正文列挤压审阅。
-- 已重新打包、热替换并重启服务：当前运行 `codex2api.exe` SHA256 为 `1ABD089EB9C0A38483D4156381601EE85EA46A15BE46FF288AEF5B7C506169DA`，`/health` 返回 200。
+- 续链是响应归属状态，不依赖普通 session affinity；携带旧响应 ID 时只能选择原 owner。
+- 换账号前必须确认本地历史完整并转为无 `previous_response_id` 的完整输入；缓存缺失时保留原错误，禁止静默按新对话继续。
+- 历史仅保存在进程内，TTL 1 小时、单链 400 items/4 MiB、全局 2000 entries/64 MiB，不写磁盘或 Redis。
+- `v2.2.6` 前端版本由构建变量注入，仓库发布版本由 `v2.2.6` Git 标签确定。
 
-## 待办事项 (Next Steps)
-- [ ] 刷新后台安全事件页，发起一条新的真实 `/v1/responses` 或 `/v1/chat/completions` 请求，在“安全事件 -> 详情”确认规则、字段、命中值和 request/response 原文展示是否顺手。
-- [ ] 如需审计全部正常流量，在“系统设置 -> 安全防护/原文取证”切到“全量保存原文”，排查完成后建议切回“命中后保存原文”控制磁盘增长。
-- [ ] 当前工作区仍有安全审计、生图稳定性、账号页等多文件修改；提交前按主题复核，避免把无关改动混进同一提交说明。
+## 验收入口
+- 健康检查：`http://127.0.0.1:18080/health`。
+- 人工场景：同一线程发送随机 token，结束或中断后首次发送“继续并复述 token”，应直接准确返回。
+- 关键日志：`OpenAI Responses 续链切换为本地完整历史回放`。
 
-## 关键上下文
-- 目录: `C:\Users\Administrator\Desktop\codex2api`
-- 主要文件: `security/upstreamguard/guard.go`, `proxy/upstream_guard.go`, `frontend/src/pages/SecurityEvents.tsx`
-- 计划文件: `.agent/plan-原文取证与全量审计.md`
-- 关键验证: `node frontend/src/utils/securityRawBody.test.mjs`、`npm run typecheck`、`npm run build`、`go test ./...`、`go build -o codex2api.new.exe .`
+## 关键文件
+- `proxy/responses_continuity.go`
+- `proxy/responses_continuity_test.go`
+- `proxy/handler.go`
+- `CHANGELOG.md`

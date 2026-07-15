@@ -69,80 +69,22 @@ func main() {
 	if err == nil && settings == nil {
 		// 初次运行，保存初始安全设置到数据库
 		log.Printf("初次运行，初始化系统默认设置...")
-		settings = &database.SystemSettings{
-			SiteName:                         database.DefaultSiteName,
-			MaxConcurrency:                   2,
-			GlobalRPM:                        0,
-			TestModel:                        "gpt-5.4",
-			TestConcurrency:                  50,
-			MaxRateLimitRetries:              1,
-			BackgroundRefreshIntervalMinutes: 2,
-			UsageProbeMaxAgeMinutes:          10,
-			UsageProbeConcurrency:            16,
-			RecoveryProbeIntervalMinutes:     30,
-			LazyMode:                         false,
-			ProxyURL:                         "",
-			PgMaxConns:                       50,
-			RedisPoolSize:                    30,
-			AutoCleanUnauthorized:            false,
-			AutoCleanRateLimited:             false,
-			PromptFilterMode:                 "monitor",
-			PromptFilterThreshold:            50,
-			PromptFilterStrictThreshold:      90,
-			PromptFilterLogMatches:           true,
-			PromptFilterMaxTextLength:        81920,
-			PromptFilterCustomPatterns:       "[]",
-			PromptFilterDisabledPatterns:     "[]",
-			ClientCompatMode:                 proxy.ClientCompatModePreserve,
-			CodexMinCLIVersion:               "0.118.0",
-			UsageLogMode:                     database.UsageLogModeFull,
-			UsageLogBatchSize:                200,
-			UsageLogFlushIntervalSeconds:     5,
-			StreamFlushPolicy:                proxy.StreamFlushPolicyImmediate,
-			StreamFlushIntervalMS:            20,
-			FirstTokenTimeoutSeconds:         15,
-			DispatchQueueLimit:               0,
-			ImageStorageConfig:               "{}",
-			UpstreamGuardMode:                database.DefaultUpstreamGuardMode,
-		}
+		settings = database.DefaultSystemSettings()
 		_ = db.UpdateSystemSettings(context.Background(), settings)
 	} else if err != nil {
 		log.Printf("警告: 读取系统设置失败: %v，将采用安全后备策略", err)
-		settings = &database.SystemSettings{
-			SiteName:                         database.DefaultSiteName,
-			MaxConcurrency:                   2,
-			GlobalRPM:                        0,
-			TestModel:                        "gpt-5.4",
-			TestConcurrency:                  50,
-			MaxRateLimitRetries:              1,
-			BackgroundRefreshIntervalMinutes: 2,
-			UsageProbeMaxAgeMinutes:          10,
-			UsageProbeConcurrency:            16,
-			RecoveryProbeIntervalMinutes:     30,
-			LazyMode:                         false,
-			PgMaxConns:                       50,
-			RedisPoolSize:                    30,
-			PromptFilterMode:                 "monitor",
-			PromptFilterThreshold:            50,
-			PromptFilterStrictThreshold:      90,
-			PromptFilterLogMatches:           true,
-			PromptFilterMaxTextLength:        81920,
-			PromptFilterCustomPatterns:       "[]",
-			PromptFilterDisabledPatterns:     "[]",
-			ClientCompatMode:                 proxy.ClientCompatModePreserve,
-			CodexMinCLIVersion:               "0.118.0",
-			UsageLogMode:                     database.UsageLogModeFull,
-			UsageLogBatchSize:                200,
-			UsageLogFlushIntervalSeconds:     5,
-			StreamFlushPolicy:                proxy.StreamFlushPolicyImmediate,
-			StreamFlushIntervalMS:            20,
-			FirstTokenTimeoutSeconds:         15,
-			ImageStorageConfig:               "{}",
-			UpstreamGuardMode:                database.DefaultUpstreamGuardMode,
-		}
+		settings = database.DefaultSystemSettings()
 	} else {
 		log.Printf("已加载持久化业务设置: ProxyURL=%s, MaxConcurrency=%d, GlobalRPM=%d, PgMaxConns=%d, RedisPoolSize=%d",
 			settings.ProxyURL, settings.MaxConcurrency, settings.GlobalRPM, settings.PgMaxConns, settings.RedisPoolSize)
+	}
+	if database.UpgradeLegacySecurityCaptureDefaults(settings) {
+		if err := db.UpdateSystemSettings(context.Background(), settings); err != nil {
+			log.Printf("警告: 升级原文审计默认值失败: %v", err)
+		} else {
+			log.Printf("已升级原文审计默认值: mode=%s retention_days=%d max_body_bytes=%d",
+				settings.SecurityCaptureMode, settings.SecurityCaptureRetentionDays, settings.SecurityCaptureMaxBodyBytes)
+		}
 	}
 	if settings.FirstTokenTimeoutSeconds == 0 {
 		settings.FirstTokenTimeoutSeconds = 15
@@ -281,6 +223,8 @@ func main() {
 	deviceCfg := proxy.DeviceProfileConfigFromEnv(os.Getenv)
 	handler := proxy.NewHandler(store, db, cfg, deviceCfg)
 	handler.SetRuntimeCache(tc)
+	stopSecurityCaptureCleanup := proxy.StartSecurityCaptureCleanup(db)
+	defer stopSecurityCaptureCleanup()
 
 	// 注册 WebSocket 执行函数（避免 proxy ↔ wsrelay 循环依赖）
 	proxy.WebsocketExecuteFunc = wsrelay.ExecuteRequestWebsocket

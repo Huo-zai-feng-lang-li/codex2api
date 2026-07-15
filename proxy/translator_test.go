@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -1250,6 +1251,141 @@ func TestPrepareCompactResponsesBody_RemovesClientSuppliedInclude(t *testing.T) 
 
 	if gjson.GetBytes(got, "include").Exists() {
 		t.Fatalf("expected client-supplied include to be removed for compact body, got %s", string(got))
+	}
+}
+
+const futureResponsesContractBody = `{
+	"model":"gpt-5.4",
+	"input":[
+		{
+			"type":"additional_tools",
+			"tools":[{
+				"type":"function",
+				"name":"future_lookup",
+				"parameters":{
+					"type":"object",
+					"properties":{"query":{"type":"string"}}
+				}
+			}],
+			"payload":{
+				"nested":{
+					"custom_field":"preserve-me",
+					"custom_list":[1,{"enabled":true}]
+				}
+			}
+		},
+		{
+			"type":"compaction_trigger",
+			"threshold":4096,
+			"nested":{"custom_field":"trigger-payload"}
+		},
+		{
+			"type":"future_response_item_v1",
+			"payload":{
+				"nested":{"custom_field":"future-payload"}
+			}
+		}
+	]
+}`
+
+func TestPrepareResponsesBody_PreservesFutureResponseContractFields(t *testing.T) {
+	got, expandedInputRaw := PrepareResponsesBody([]byte(futureResponsesContractBody))
+
+	assertFutureResponseContractFieldsPreserved(t, got)
+	assertFutureResponseContractInputPreserved(t, []byte(expandedInputRaw), "")
+}
+
+func TestPrepareResponsesWebSocketBody_PreservesFutureResponseContractFields(t *testing.T) {
+	got, expandedInputRaw := PrepareResponsesWebSocketBody([]byte(futureResponsesContractBody))
+
+	assertFutureResponseContractFieldsPreserved(t, got)
+	assertFutureResponseContractInputPreserved(t, []byte(expandedInputRaw), "")
+}
+
+func TestPrepareCompactResponsesBody_PreservesFutureResponseContractFields(t *testing.T) {
+	got, expandedInputRaw := PrepareCompactResponsesBody([]byte(futureResponsesContractBody))
+
+	assertFutureResponseContractFieldsPreserved(t, got)
+	assertFutureResponseContractInputPreserved(t, []byte(expandedInputRaw), "")
+}
+
+func TestPrepareOpenAIResponsesBody_PreservesFutureResponseContractFields(t *testing.T) {
+	got := PrepareOpenAIResponsesBody([]byte(futureResponsesContractBody))
+
+	assertFutureResponseContractFieldsPreserved(t, got)
+}
+
+func TestPrepareOpenAIResponsesWebSocketBody_PreservesFutureResponseContractFields(t *testing.T) {
+	got := PrepareOpenAIResponsesWebSocketBody([]byte(futureResponsesContractBody))
+
+	assertFutureResponseContractFieldsPreserved(t, got)
+}
+
+func assertFutureResponseContractFieldsPreserved(t *testing.T, body []byte) {
+	t.Helper()
+
+	assertFutureResponseContractInputPreserved(t, body, "input.")
+}
+
+func assertFutureResponseContractInputPreserved(t *testing.T, body []byte, prefix string) {
+	t.Helper()
+
+	assertJSONPathEquals(t, body, prefix+"0.type", "additional_tools")
+	assertJSONPathEquals(t, body, prefix+"0.tools.0.name", "future_lookup")
+	assertJSONPathRawEquals(t, body, prefix+"0.payload", `{
+		"nested":{
+			"custom_field":"preserve-me",
+			"custom_list":[1,{"enabled":true}]
+		}
+	}`)
+	assertJSONPathRawEquals(t, body, prefix+"1", `{
+		"type":"compaction_trigger",
+		"threshold":4096,
+		"nested":{"custom_field":"trigger-payload"}
+	}`)
+	assertJSONPathEquals(t, body, prefix+"2.type", "future_response_item_v1")
+	assertJSONPathRawEquals(t, body, prefix+"2.payload", `{
+		"nested":{
+			"custom_field":"future-payload"
+		}
+	}`)
+}
+
+func assertJSONPathEquals(t *testing.T, body []byte, path string, want any) {
+	t.Helper()
+
+	got := gjson.GetBytes(body, path)
+	if !got.Exists() {
+		t.Fatalf("expected %s to be preserved; body=%s", path, body)
+	}
+
+	var gotValue any
+	if err := json.Unmarshal([]byte(got.Raw), &gotValue); err != nil {
+		t.Fatalf("decode %s: %v; raw=%s", path, err, got.Raw)
+	}
+	if !reflect.DeepEqual(gotValue, want) {
+		t.Fatalf("%s mismatch: got %#v want %#v; body=%s", path, gotValue, want, body)
+	}
+}
+
+func assertJSONPathRawEquals(t *testing.T, body []byte, path string, wantRaw string) {
+	t.Helper()
+
+	got := gjson.GetBytes(body, path)
+	if !got.Exists() {
+		t.Fatalf("expected %s to be preserved; body=%s", path, body)
+	}
+
+	var gotValue any
+	if err := json.Unmarshal([]byte(got.Raw), &gotValue); err != nil {
+		t.Fatalf("decode %s: %v; raw=%s", path, err, got.Raw)
+	}
+	var wantValue any
+	if err := json.Unmarshal([]byte(wantRaw), &wantValue); err != nil {
+		t.Fatalf("decode expected %s: %v; raw=%s", path, err, wantRaw)
+	}
+	if !reflect.DeepEqual(gotValue, wantValue) {
+		t.Fatalf("%s payload mismatch: got %#v want %#v; body=%s", path, gotValue, wantValue, body)
 	}
 }
 
