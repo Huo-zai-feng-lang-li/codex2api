@@ -577,10 +577,10 @@ func (registry *openAIResponsesContinuityRegistry) persist(db responsesContinuit
 			registry.recordPersistenceFailure()
 			log.Printf("Responses 续链过期数据清理失败: %v", err)
 		}
-		if _, err := db.TrimResponsesContinuations(ctx, registry.limits.maxEntries, registry.limits.maxBytes); err != nil {
-			registry.recordPersistenceFailure()
-			log.Printf("Responses 续链磁盘容量清理失败: %v", err)
-		}
+	}
+	if _, err := db.TrimResponsesContinuations(ctx, registry.limits.maxEntries, registry.limits.maxBytes); err != nil {
+		registry.recordPersistenceFailure()
+		log.Printf("Responses 续链磁盘容量清理失败: %v", err)
 	}
 }
 

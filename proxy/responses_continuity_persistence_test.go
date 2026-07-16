@@ -12,6 +12,10 @@ import (
 
 type blockingResponsesContinuityPersistence struct{}
 
+type countingResponsesContinuityPersistence struct {
+	trimCalls int
+}
+
 func (blockingResponsesContinuityPersistence) UpsertResponsesContinuation(ctx context.Context, _ *database.ResponsesContinuationRow) error {
 	<-ctx.Done()
 	return ctx.Err()
@@ -30,6 +34,27 @@ func (blockingResponsesContinuityPersistence) PruneResponsesContinuations(contex
 }
 
 func (blockingResponsesContinuityPersistence) TrimResponsesContinuations(context.Context, int, int) (int64, error) {
+	return 0, nil
+}
+
+func (*countingResponsesContinuityPersistence) UpsertResponsesContinuation(context.Context, *database.ResponsesContinuationRow) error {
+	return nil
+}
+
+func (*countingResponsesContinuityPersistence) GetResponsesContinuation(context.Context, string) (database.ResponsesContinuationRow, bool, error) {
+	return database.ResponsesContinuationRow{}, false, nil
+}
+
+func (*countingResponsesContinuityPersistence) TouchResponsesContinuations(context.Context, []string, time.Time) error {
+	return nil
+}
+
+func (*countingResponsesContinuityPersistence) PruneResponsesContinuations(context.Context, time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (persistence *countingResponsesContinuityPersistence) TrimResponsesContinuations(context.Context, int, int) (int64, error) {
+	persistence.trimCalls++
 	return 0, nil
 }
 
@@ -125,6 +150,24 @@ func TestOpenAIResponsesContinuityPersistenceTimeoutFailsOpen(t *testing.T) {
 	}
 	if failures := registry.stats().PersistenceFailures; failures != 1 {
 		t.Fatalf("persistence failures = %d, want 1", failures)
+	}
+}
+
+func TestOpenAIResponsesContinuityChecksDiskLimitAfterEveryStore(t *testing.T) {
+	persistence := &countingResponsesContinuityPersistence{}
+	registry := newOpenAIResponsesContinuityRegistry(openAIResponsesContinuityLimits{
+		ttl: time.Hour, maxEntries: 20, maxItems: 20,
+		maxItemBytes: 1 << 20, maxBytes: 2 << 20,
+	})
+	if err := registry.setPersistence(context.Background(), persistence); err != nil {
+		t.Fatalf("setPersistence: %v", err)
+	}
+	persistence.trimCalls = 0
+	registry.store("resp_limit", "", openAIResponsesContinuation{
+		input: []json.RawMessage{json.RawMessage(`{"type":"message","role":"user","content":"hello"}`)},
+	})
+	if persistence.trimCalls != 1 {
+		t.Fatalf("trim calls after store = %d, want 1", persistence.trimCalls)
 	}
 }
 
