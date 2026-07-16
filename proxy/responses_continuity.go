@@ -29,7 +29,10 @@ const (
 
 var openAIResponsesContinuityDBTimeout = 250 * time.Millisecond
 
-const openAIResponsesContinuityCleanupInterval = time.Minute
+const (
+	openAIResponsesContinuityCleanupInterval = time.Minute
+	openAIResponsesContinuityCleanupTimeout  = 2 * time.Second
+)
 
 type openAIResponsesContinuityLimits struct {
 	ttl          time.Duration
@@ -67,16 +70,24 @@ type responsesContinuityPersistence interface {
 	TrimResponsesContinuations(context.Context, int, int) (int64, error)
 }
 
-type openAIResponsesContinuityRegistry struct {
-	mu          sync.Mutex
-	entries     map[string]openAIResponsesContinuation
-	totalBytes  int
-	evictions   uint64
-	limits      openAIResponsesContinuityLimits
-	now         func() time.Time
+type openAIResponsesContinuityCleanupRequest struct {
 	persistence responsesContinuityPersistence
-	lastCleanup time.Time
-	persistFail uint64
+	accessedAt  time.Time
+}
+
+type openAIResponsesContinuityRegistry struct {
+	mu             sync.Mutex
+	entries        map[string]openAIResponsesContinuation
+	totalBytes     int
+	evictions      uint64
+	limits         openAIResponsesContinuityLimits
+	now            func() time.Time
+	persistence    responsesContinuityPersistence
+	lastCleanup    time.Time
+	persistFail    uint64
+	cleanupMu      sync.Mutex
+	cleanupRunning bool
+	cleanupPending *openAIResponsesContinuityCleanupRequest
 }
 
 var openAIResponsesContinuity = newOpenAIResponsesContinuityRegistry(openAIResponsesContinuityLimitsFromEnv(os.Getenv))
@@ -573,12 +584,53 @@ func (registry *openAIResponsesContinuityRegistry) persist(db responsesContinuit
 		log.Printf("Responses 续链访问时间持久化失败: %v", err)
 	}
 	if cleanup {
-		if _, err := db.PruneResponsesContinuations(ctx, entry.accessedAt.Add(-registry.limits.ttl)); err != nil {
-			registry.recordPersistenceFailure()
-			log.Printf("Responses 续链过期数据清理失败: %v", err)
-		}
+		registry.schedulePersistenceCleanup(db, entry.accessedAt)
 	}
-	if _, err := db.TrimResponsesContinuations(ctx, registry.limits.maxEntries, registry.limits.maxBytes); err != nil {
+}
+
+func (registry *openAIResponsesContinuityRegistry) schedulePersistenceCleanup(db responsesContinuityPersistence, accessedAt time.Time) {
+	request := &openAIResponsesContinuityCleanupRequest{persistence: db, accessedAt: accessedAt}
+	registry.cleanupMu.Lock()
+	registry.cleanupPending = request
+	if registry.cleanupRunning {
+		registry.cleanupMu.Unlock()
+		return
+	}
+	registry.cleanupRunning = true
+	registry.cleanupMu.Unlock()
+	go registry.runPersistenceCleanup()
+}
+
+func (registry *openAIResponsesContinuityRegistry) runPersistenceCleanup() {
+	for {
+		request := registry.takePersistenceCleanup()
+		if request == nil {
+			return
+		}
+		registry.cleanupPersistence(request)
+	}
+}
+
+func (registry *openAIResponsesContinuityRegistry) takePersistenceCleanup() *openAIResponsesContinuityCleanupRequest {
+	registry.cleanupMu.Lock()
+	defer registry.cleanupMu.Unlock()
+	request := registry.cleanupPending
+	registry.cleanupPending = nil
+	if request == nil {
+		registry.cleanupRunning = false
+	}
+	return request
+}
+
+func (registry *openAIResponsesContinuityRegistry) cleanupPersistence(request *openAIResponsesContinuityCleanupRequest) {
+	ctx, cancel := context.WithTimeout(context.Background(), openAIResponsesContinuityCleanupTimeout)
+	defer cancel()
+	if _, err := request.persistence.PruneResponsesContinuations(ctx, request.accessedAt.Add(-registry.limits.ttl)); err != nil {
+		registry.recordPersistenceFailure()
+		log.Printf("Responses 续链过期数据清理失败: %v", err)
+		return
+	}
+	if _, err := request.persistence.TrimResponsesContinuations(ctx, registry.limits.maxEntries, registry.limits.maxBytes); err != nil {
 		registry.recordPersistenceFailure()
 		log.Printf("Responses 续链磁盘容量清理失败: %v", err)
 	}

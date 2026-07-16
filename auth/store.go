@@ -232,7 +232,7 @@ func (a *Account) hasRecoveryProbeCredentialLocked() bool {
 	if a.isOpenAIResponsesAPILocked() {
 		return true
 	}
-	return strings.TrimSpace(a.RefreshToken) != ""
+	return strings.TrimSpace(a.AccessToken) != "" || strings.TrimSpace(a.RefreshToken) != ""
 }
 
 func (a *Account) IsOpenAIResponsesAPI() bool {
@@ -1033,6 +1033,29 @@ func (a *Account) IsBanned() bool {
 	return a.healthTierLocked() == HealthTierBanned
 }
 
+func (a *Account) cooldownRuntimeStatusLocked(now time.Time) string {
+	if isStickyCooldownClassification(a.CooldownReason) {
+		return a.CooldownReason
+	}
+	if now.Before(a.CooldownUtil) {
+		if a.CooldownReason != "" {
+			return a.CooldownReason
+		}
+		return "cooldown"
+	}
+	if a.hasDispatchCredentialLocked() {
+		return "active"
+	}
+	if a.RefreshToken != "" {
+		return "refreshing"
+	}
+	return "error"
+}
+
+func isStickyCooldownClassification(reason string) bool {
+	return reason == "rate_limited" || reason == "payment_required"
+}
+
 // RuntimeStatus 返回运行时状态字符串（供 admin API 使用）
 func (a *Account) RuntimeStatus() string {
 	a.mu.RLock()
@@ -1052,19 +1075,7 @@ func (a *Account) RuntimeStatus() string {
 	case StatusError:
 		return "error"
 	case StatusCooldown:
-		if now.Before(a.CooldownUtil) {
-			if a.CooldownReason != "" {
-				return a.CooldownReason
-			}
-			return "cooldown"
-		}
-		if a.hasDispatchCredentialLocked() {
-			return "active" // 冷却过期，已恢复
-		}
-		if a.RefreshToken != "" {
-			return "refreshing"
-		}
-		return "error"
+		return a.cooldownRuntimeStatusLocked(now)
 	default:
 		if a.hasDispatchCredentialLocked() {
 			return "active"
@@ -1485,7 +1496,8 @@ func (a *Account) NeedsRecoveryProbe(minInterval time.Duration) bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
-	recoverableState := a.healthTierLocked() == HealthTierBanned || a.Status == StatusError
+	recoverableCooldown := a.Status == StatusCooldown && isStickyCooldownClassification(a.CooldownReason)
+	recoverableState := a.healthTierLocked() == HealthTierBanned || a.Status == StatusError || recoverableCooldown
 	if a.recoveryProbeInFlight || !recoverableState {
 		return false
 	}
@@ -4476,11 +4488,22 @@ func (s *Store) ReportRequestSuccessTTFT(acc *Account, firstToken time.Duration,
 		return
 	}
 
+	now := time.Now()
 	acc.mu.Lock()
+	recovered := acc.Status == StatusCooldown || acc.Status == StatusError
+	if recovered {
+		acc.Status = StatusReady
+		acc.ErrorMsg = ""
+		acc.CooldownUtil = time.Time{}
+		acc.CooldownReason = ""
+		if acc.HealthTier != HealthTierBanned {
+			acc.HealthTier = HealthTierWarm
+		}
+	}
 	acc.recordFirstTokenLocked(firstToken)
 	acc.recordLatencyLocked(latency)
 	acc.recordResultLocked(true)
-	acc.LastSuccessAt = time.Now()
+	acc.LastSuccessAt = now
 	acc.SuccessStreak = clampInt(acc.SuccessStreak+1, 0, 20)
 	acc.FailureStreak = 0
 	if acc.HealthTier == "" {
@@ -4489,6 +4512,23 @@ func (s *Store) ReportRequestSuccessTTFT(acc *Account, firstToken time.Duration,
 	acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
 	acc.mu.Unlock()
 	s.fastSchedulerUpdate(acc)
+	if recovered {
+		s.deleteCachedAccountCooldown(acc.DBID)
+		s.clearRecoveredAccountStateAsync(acc.DBID)
+	}
+}
+
+func (s *Store) clearRecoveredAccountStateAsync(accountID int64) {
+	if s == nil || s.db == nil || accountID == 0 {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := s.db.ClearError(ctx, accountID); err != nil {
+			log.Printf("[账号 %d] 持久化真实请求成功恢复状态失败: %v", accountID, err)
+		}
+	}()
 }
 
 // ReportRequestFailure 记录一次失败请求，用于动态调度评分

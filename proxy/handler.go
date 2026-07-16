@@ -3691,7 +3691,7 @@ func ApplyUpstreamAccountFailure(store *auth.Store, account *auth.Account, statu
 			store.MarkError(account, upstreamAccountErrorMessage(statusCode, body))
 			return true
 		}
-		store.MarkCooldownWithError(account, 30*time.Minute, "payment_required", upstreamAccountErrorMessage(statusCode, body))
+		store.MarkCooldownWithError(account, 6*time.Hour, "payment_required", upstreamAccountErrorMessage(statusCode, body))
 		return true
 	default:
 		return false

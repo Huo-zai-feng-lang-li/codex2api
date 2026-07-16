@@ -2448,6 +2448,23 @@ func TestDeactivatedWorkspace402MarksAccountError(t *testing.T) {
 	}
 }
 
+func TestPaymentRequiredUsesLongRecoveryCooldown(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: 43, AccessToken: "at", Status: auth.StatusReady}
+	startedAt := time.Now()
+
+	if !ApplyUpstreamAccountFailure(store, account, http.StatusPaymentRequired, []byte(`{"error":"Insufficient balance"}`), nil, "gpt-5.4") {
+		t.Fatal("ApplyUpstreamAccountFailure() = false, want true")
+	}
+	reason, until := account.GetCooldownSnapshot()
+	if reason != "payment_required" {
+		t.Fatalf("CooldownReason = %q, want payment_required", reason)
+	}
+	if until.Before(startedAt.Add(6*time.Hour - time.Minute)) {
+		t.Fatalf("CooldownUntil = %s, want about 6 hours after %s", until, startedAt)
+	}
+}
+
 func TestSendFinalUpstreamError_UsageLimitRewrites429(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

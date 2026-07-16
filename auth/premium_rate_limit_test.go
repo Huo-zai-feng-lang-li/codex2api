@@ -38,19 +38,26 @@ func TestPremium5hRateLimitedAccountIsFencedFromScheduling(t *testing.T) {
 	}
 }
 
-func TestPremium5hRateLimitExpiresAndUsageProbeResumes(t *testing.T) {
+func TestPremium5hRateLimitExpiryResumesSchedulingButKeepsClassification(t *testing.T) {
 	acc := newPremium5hTestAccount("team", time.Now().Add(-time.Minute))
 	acc.Status = StatusCooldown
 	acc.CooldownReason = "rate_limited"
 	acc.CooldownUtil = time.Now().Add(-time.Minute)
 
 	snapshot := acc.GetSchedulerDebugSnapshot(4)
-	if got := acc.RuntimeStatus(); got != "active" {
-		t.Fatalf("RuntimeStatus() = %q, want active after reset expires", got)
+	if got := acc.RuntimeStatus(); got != "rate_limited" {
+		t.Fatalf("RuntimeStatus() = %q, want rate_limited until a successful connection test", got)
 	}
 	if !acc.IsAvailable() {
 		t.Fatal("IsAvailable() = false, want true after reset expires")
 	}
+	store := &Store{accounts: []*Account{acc}, maxConcurrency: 4}
+	store.SetFastSchedulerEnabled(true)
+	selected := store.Next()
+	if selected == nil {
+		t.Fatal("Next() returned nil, want expired cooldown account to re-enter scheduling")
+	}
+	store.Release(selected)
 	if snapshot.HealthTier != string(HealthTierHealthy) {
 		t.Fatalf("HealthTier = %q, want %q", snapshot.HealthTier, HealthTierHealthy)
 	}
