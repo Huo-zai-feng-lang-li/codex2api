@@ -444,6 +444,65 @@ func TestOpenAIResponsesContinuationFailsExplicitlyWhenFallbackIsSaturated(t *te
 	}
 }
 
+func TestOpenAIResponsesThirdPartyContinuationReplaysLocallyBeforeUpstream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetOpenAIResponsesContinuityForTest()
+	previousMode := openAIResponsesContinuityMode
+	openAIResponsesContinuityMode = openAIResponsesContinuityModeAuto
+	t.Cleanup(func() { openAIResponsesContinuityMode = previousMode })
+
+	const token = "THIRD-PARTY-CONTINUITY"
+	var mu sync.Mutex
+	requests := make([][]byte, 0, 2)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read upstream body: %v", err)
+			return
+		}
+		mu.Lock()
+		requests = append(requests, append([]byte(nil), body...))
+		attempt := len(requests)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if attempt == 1 {
+			_, _ = w.Write([]byte(`{"id":"resp_third_party_root","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ACK"}]}]}`))
+			return
+		}
+		if gjson.GetBytes(body, "previous_response_id").Exists() {
+			_, _ = w.Write([]byte(`{"id":"resp_third_party_forgot","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I forgot"}]}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"resp_third_party_next","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"THIRD-PARTY-CONTINUITY"}]}]}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	handler := newFutureInputOpenAIResponsesHandler(upstream.URL)
+	first := performResponsesRequest(t, handler, []byte(`{"model":"gpt-5.4","input":"remember `+token+`","store":false}`), nil)
+	if first.Code != http.StatusOK {
+		t.Fatalf("root status = %d, want 200; body=%s", first.Code, first.Body.String())
+	}
+	second := performResponsesRequest(t, handler, []byte(`{"model":"gpt-5.4","previous_response_id":"resp_third_party_root","input":"repeat token","store":false}`), nil)
+	if second.Code != http.StatusOK {
+		t.Fatalf("continuation status = %d, want 200; body=%s", second.Code, second.Body.String())
+	}
+	if text := gjson.Get(second.Body.String(), "output.0.content.0.text").String(); text != token {
+		t.Fatalf("continuation text = %q, want %q", text, token)
+	}
+	mu.Lock()
+	got := append([][]byte(nil), requests...)
+	mu.Unlock()
+	if len(got) != 2 {
+		t.Fatalf("upstream requests = %d, want 2", len(got))
+	}
+	if gjson.GetBytes(got[1], "previous_response_id").Exists() {
+		t.Fatalf("third-party continuation trusted upstream state: %s", got[1])
+	}
+	if count := len(gjson.GetBytes(got[1], "input").Array()); count != 3 {
+		t.Fatalf("replayed input count = %d, want 3; body=%s", count, got[1])
+	}
+}
+
 func performResponsesRequest(t *testing.T, handler *Handler, body []byte, headers http.Header) *httptest.ResponseRecorder {
 	t.Helper()
 	recorder := httptest.NewRecorder()

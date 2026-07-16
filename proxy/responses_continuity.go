@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -19,6 +20,8 @@ const (
 	openAIResponsesContinuityMaxItems     = 400
 	openAIResponsesContinuityMaxItemBytes = 4 << 20
 	openAIResponsesContinuityMaxBytes     = 64 << 20
+	openAIResponsesContinuityModeAuto     = "auto"
+	openAIResponsesContinuityModeUpstream = "upstream"
 )
 
 type openAIResponsesContinuityLimits struct {
@@ -57,6 +60,14 @@ type openAIResponsesContinuityRegistry struct {
 }
 
 var openAIResponsesContinuity = newOpenAIResponsesContinuityRegistry(openAIResponsesContinuityLimitsFromEnv(os.Getenv))
+var openAIResponsesContinuityMode = openAIResponsesContinuityModeFromEnv(os.Getenv)
+
+func openAIResponsesContinuityModeFromEnv(getenv func(string) string) string {
+	if strings.EqualFold(strings.TrimSpace(getenv("CODEX_RESPONSES_CONTINUITY_MODE")), openAIResponsesContinuityModeUpstream) {
+		return openAIResponsesContinuityModeUpstream
+	}
+	return openAIResponsesContinuityModeAuto
+}
 
 func openAIResponsesContinuityLimitsFromEnv(getenv func(string) string) openAIResponsesContinuityLimits {
 	return openAIResponsesContinuityLimits{
@@ -136,6 +147,24 @@ func buildOpenAIResponsesContinuationFallback(body []byte) ([]byte, bool) {
 	}
 	fallback, err = sjson.SetRawBytes(fallback, "input", input)
 	return fallback, err == nil
+}
+
+func shouldReplayOpenAIResponsesContinuationBeforeUpstream(body []byte, account *auth.Account) bool {
+	if openAIResponsesContinuityMode == openAIResponsesContinuityModeUpstream || account == nil {
+		return false
+	}
+	if account.IsOpenAIResponsesAPI() {
+		baseURL, _ := account.OpenAIResponsesCredentials()
+		if isOfficialOpenAIResponsesBaseURL(baseURL) {
+			return false
+		}
+	}
+	return canBuildOpenAIResponsesContinuationFallback(body)
+}
+
+func isOfficialOpenAIResponsesBaseURL(baseURL string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	return err == nil && strings.EqualFold(parsed.Hostname(), "api.openai.com")
 }
 
 func canBuildOpenAIResponsesContinuationFallback(body []byte) bool {
@@ -554,4 +583,5 @@ func normalizeContinuationBaseURL(baseURL string) string {
 
 func resetOpenAIResponsesContinuityForTest() {
 	openAIResponsesContinuity.reset()
+	openAIResponsesContinuityMode = openAIResponsesContinuityModeUpstream
 }

@@ -1,6 +1,8 @@
 # 最新接续状态 (2026-07-16)
 
 ## Responses 高并发内存治理
+- C1 真实新线程测试发现第三方中转会接受 `previous_response_id` 并返回 200，但实际忘记首轮 token；现已对非官方 Responses 中转在首次续接时主动发送受限的本地完整历史。修复后真实双轮随机 token 首次续接匹配通过。
+- 可通过 `CODEX_RESPONSES_CONTINUITY_MODE=upstream` 显式信任已验证具备有状态续接能力的中转；默认 `auto` 仅信任官方 `api.openai.com`。
 - 连续性缓存已从“每个响应保存完整历史”改为“父响应指针 + 本轮 input/output 增量”，长链与分叉不再重复复制公共历史。
 - `/v1/responses` 已增加进程级在途请求数、请求体字节和本地完整历史回退并发上限；默认分别为 64、256 MiB、4，饱和时返回明确的 `local_memory_pressure` 或 `local_continuation_busy`。
 - `/health` 已增加 `responses_memory`，可查看在途请求、请求体字节、回退数、拒绝计数、连续性缓存条目/字节/驱逐数及配置上限。

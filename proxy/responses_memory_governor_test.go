@@ -87,6 +87,9 @@ func TestResponsesMemoryLimitsReadEnvironment(t *testing.T) {
 	if continuity.maxEntries != 800 || continuity.maxItemBytes != 6<<20 || continuity.maxBytes != 48<<20 {
 		t.Fatalf("continuity limits = %+v", continuity)
 	}
+	if mode := openAIResponsesContinuityModeFromEnv(func(string) string { return "upstream" }); mode != openAIResponsesContinuityModeUpstream {
+		t.Fatalf("continuity mode = %q, want upstream", mode)
+	}
 }
 
 func TestResponsesMemoryAdmissionMiddlewareRejectsBeforeHandler(t *testing.T) {

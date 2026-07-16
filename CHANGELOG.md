@@ -5,6 +5,7 @@
 ### Improvements
 
 - **Responses high-concurrency memory governance.** Continuation history now stores per-turn parent-linked deltas instead of duplicating full snapshots. Process-wide request count, request-body bytes, and local-history fallback concurrency are bounded and exposed through `/health`; limits are configurable with `CODEX_RESPONSES_*` environment variables.
+- **Third-party continuation integrity.** Non-official Responses relays now receive the bounded local full-history replay on the first continuation attempt instead of trusting a relay-owned `previous_response_id` that may return `200` while silently forgetting context. Set `CODEX_RESPONSES_CONTINUITY_MODE=upstream` only for relays with verified stateful continuation support.
 
 ## v2.2.6 - 2026-07-16
 

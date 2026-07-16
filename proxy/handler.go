@@ -1451,8 +1451,8 @@ func (h *Handler) Responses(c *gin.Context) {
 		guardFirstTokenTimeout := shouldGuardFirstTokenTimeout(pick.poolSnapshot) &&
 			retryExclusions.FirstTokenTimeoutAttempts() == 0
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
-		if continuationOwnerBound && !account.IsOpenAIResponsesAPI() {
-			switch activateContinuationFallback("codex_stateless_continuation") {
+		if continuationOwnerBound && shouldReplayOpenAIResponsesContinuationBeforeUpstream(rawBody, account) {
+			switch activateContinuationFallback("third_party_stateless_continuation") {
 			case continuationFallbackActivated:
 				h.store.Release(account)
 				h.store.UnbindSessionAffinity(affinityKey, account.ID())
