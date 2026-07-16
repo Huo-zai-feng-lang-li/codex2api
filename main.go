@@ -212,6 +212,7 @@ func main() {
 	r.Use(api.VersionMiddleware())
 	security.MaxRequestBodySize = cfg.MaxRequestBodySize
 	r.Use(security.RequestSizeLimiter(int64(security.MaxRequestBodySize)))
+	r.Use(proxy.ResponsesMemoryAdmissionMiddleware())
 	r.Use(api.BodyCacheMiddleware())
 	r.Use(api.CORSMiddleware())
 	r.Use(api.SecurityHeadersMiddleware())
@@ -280,9 +281,10 @@ func main() {
 	// 健康检查
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{
-			"status":    "ok",
-			"available": store.AvailableCount(),
-			"total":     store.AccountCount(),
+			"status":           "ok",
+			"available":        store.AvailableCount(),
+			"total":            store.AccountCount(),
+			"responses_memory": proxy.ResponsesMemoryStats(),
 		})
 	})
 

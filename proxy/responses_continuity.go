@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -20,19 +21,75 @@ const (
 	openAIResponsesContinuityMaxBytes     = 64 << 20
 )
 
-type openAIResponsesContinuation struct {
-	accountID int64
-	baseURL   string
-	history   []json.RawMessage
-	createdAt time.Time
-	size      int
+type openAIResponsesContinuityLimits struct {
+	ttl          time.Duration
+	maxEntries   int
+	maxItems     int
+	maxItemBytes int
+	maxBytes     int
 }
 
-var openAIResponsesContinuity = struct {
+type openAIResponsesContinuation struct {
+	accountID  int64
+	baseURL    string
+	parentID   string
+	input      []json.RawMessage
+	output     []json.RawMessage
+	replayable bool
+	createdAt  time.Time
+	accessedAt time.Time
+	size       int
+}
+
+type openAIResponsesContinuityStats struct {
+	Entries   int
+	Bytes     int
+	Evictions uint64
+}
+
+type openAIResponsesContinuityRegistry struct {
 	mu         sync.Mutex
 	entries    map[string]openAIResponsesContinuation
 	totalBytes int
-}{entries: make(map[string]openAIResponsesContinuation)}
+	evictions  uint64
+	limits     openAIResponsesContinuityLimits
+	now        func() time.Time
+}
+
+var openAIResponsesContinuity = newOpenAIResponsesContinuityRegistry(openAIResponsesContinuityLimitsFromEnv(os.Getenv))
+
+func openAIResponsesContinuityLimitsFromEnv(getenv func(string) string) openAIResponsesContinuityLimits {
+	return openAIResponsesContinuityLimits{
+		ttl:          openAIResponsesContinuityTTL,
+		maxEntries:   positiveEnvInt(getenv, "CODEX_RESPONSES_CONTINUITY_MAX_ENTRIES", openAIResponsesContinuityMaxEntries),
+		maxItems:     openAIResponsesContinuityMaxItems,
+		maxItemBytes: positiveEnvInt(getenv, "CODEX_RESPONSES_CONTINUITY_MAX_CHAIN_MB", openAIResponsesContinuityMaxItemBytes>>20) << 20,
+		maxBytes:     positiveEnvInt(getenv, "CODEX_RESPONSES_CONTINUITY_MAX_BYTES_MB", openAIResponsesContinuityMaxBytes>>20) << 20,
+	}
+}
+
+func newOpenAIResponsesContinuityRegistry(limits openAIResponsesContinuityLimits) *openAIResponsesContinuityRegistry {
+	if limits.ttl <= 0 {
+		limits.ttl = openAIResponsesContinuityTTL
+	}
+	if limits.maxEntries <= 0 {
+		limits.maxEntries = openAIResponsesContinuityMaxEntries
+	}
+	if limits.maxItems <= 0 {
+		limits.maxItems = openAIResponsesContinuityMaxItems
+	}
+	if limits.maxItemBytes <= 0 {
+		limits.maxItemBytes = openAIResponsesContinuityMaxItemBytes
+	}
+	if limits.maxBytes <= 0 {
+		limits.maxBytes = openAIResponsesContinuityMaxBytes
+	}
+	return &openAIResponsesContinuityRegistry{
+		entries: make(map[string]openAIResponsesContinuation),
+		limits:  limits,
+		now:     time.Now,
+	}
+}
 
 func bindOpenAIResponsesContinuationOwner(body []byte, base auth.AccountFilter) (auth.AccountFilter, bool) {
 	previousID := gjson.GetBytes(body, "previous_response_id").String()
@@ -40,7 +97,6 @@ func bindOpenAIResponsesContinuationOwner(body []byte, base auth.AccountFilter) 
 	if !ok {
 		return base, false
 	}
-
 	return func(account *auth.Account) bool {
 		if base != nil && !base(account) {
 			return false
@@ -58,28 +114,37 @@ func bindOpenAIResponsesContinuationOwner(body []byte, base auth.AccountFilter) 
 
 func buildOpenAIResponsesContinuationFallback(body []byte) ([]byte, bool) {
 	previousID := gjson.GetBytes(body, "previous_response_id").String()
-	entry, ok := getOpenAIResponsesContinuation(previousID)
-	if !ok || len(entry.history) == 0 {
+	history, ok := openAIResponsesContinuity.materialize(previousID)
+	if !ok || len(history) == 0 {
 		return body, false
 	}
-
 	current, ok := openAIResponsesInputItems(body)
 	if !ok || len(current) == 0 {
 		return body, false
 	}
-	history := cloneRawMessages(entry.history)
 	history = append(history, current...)
+	if len(history) > openAIResponsesContinuity.limits.maxItems || rawMessagesSize(history) > openAIResponsesContinuity.limits.maxItemBytes {
+		return body, false
+	}
 	input, err := json.Marshal(history)
 	if err != nil {
 		return body, false
 	}
-
 	fallback, err := sjson.DeleteBytes(body, "previous_response_id")
 	if err != nil {
 		return body, false
 	}
 	fallback, err = sjson.SetRawBytes(fallback, "input", input)
 	return fallback, err == nil
+}
+
+func canBuildOpenAIResponsesContinuationFallback(body []byte) bool {
+	previousID := gjson.GetBytes(body, "previous_response_id").String()
+	if !openAIResponsesContinuity.isReplayable(previousID) {
+		return false
+	}
+	current, ok := openAIResponsesInputItems(body)
+	return ok && len(current) > 0
 }
 
 func shouldFallbackOpenAIResponsesContinuation(statusCode int, requestBody, errorBody []byte) bool {
@@ -123,29 +188,18 @@ func cacheOpenAIResponsesContinuation(requestBody, responseData []byte, account 
 	if responseID == "" {
 		return
 	}
-
-	history, ok := parentOpenAIResponsesHistory(requestBody)
-	if ok {
-		var input []json.RawMessage
-		input, ok = openAIResponsesInputItems(requestBody)
-		history = append(history, input...)
+	input, inputOK := openAIResponsesInputItems(requestBody)
+	output, outputOK := openAIResponsesOutputItems(response.Get("output"))
+	if !inputOK || !outputOK {
+		input = nil
+		output = nil
 	}
-	if ok {
-		var output []json.RawMessage
-		output, ok = openAIResponsesOutputItems(response.Get("output"))
-		history = append(history, output...)
-	}
-	if !ok || len(history) > openAIResponsesContinuityMaxItems || rawMessagesSize(history) > openAIResponsesContinuityMaxItemBytes {
-		history = nil
-	}
-
 	baseURL, _ := account.OpenAIResponsesCredentials()
-	setOpenAIResponsesContinuation(responseID, openAIResponsesContinuation{
+	openAIResponsesContinuity.store(responseID, gjson.GetBytes(requestBody, "previous_response_id").String(), openAIResponsesContinuation{
 		accountID: account.ID(),
 		baseURL:   normalizeContinuationBaseURL(baseURL),
-		history:   history,
-		createdAt: time.Now(),
-		size:      rawMessagesSize(history),
+		input:     input,
+		output:    output,
 	})
 }
 
@@ -154,11 +208,7 @@ func parentOpenAIResponsesHistory(requestBody []byte) ([]json.RawMessage, bool) 
 	if previousID == "" {
 		return nil, true
 	}
-	entry, ok := getOpenAIResponsesContinuation(previousID)
-	if !ok || len(entry.history) == 0 {
-		return nil, false
-	}
-	return cloneRawMessages(entry.history), true
+	return openAIResponsesContinuity.materialize(previousID)
 }
 
 func openAIResponsesInputItems(body []byte) ([]json.RawMessage, bool) {
@@ -177,7 +227,6 @@ func openAIResponsesInputItems(body []byte) ([]json.RawMessage, bool) {
 	if !input.IsArray() {
 		return nil, false
 	}
-
 	items := make([]json.RawMessage, 0, len(input.Array()))
 	valid := true
 	input.ForEach(func(_, item gjson.Result) bool {
@@ -228,73 +277,267 @@ func replayableOpenAIResponsesItem(item gjson.Result) (json.RawMessage, bool) {
 }
 
 func getOpenAIResponsesContinuation(responseID string) (openAIResponsesContinuation, bool) {
-	if responseID == "" {
-		return openAIResponsesContinuation{}, false
-	}
-	now := time.Now()
-	openAIResponsesContinuity.mu.Lock()
-	defer openAIResponsesContinuity.mu.Unlock()
-	purgeExpiredOpenAIResponsesContinuityLocked(now)
-	entry, ok := openAIResponsesContinuity.entries[responseID]
-	if !ok {
-		return openAIResponsesContinuation{}, false
-	}
-	entry.history = cloneRawMessages(entry.history)
-	return entry, true
+	return openAIResponsesContinuity.get(responseID)
 }
 
 func setOpenAIResponsesContinuation(responseID string, entry openAIResponsesContinuation) {
-	entry.history = cloneRawMessages(entry.history)
-	openAIResponsesContinuity.mu.Lock()
-	defer openAIResponsesContinuity.mu.Unlock()
-	purgeExpiredOpenAIResponsesContinuityLocked(entry.createdAt)
-	if previous, ok := openAIResponsesContinuity.entries[responseID]; ok {
-		openAIResponsesContinuity.totalBytes -= previous.size
-		delete(openAIResponsesContinuity.entries, responseID)
-	}
-	for len(openAIResponsesContinuity.entries) >= openAIResponsesContinuityMaxEntries ||
-		openAIResponsesContinuity.totalBytes+entry.size > openAIResponsesContinuityMaxBytes {
-		if !evictOldestOpenAIResponsesContinuationLocked() {
-			break
-		}
-	}
-	openAIResponsesContinuity.entries[responseID] = entry
-	openAIResponsesContinuity.totalBytes += entry.size
+	openAIResponsesContinuity.store(responseID, entry.parentID, entry)
 }
 
-func purgeExpiredOpenAIResponsesContinuityLocked(now time.Time) {
-	for responseID, entry := range openAIResponsesContinuity.entries {
-		if now.Sub(entry.createdAt) <= openAIResponsesContinuityTTL {
-			continue
+func (registry *openAIResponsesContinuityRegistry) get(responseID string) (openAIResponsesContinuation, bool) {
+	if responseID == "" {
+		return openAIResponsesContinuation{}, false
+	}
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	now := registry.now()
+	registry.purgeExpiredLocked(now)
+	entry, ok := registry.entries[responseID]
+	if !ok {
+		return openAIResponsesContinuation{}, false
+	}
+	registry.touchAncestorsLocked(responseID, now)
+	entry.input = cloneRawMessages(entry.input)
+	entry.output = cloneRawMessages(entry.output)
+	return entry, true
+}
+
+func (registry *openAIResponsesContinuityRegistry) store(responseID, parentID string, entry openAIResponsesContinuation) {
+	if responseID == "" {
+		return
+	}
+	entry.input = cloneRawMessages(entry.input)
+	entry.output = cloneRawMessages(entry.output)
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	now := registry.now()
+	registry.purgeExpiredLocked(now)
+	registry.removeSubtreeLocked(responseID, false)
+	entry.createdAt = now
+	entry.accessedAt = now
+	entry.parentID = ""
+	entry.replayable = registry.canStoreReplayableLocked(parentID, entry.input, entry.output)
+	if entry.replayable {
+		entry.parentID = parentID
+		entry.size = rawMessagesSize(entry.input) + rawMessagesSize(entry.output)
+		registry.touchAncestorsLocked(parentID, now)
+	} else {
+		entry.input = nil
+		entry.output = nil
+		entry.size = 0
+	}
+	registry.entries[responseID] = entry
+	registry.totalBytes += entry.size
+	registry.enforceLimitsLocked()
+}
+
+func (registry *openAIResponsesContinuityRegistry) canStoreReplayableLocked(parentID string, input, output []json.RawMessage) bool {
+	if len(input) == 0 {
+		return false
+	}
+	items := len(input) + len(output)
+	bytes := rawMessagesSize(input) + rawMessagesSize(output)
+	if parentID != "" {
+		parentItems, parentBytes, ok := registry.chainUsageLocked(parentID)
+		if !ok {
+			return false
 		}
-		openAIResponsesContinuity.totalBytes -= entry.size
-		delete(openAIResponsesContinuity.entries, responseID)
+		items += parentItems
+		bytes += parentBytes
+	}
+	return items <= registry.limits.maxItems && bytes <= registry.limits.maxItemBytes && bytes <= registry.limits.maxBytes
+}
+
+func (registry *openAIResponsesContinuityRegistry) chainUsageLocked(responseID string) (int, int, bool) {
+	items := 0
+	bytes := 0
+	seen := make(map[string]struct{})
+	for responseID != "" {
+		if _, exists := seen[responseID]; exists {
+			return 0, 0, false
+		}
+		seen[responseID] = struct{}{}
+		entry, ok := registry.entries[responseID]
+		if !ok || !entry.replayable {
+			return 0, 0, false
+		}
+		items += len(entry.input) + len(entry.output)
+		bytes += entry.size
+		responseID = entry.parentID
+	}
+	return items, bytes, true
+}
+
+func (registry *openAIResponsesContinuityRegistry) materialize(responseID string) ([]json.RawMessage, bool) {
+	if responseID == "" {
+		return nil, false
+	}
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	now := registry.now()
+	registry.purgeExpiredLocked(now)
+	path := make([]openAIResponsesContinuation, 0, 8)
+	seen := make(map[string]struct{})
+	currentID := responseID
+	totalItems := 0
+	totalBytes := 0
+	for currentID != "" {
+		if _, exists := seen[currentID]; exists {
+			return nil, false
+		}
+		seen[currentID] = struct{}{}
+		entry, ok := registry.entries[currentID]
+		if !ok || !entry.replayable {
+			return nil, false
+		}
+		path = append(path, entry)
+		totalItems += len(entry.input) + len(entry.output)
+		totalBytes += entry.size
+		currentID = entry.parentID
+	}
+	if totalItems > registry.limits.maxItems || totalBytes > registry.limits.maxItemBytes {
+		return nil, false
+	}
+	history := make([]json.RawMessage, 0, totalItems)
+	for index := len(path) - 1; index >= 0; index-- {
+		history = appendClonedRawMessages(history, path[index].input)
+		history = appendClonedRawMessages(history, path[index].output)
+	}
+	registry.touchAncestorsLocked(responseID, now)
+	return history, true
+}
+
+func (registry *openAIResponsesContinuityRegistry) isReplayable(responseID string) bool {
+	if responseID == "" {
+		return false
+	}
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	now := registry.now()
+	registry.purgeExpiredLocked(now)
+	_, _, ok := registry.chainUsageLocked(responseID)
+	if ok {
+		registry.touchAncestorsLocked(responseID, now)
+	}
+	return ok
+}
+
+func (registry *openAIResponsesContinuityRegistry) touchAncestorsLocked(responseID string, now time.Time) {
+	seen := make(map[string]struct{})
+	for responseID != "" {
+		if _, exists := seen[responseID]; exists {
+			return
+		}
+		seen[responseID] = struct{}{}
+		entry, ok := registry.entries[responseID]
+		if !ok {
+			return
+		}
+		entry.accessedAt = now
+		registry.entries[responseID] = entry
+		responseID = entry.parentID
 	}
 }
 
-func evictOldestOpenAIResponsesContinuationLocked() bool {
+func (registry *openAIResponsesContinuityRegistry) purgeExpiredLocked(now time.Time) {
+	for {
+		expiredID := ""
+		for responseID, entry := range registry.entries {
+			if now.Sub(entry.accessedAt) > registry.limits.ttl {
+				expiredID = responseID
+				break
+			}
+		}
+		if expiredID == "" {
+			return
+		}
+		registry.removeSubtreeLocked(expiredID, true)
+	}
+}
+
+func (registry *openAIResponsesContinuityRegistry) enforceLimitsLocked() {
+	for len(registry.entries) > registry.limits.maxEntries || registry.totalBytes > registry.limits.maxBytes {
+		if !registry.evictOldestLocked() {
+			return
+		}
+	}
+}
+
+func (registry *openAIResponsesContinuityRegistry) evictOldestLocked() bool {
 	oldestID := ""
 	var oldest time.Time
-	for responseID, entry := range openAIResponsesContinuity.entries {
-		if oldestID == "" || entry.createdAt.Before(oldest) {
+	for responseID, entry := range registry.entries {
+		if oldestID == "" || entry.accessedAt.Before(oldest) {
 			oldestID = responseID
-			oldest = entry.createdAt
+			oldest = entry.accessedAt
 		}
 	}
 	if oldestID == "" {
 		return false
 	}
-	openAIResponsesContinuity.totalBytes -= openAIResponsesContinuity.entries[oldestID].size
-	delete(openAIResponsesContinuity.entries, oldestID)
+	registry.removeSubtreeLocked(oldestID, true)
 	return true
 }
 
-func cloneRawMessages(items []json.RawMessage) []json.RawMessage {
-	cloned := make([]json.RawMessage, len(items))
-	for i, item := range items {
-		cloned[i] = append(json.RawMessage(nil), item...)
+func (registry *openAIResponsesContinuityRegistry) removeSubtreeLocked(responseID string, countEviction bool) {
+	remove := map[string]struct{}{responseID: {}}
+	for {
+		changed := false
+		for childID, entry := range registry.entries {
+			if _, marked := remove[entry.parentID]; !marked {
+				continue
+			}
+			if _, marked := remove[childID]; marked {
+				continue
+			}
+			remove[childID] = struct{}{}
+			changed = true
+		}
+		if !changed {
+			break
+		}
 	}
-	return cloned
+	for entryID := range remove {
+		entry, ok := registry.entries[entryID]
+		if !ok {
+			continue
+		}
+		registry.totalBytes -= entry.size
+		delete(registry.entries, entryID)
+		if countEviction {
+			registry.evictions++
+		}
+	}
+}
+
+func (registry *openAIResponsesContinuityRegistry) stats() openAIResponsesContinuityStats {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	registry.purgeExpiredLocked(registry.now())
+	return openAIResponsesContinuityStats{
+		Entries:   len(registry.entries),
+		Bytes:     registry.totalBytes,
+		Evictions: registry.evictions,
+	}
+}
+
+func (registry *openAIResponsesContinuityRegistry) reset() {
+	registry.mu.Lock()
+	registry.entries = make(map[string]openAIResponsesContinuation)
+	registry.totalBytes = 0
+	registry.evictions = 0
+	registry.mu.Unlock()
+}
+
+func cloneRawMessages(items []json.RawMessage) []json.RawMessage {
+	return appendClonedRawMessages(make([]json.RawMessage, 0, len(items)), items)
+}
+
+func appendClonedRawMessages(destination, items []json.RawMessage) []json.RawMessage {
+	for _, item := range items {
+		destination = append(destination, append(json.RawMessage(nil), item...))
+	}
+	return destination
 }
 
 func rawMessagesSize(items []json.RawMessage) int {
@@ -310,8 +553,5 @@ func normalizeContinuationBaseURL(baseURL string) string {
 }
 
 func resetOpenAIResponsesContinuityForTest() {
-	openAIResponsesContinuity.mu.Lock()
-	openAIResponsesContinuity.entries = make(map[string]openAIResponsesContinuation)
-	openAIResponsesContinuity.totalBytes = 0
-	openAIResponsesContinuity.mu.Unlock()
+	openAIResponsesContinuity.reset()
 }

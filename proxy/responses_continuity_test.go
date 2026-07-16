@@ -389,6 +389,61 @@ func TestOpenAIResponsesContinuationWithoutLocalHistoryDoesNotGuess(t *testing.T
 	}
 }
 
+func TestOpenAIResponsesContinuationFailsExplicitlyWhenFallbackIsSaturated(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetOpenAIResponsesContinuityForTest()
+
+	previousGovernor := defaultResponsesMemoryGovernor
+	defaultResponsesMemoryGovernor = newResponsesMemoryGovernor(responsesMemoryLimits{
+		maxInflightRequests: 4,
+		maxInflightBytes:    1 << 20,
+		maxFallbacks:        1,
+	})
+	t.Cleanup(func() { defaultResponsesMemoryGovernor = previousGovernor })
+
+	occupied, ok := defaultResponsesMemoryGovernor.tryAcquireFallback()
+	if !ok {
+		t.Fatal("failed to occupy fallback capacity")
+	}
+	defer occupied.release()
+
+	var mu sync.Mutex
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		attempt := attempts
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if attempt == 1 {
+			_, _ = w.Write([]byte(`{"id":"resp_busy_root","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ALPHA"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`))
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"previous_response_id is only supported on Responses WebSocket v2"}}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	handler := newFutureInputOpenAIResponsesHandler(upstream.URL)
+	first := performResponsesRequest(t, handler, []byte(`{"model":"gpt-5.4","input":"remember ALPHA","store":false}`), nil)
+	if first.Code != http.StatusOK {
+		t.Fatalf("root status = %d, want 200; body=%s", first.Code, first.Body.String())
+	}
+	continuation := performResponsesRequest(t, handler, []byte(`{"model":"gpt-5.4","previous_response_id":"resp_busy_root","input":"continue","store":false}`), nil)
+	if continuation.Code != http.StatusServiceUnavailable {
+		t.Fatalf("continuation status = %d, want 503; body=%s", continuation.Code, continuation.Body.String())
+	}
+	if code := gjson.Get(continuation.Body.String(), "error.code").String(); code != "local_continuation_busy" {
+		t.Fatalf("error code = %q, want local_continuation_busy", code)
+	}
+	mu.Lock()
+	gotAttempts := attempts
+	mu.Unlock()
+	if gotAttempts != 2 {
+		t.Fatalf("upstream attempts = %d, want 2 without silent fallback", gotAttempts)
+	}
+}
+
 func performResponsesRequest(t *testing.T, handler *Handler, body []byte, headers http.Header) *httptest.ResponseRecorder {
 	t.Helper()
 	recorder := httptest.NewRecorder()

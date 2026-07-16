@@ -1,5 +1,13 @@
 # 最新接续状态 (2026-07-16)
 
+## Responses 高并发内存治理
+- 连续性缓存已从“每个响应保存完整历史”改为“父响应指针 + 本轮 input/output 增量”，长链与分叉不再重复复制公共历史。
+- `/v1/responses` 已增加进程级在途请求数、请求体字节和本地完整历史回退并发上限；默认分别为 64、256 MiB、4，饱和时返回明确的 `local_memory_pressure` 或 `local_continuation_busy`。
+- `/health` 已增加 `responses_memory`，可查看在途请求、请求体字节、回退数、拒绝计数、连续性缓存条目/字节/驱逐数及配置上限。
+- 新服务已热替换运行：PID `21740`，SHA256 `B3F955C3BACA25152919BB6E2682E056FF967AB1D6309005497345F9D0A25084`，`/health` 返回 `ok`。
+- 验证通过：定向测试重复 10 轮、`go test ./... -count=1`、`go vet ./...`、release build、隔离端口 1 MiB 压力拒绝测试。Windows 当前无 CGO/GCC，`go test -race` 未执行。
+- 基准：请求准入/释放约 79-84 ns、32 B、1 alloc；20 轮历史物化约 10.9-11.3 us、12.8 KiB、53 alloc。
+
 ## 核心进展
 - `v2.2.6` 已完成 Responses 上下文断连修复：响应 ID 绑定生成账号；第三方不支持 HTTP 续链、原账号传输失败或账号不可用时，仅在本地完整历史可重放时删除 `previous_response_id` 并重建 `input`。
 - Codex 与 OpenAI Responses 两类账号的成功响应都会登记进程内完整历史；普通请求、未知 Responses 输入项、安全审计与现有工具续链缓存保持原行为。

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Improvements
+
+- **Responses high-concurrency memory governance.** Continuation history now stores per-turn parent-linked deltas instead of duplicating full snapshots. Process-wide request count, request-body bytes, and local-history fallback concurrency are bounded and exposed through `/health`; limits are configurable with `CODEX_RESPONSES_*` environment variables.
+
 ## v2.2.6 - 2026-07-16
 
 ### Fixes

@@ -1281,6 +1281,11 @@ func (h *Handler) Responses(c *gin.Context) {
 		api.SendError(c, api.NewAPIError(api.ErrCodeInvalidRequest, "Failed to read request body", api.ErrorTypeInvalidRequest))
 		return
 	}
+	releaseRequestAdmission, admitted := ensureResponsesRequestAdmission(c, int64(len(rawBody)))
+	if !admitted {
+		return
+	}
+	defer releaseRequestAdmission()
 
 	// Validate request
 	validator := api.NewValidator(rawBody)
@@ -1333,6 +1338,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	if serviceTier != "" {
 		c.Set("x-service-tier", serviceTier)
 	}
+	continuationCacheBody := rawBody
 
 	// 2. 准备上游请求体（Unmarshal→map→Marshal，一次序列化）
 	codexBody, expandedInputRaw := PrepareResponsesBody(rawBody)
@@ -1356,15 +1362,26 @@ func (h *Handler) Responses(c *gin.Context) {
 	retryExclusions := newRetryAccountExclusions()
 	invalidEncryptedContentRetried := false
 	continuationFallbackRetried := false
-	activateContinuationFallback := func(reason string) bool {
+	var continuationFallbackLease *responsesFallbackLease
+	activateContinuationFallback := func(reason string) continuationFallbackActivation {
 		if continuationFallbackRetried {
-			return false
+			return continuationFallbackUnavailable
 		}
 		previousID := gjson.GetBytes(rawBody, "previous_response_id").String()
+		if !canBuildOpenAIResponsesContinuationFallback(rawBody) {
+			return continuationFallbackUnavailable
+		}
+		lease, ok := defaultResponsesMemoryGovernor.tryAcquireFallback()
+		if !ok {
+			writeResponsesMemoryError(c, "local_continuation_busy", "本地上下文回放已达并发上限，请稍后重试")
+			return continuationFallbackRejected
+		}
 		fallbackBody, ok := buildOpenAIResponsesContinuationFallback(rawBody)
 		if !ok {
-			return false
+			lease.release()
+			return continuationFallbackUnavailable
 		}
+		continuationFallbackLease = lease
 		continuationFallbackRetried = true
 		continuationOwnerBound = false
 		rawBody = fallbackBody
@@ -1372,7 +1389,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		openAIResponsesBody.Reset(rawBody)
 		accountFilter = baseAccountFilter
 		log.Printf("OpenAI Responses 续链切换为本地完整历史回放: previous_response_id=%s reason=%s", previousID, reason)
-		return true
+		return continuationFallbackActivated
 	}
 
 	// 上游 ctx 生命周期：每次 attempt 开始前用新的 drainable ctx 替换，
@@ -1382,6 +1399,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	forceHTTPFallback := false
 	attemptedUpstream := false
 	defer func() {
+		continuationFallbackLease.release()
 		if activeEnd != nil {
 			activeEnd()
 		}
@@ -1398,8 +1416,13 @@ func (h *Handler) Responses(c *gin.Context) {
 		pick := h.nextRetryAccountPickForSession(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter)
 		account, stickyProxyURL := pick.account, pick.proxyURL
 		if account == nil {
-			if continuationOwnerBound && activateContinuationFallback("response_owner_unavailable") {
-				continue
+			if continuationOwnerBound {
+				switch activateContinuationFallback("response_owner_unavailable") {
+				case continuationFallbackActivated:
+					continue
+				case continuationFallbackRejected:
+					return
+				}
 			}
 			if attemptedUpstream && c.Request.Context().Err() != nil {
 				return
@@ -1428,11 +1451,17 @@ func (h *Handler) Responses(c *gin.Context) {
 		guardFirstTokenTimeout := shouldGuardFirstTokenTimeout(pick.poolSnapshot) &&
 			retryExclusions.FirstTokenTimeoutAttempts() == 0
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
-		if continuationOwnerBound && !account.IsOpenAIResponsesAPI() &&
-			activateContinuationFallback("codex_stateless_continuation") {
-			h.store.Release(account)
-			h.store.UnbindSessionAffinity(affinityKey, account.ID())
-			continue
+		if continuationOwnerBound && !account.IsOpenAIResponsesAPI() {
+			switch activateContinuationFallback("codex_stateless_continuation") {
+			case continuationFallbackActivated:
+				h.store.Release(account)
+				h.store.UnbindSessionAffinity(affinityKey, account.ID())
+				continue
+			case continuationFallbackRejected:
+				h.store.Release(account)
+				h.store.UnbindSessionAffinity(affinityKey, account.ID())
+				return
+			}
 		}
 		h.store.BindSessionAffinity(affinityKey, account, proxyURL)
 		useWebsocket := h.shouldUseWebsocketForHTTP() && !forceHTTPFallback
@@ -1504,10 +1533,17 @@ func (h *Handler) Responses(c *gin.Context) {
 				if timedOut {
 					reqErr = firstTokenTimeoutError(firstTokenTimeout)
 				}
-				if continuationOwnerBound && activateContinuationFallback("response_owner_transport_failure") {
-					h.store.Release(account)
-					h.store.UnbindSessionAffinity(affinityKey, account.ID())
-					continue
+				if continuationOwnerBound {
+					switch activateContinuationFallback("response_owner_transport_failure") {
+					case continuationFallbackActivated:
+						h.store.Release(account)
+						h.store.UnbindSessionAffinity(affinityKey, account.ID())
+						continue
+					case continuationFallbackRejected:
+						h.store.Release(account)
+						h.store.UnbindSessionAffinity(affinityKey, account.ID())
+						return
+					}
 				}
 				if IsNoAvailableAccountError(reqErr) {
 					h.store.Release(account)
@@ -1559,12 +1595,17 @@ func (h *Handler) Responses(c *gin.Context) {
 				ttftGuard.Stop()
 				errBody, _ := readUpstreamErrorBody(resp)
 				resp.Body.Close()
-				continuationFallbackActivated := shouldReplayOpenAIResponsesContinuationAfterHTTPFailure(resp.StatusCode, preparedOpenAIResponsesBody, errBody) &&
-					activateContinuationFallback("response_owner_http_failure")
-				if continuationFallbackActivated {
-					h.store.Release(account)
-					h.store.UnbindSessionAffinity(affinityKey, account.ID())
-					continue
+				if shouldReplayOpenAIResponsesContinuationAfterHTTPFailure(resp.StatusCode, preparedOpenAIResponsesBody, errBody) {
+					switch activateContinuationFallback("response_owner_http_failure") {
+					case continuationFallbackActivated:
+						h.store.Release(account)
+						h.store.UnbindSessionAffinity(affinityKey, account.ID())
+						continue
+					case continuationFallbackRejected:
+						h.store.Release(account)
+						h.store.UnbindSessionAffinity(affinityKey, account.ID())
+						return
+					}
 				}
 
 				if !invalidEncryptedContentRetried && isInvalidEncryptedContentError(resp.StatusCode, errBody) {
@@ -1690,7 +1731,7 @@ func (h *Handler) Responses(c *gin.Context) {
 						deltaCharCount += len(parsed.Get("delta").String())
 					}
 					if eventType == "response.completed" {
-						cacheOpenAIResponsesContinuation(preparedOpenAIResponsesBody, data, account)
+						cacheOpenAIResponsesContinuation(continuationCacheBody, data, account)
 						usage = extractUsageFromResult(parsed.Get("response.usage"))
 						if tier := parsed.Get("response.service_tier").String(); tier != "" {
 							actualServiceTier = tier
@@ -1749,7 +1790,7 @@ func (h *Handler) Responses(c *gin.Context) {
 						h.store.Release(account)
 						return
 					}
-					cacheOpenAIResponsesContinuation(preparedOpenAIResponsesBody, respBody, account)
+					cacheOpenAIResponsesContinuation(continuationCacheBody, respBody, account)
 					respBody = h.rewriteResponsesBodyForDownstream(respBody)
 					c.Data(http.StatusOK, contentType, respBody)
 				}
@@ -1772,11 +1813,19 @@ func (h *Handler) Responses(c *gin.Context) {
 			}
 			if shouldTransparentRetryStream(outcome, attempt, maxRetries, wroteAnyBody, c.Request.Context().Err(), writeErr) {
 				recyclePooledClient(account, proxyURL)
-				if continuationOwnerBound && activateContinuationFallback("response_owner_stream_failure") {
-					resp.Body.Close()
-					h.store.Release(account)
-					h.store.UnbindSessionAffinity(affinityKey, account.ID())
-					continue
+				if continuationOwnerBound {
+					switch activateContinuationFallback("response_owner_stream_failure") {
+					case continuationFallbackActivated:
+						resp.Body.Close()
+						h.store.Release(account)
+						h.store.UnbindSessionAffinity(affinityKey, account.ID())
+						continue
+					case continuationFallbackRejected:
+						resp.Body.Close()
+						h.store.Release(account)
+						h.store.UnbindSessionAffinity(affinityKey, account.ID())
+						return
+					}
 				}
 				transparentRetryAllowed := true
 				if isFirstTokenTimeoutOutcome(outcome) {
@@ -2104,7 +2153,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					}
 					// 缓存响应上下文，供后续 previous_response_id 展开使用
 					cacheCompletedResponse([]byte(expandedInputRaw), data)
-					cacheOpenAIResponsesContinuation(rawBody, data, account)
+					cacheOpenAIResponsesContinuation(continuationCacheBody, data, account)
 					gotTerminal = true
 				}
 				if eventType == "response.failed" {
@@ -2179,7 +2228,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					}
 					// 缓存响应上下文，供后续 previous_response_id 展开使用
 					cacheCompletedResponse([]byte(expandedInputRaw), data)
-					cacheOpenAIResponsesContinuation(rawBody, data, account)
+					cacheOpenAIResponsesContinuation(continuationCacheBody, data, account)
 					gotTerminal = true
 					lastResponseData = data
 					return false
