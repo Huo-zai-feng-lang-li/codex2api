@@ -50,6 +50,11 @@ func main() {
 		log.Fatalf("数据库初始化失败: %v", err)
 	}
 	defer db.Close()
+	continuityCtx, continuityCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	if err := proxy.ConfigureOpenAIResponsesContinuityPersistence(continuityCtx, db); err != nil {
+		log.Printf("Responses 续链磁盘缓存初始化失败，已降级为内存缓存: %v", err)
+	}
+	continuityCancel()
 	switch cfg.Database.Driver {
 	case "sqlite":
 		log.Printf("%s 连接成功: %s", cfg.Database.Label(), cfg.Database.Path)

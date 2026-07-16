@@ -928,6 +928,21 @@ func (db *DB) migrate(ctx context.Context) error {
 			ALTER TABLE security_captures ADD COLUMN IF NOT EXISTS capture_error TEXT DEFAULT '';
 			CREATE INDEX IF NOT EXISTS idx_security_captures_event_id ON security_captures(security_event_id);
 			CREATE INDEX IF NOT EXISTS idx_security_captures_request_id ON security_captures(request_id);
+
+			CREATE TABLE IF NOT EXISTS responses_continuity (
+				response_id VARCHAR(255) PRIMARY KEY,
+				parent_id VARCHAR(255) DEFAULT '',
+				account_id BIGINT DEFAULT 0,
+				base_url TEXT DEFAULT '',
+				input_json BYTEA NOT NULL DEFAULT '\\x',
+				output_json BYTEA NOT NULL DEFAULT '\\x',
+				replayable BOOLEAN NOT NULL DEFAULT FALSE,
+				created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				accessed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				size_bytes INT NOT NULL DEFAULT 0
+			);
+			CREATE INDEX IF NOT EXISTS idx_responses_continuity_accessed_at ON responses_continuity(accessed_at);
+			CREATE INDEX IF NOT EXISTS idx_responses_continuity_parent_id ON responses_continuity(parent_id);
 			CREATE INDEX IF NOT EXISTS idx_security_captures_expires_at ON security_captures(expires_at);
 
 			CREATE TABLE IF NOT EXISTS model_registry (

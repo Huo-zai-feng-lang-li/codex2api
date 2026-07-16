@@ -1,5 +1,14 @@
 # 最新接续状态 (2026-07-16)
 
+## Responses 续链磁盘持久化
+- Responses 父指针与本轮 input/output 增量已写入现有业务数据库；SQLite 继续使用 WAL，无新增数据库文件或常驻服务。
+- 服务重启/热替换后，首次携带 `previous_response_id` 的请求会从磁盘有界加载父链并回填内存；正常热路径仍优先使用内存。
+- 磁盘与内存共用 1 小时 TTL、2000 条、400 items/链、4 MiB/链、64 MiB 总量；过期和容量数据自动清理。
+- 数据库操作使用 250 ms 短超时并 fail-open，失败只失去磁盘恢复能力，不改变普通请求结果；`/health.responses_memory` 增加持久化状态和失败计数。
+- 隔离端口真实验收已通过：首轮响应落盘，测试服务重启后首次续接准确返回随机 token，持久化失败计数为 0。
+- 正式服务当前使用最终新 EXE，PID `27832`，SHA256 `933765CB43C24B551DBFDA81D5F1E8FDCAA81A07DDA6ED0C5631CDF686BF95B3`，`http://127.0.0.1:18080/health` 为 `ok`。
+- 全量测试、go vet、定向 10 轮、磁盘容量/TTL/损坏降级/超时降级测试和基准均通过；SQLite 写入约 0.11-0.35 ms/op。
+
 ## Responses 高并发内存治理
 - C1 真实新线程测试发现第三方中转会接受 `previous_response_id` 并返回 200，但实际忘记首轮 token；现已对非官方 Responses 中转在首次续接时主动发送受限的本地完整历史。修复后真实双轮随机 token 首次续接匹配通过。
 - 可通过 `CODEX_RESPONSES_CONTINUITY_MODE=upstream` 显式信任已验证具备有状态续接能力的中转；默认 `auto` 仅信任官方 `api.openai.com`。

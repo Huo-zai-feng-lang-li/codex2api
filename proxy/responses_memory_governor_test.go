@@ -129,7 +129,10 @@ func TestResponsesMemoryStatsMarshalsGovernanceFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal stats: %v", err)
 	}
-	for _, key := range []string{"inflight_requests", "inflight_bytes", "active_fallbacks", "continuity_entries", "continuity_bytes"} {
+	for _, key := range []string{
+		"inflight_requests", "inflight_bytes", "active_fallbacks",
+		"continuity_entries", "continuity_bytes", "continuity_persistent", "continuity_persistence_failures",
+	} {
 		if !json.Valid(encoded) || !containsJSONKey(encoded, key) {
 			t.Fatalf("stats JSON missing %q: %s", key, encoded)
 		}

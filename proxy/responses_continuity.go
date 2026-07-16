@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/database"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -23,6 +26,10 @@ const (
 	openAIResponsesContinuityModeAuto     = "auto"
 	openAIResponsesContinuityModeUpstream = "upstream"
 )
+
+var openAIResponsesContinuityDBTimeout = 250 * time.Millisecond
+
+const openAIResponsesContinuityCleanupInterval = time.Minute
 
 type openAIResponsesContinuityLimits struct {
 	ttl          time.Duration
@@ -45,18 +52,31 @@ type openAIResponsesContinuation struct {
 }
 
 type openAIResponsesContinuityStats struct {
-	Entries   int
-	Bytes     int
-	Evictions uint64
+	Entries             int
+	Bytes               int
+	Evictions           uint64
+	Persistent          bool
+	PersistenceFailures uint64
+}
+
+type responsesContinuityPersistence interface {
+	UpsertResponsesContinuation(context.Context, *database.ResponsesContinuationRow) error
+	GetResponsesContinuation(context.Context, string) (database.ResponsesContinuationRow, bool, error)
+	TouchResponsesContinuations(context.Context, []string, time.Time) error
+	PruneResponsesContinuations(context.Context, time.Time) (int64, error)
+	TrimResponsesContinuations(context.Context, int, int) (int64, error)
 }
 
 type openAIResponsesContinuityRegistry struct {
-	mu         sync.Mutex
-	entries    map[string]openAIResponsesContinuation
-	totalBytes int
-	evictions  uint64
-	limits     openAIResponsesContinuityLimits
-	now        func() time.Time
+	mu          sync.Mutex
+	entries     map[string]openAIResponsesContinuation
+	totalBytes  int
+	evictions   uint64
+	limits      openAIResponsesContinuityLimits
+	now         func() time.Time
+	persistence responsesContinuityPersistence
+	lastCleanup time.Time
+	persistFail uint64
 }
 
 var openAIResponsesContinuity = newOpenAIResponsesContinuityRegistry(openAIResponsesContinuityLimitsFromEnv(os.Getenv))
@@ -100,6 +120,141 @@ func newOpenAIResponsesContinuityRegistry(limits openAIResponsesContinuityLimits
 		limits:  limits,
 		now:     time.Now,
 	}
+}
+
+// ConfigureOpenAIResponsesContinuityPersistence enables bounded lazy restore
+// from the application database. Request handling stays memory-only if storage is busy.
+func ConfigureOpenAIResponsesContinuityPersistence(ctx context.Context, db *database.DB) error {
+	return openAIResponsesContinuity.setPersistence(ctx, db)
+}
+
+func (registry *openAIResponsesContinuityRegistry) setPersistence(ctx context.Context, db responsesContinuityPersistence) error {
+	registry.mu.Lock()
+	registry.persistence = db
+	registry.mu.Unlock()
+	if db == nil {
+		return nil
+	}
+
+	now := registry.now()
+	if _, err := db.PruneResponsesContinuations(ctx, now.Add(-registry.limits.ttl)); err != nil {
+		registry.recordPersistenceFailure()
+		return err
+	}
+	if _, err := db.TrimResponsesContinuations(ctx, registry.limits.maxEntries, registry.limits.maxBytes); err != nil {
+		registry.recordPersistenceFailure()
+		return err
+	}
+	registry.mu.Lock()
+	registry.lastCleanup = now
+	registry.mu.Unlock()
+	return nil
+}
+
+func (registry *openAIResponsesContinuityRegistry) mergePersisted(rows []database.ResponsesContinuationRow, now time.Time) {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	for _, row := range rows {
+		if row.ResponseID == "" {
+			continue
+		}
+		if _, exists := registry.entries[row.ResponseID]; exists {
+			continue
+		}
+		input, inputOK := decodePersistedRawMessages(row.InputJSON)
+		output, outputOK := decodePersistedRawMessages(row.OutputJSON)
+		if !inputOK || !outputOK {
+			continue
+		}
+		entry := openAIResponsesContinuation{
+			accountID: row.AccountID, baseURL: row.BaseURL,
+			createdAt: row.CreatedAt, accessedAt: now,
+		}
+		if entry.createdAt.IsZero() {
+			entry.createdAt = now
+		}
+		if entry.accessedAt.IsZero() {
+			entry.accessedAt = entry.createdAt
+		}
+		if row.Replayable && registry.canStoreReplayableLocked(row.ParentID, input, output) {
+			entry.parentID = row.ParentID
+			entry.input = input
+			entry.output = output
+			entry.replayable = true
+			entry.size = rawMessagesSize(input) + rawMessagesSize(output)
+		}
+		registry.entries[row.ResponseID] = entry
+		registry.totalBytes += entry.size
+	}
+	registry.purgeExpiredLocked(now)
+	registry.enforceLimitsLocked()
+}
+
+func (registry *openAIResponsesContinuityRegistry) ensureLoaded(responseID string) bool {
+	if responseID == "" {
+		return false
+	}
+	registry.mu.Lock()
+	_, loaded := registry.entries[responseID]
+	persistence := registry.persistence
+	now := registry.now()
+	registry.mu.Unlock()
+	if loaded {
+		return true
+	}
+	if persistence == nil {
+		return false
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), openAIResponsesContinuityDBTimeout)
+	defer cancel()
+	rows := make([]database.ResponsesContinuationRow, 0, 8)
+	seen := make(map[string]struct{})
+	currentID := responseID
+	for currentID != "" && len(rows) < registry.limits.maxItems {
+		if _, exists := seen[currentID]; exists {
+			return false
+		}
+		seen[currentID] = struct{}{}
+		row, ok, err := persistence.GetResponsesContinuation(ctx, currentID)
+		if err != nil {
+			registry.recordPersistenceFailure()
+			log.Printf("Responses 续链磁盘读取失败，已按缓存未命中处理: %v", err)
+			return false
+		}
+		if !ok || now.Sub(row.AccessedAt) > registry.limits.ttl {
+			return false
+		}
+		rows = append(rows, row)
+		if !row.Replayable {
+			break
+		}
+		currentID = row.ParentID
+	}
+	for left, right := 0, len(rows)-1; left < right; left, right = left+1, right-1 {
+		rows[left], rows[right] = rows[right], rows[left]
+	}
+	registry.mergePersisted(rows, now)
+	loadedIDs := make([]string, 0, len(rows))
+	for _, row := range rows {
+		loadedIDs = append(loadedIDs, row.ResponseID)
+	}
+	if err := persistence.TouchResponsesContinuations(ctx, loadedIDs, now); err != nil {
+		registry.recordPersistenceFailure()
+		log.Printf("Responses 续链磁盘访问时间更新失败: %v", err)
+	}
+	registry.mu.Lock()
+	_, loaded = registry.entries[responseID]
+	registry.mu.Unlock()
+	return loaded
+}
+
+func decodePersistedRawMessages(data []byte) ([]json.RawMessage, bool) {
+	var items []json.RawMessage
+	if len(data) == 0 || json.Unmarshal(data, &items) != nil {
+		return nil, false
+	}
+	return items, true
 }
 
 func bindOpenAIResponsesContinuationOwner(body []byte, base auth.AccountFilter) (auth.AccountFilter, bool) {
@@ -317,6 +472,7 @@ func (registry *openAIResponsesContinuityRegistry) get(responseID string) (openA
 	if responseID == "" {
 		return openAIResponsesContinuation{}, false
 	}
+	registry.ensureLoaded(responseID)
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	now := registry.now()
@@ -335,11 +491,14 @@ func (registry *openAIResponsesContinuityRegistry) store(responseID, parentID st
 	if responseID == "" {
 		return
 	}
+	if parentID != "" {
+		registry.ensureLoaded(parentID)
+	}
 	entry.input = cloneRawMessages(entry.input)
 	entry.output = cloneRawMessages(entry.output)
 	registry.mu.Lock()
-	defer registry.mu.Unlock()
 	now := registry.now()
+	previousEvictions := registry.evictions
 	registry.purgeExpiredLocked(now)
 	registry.removeSubtreeLocked(responseID, false)
 	entry.createdAt = now
@@ -358,6 +517,71 @@ func (registry *openAIResponsesContinuityRegistry) store(responseID, parentID st
 	registry.entries[responseID] = entry
 	registry.totalBytes += entry.size
 	registry.enforceLimitsLocked()
+	persistence := registry.persistence
+	ancestorIDs := registry.ancestorIDsLocked(parentID)
+	storedEntry, retained := registry.entries[responseID]
+	cleanupPersistence := registry.evictions > previousEvictions || now.Sub(registry.lastCleanup) >= openAIResponsesContinuityCleanupInterval
+	if cleanupPersistence {
+		registry.lastCleanup = now
+	}
+	registry.mu.Unlock()
+	if persistence != nil && retained {
+		registry.persist(persistence, responseID, storedEntry, ancestorIDs, cleanupPersistence)
+	}
+}
+
+func (registry *openAIResponsesContinuityRegistry) ancestorIDsLocked(responseID string) []string {
+	ids := make([]string, 0, 8)
+	seen := make(map[string]struct{})
+	for responseID != "" {
+		if _, exists := seen[responseID]; exists {
+			break
+		}
+		seen[responseID] = struct{}{}
+		entry, ok := registry.entries[responseID]
+		if !ok {
+			break
+		}
+		ids = append(ids, responseID)
+		responseID = entry.parentID
+	}
+	return ids
+}
+
+func (registry *openAIResponsesContinuityRegistry) persist(db responsesContinuityPersistence, responseID string, entry openAIResponsesContinuation, ancestorIDs []string, cleanup bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), openAIResponsesContinuityDBTimeout)
+	defer cancel()
+	inputJSON, inputErr := json.Marshal(entry.input)
+	outputJSON, outputErr := json.Marshal(entry.output)
+	if inputErr != nil || outputErr != nil {
+		return
+	}
+	row := database.ResponsesContinuationRow{
+		ResponseID: responseID, ParentID: entry.parentID,
+		AccountID: entry.accountID, BaseURL: entry.baseURL,
+		InputJSON: inputJSON, OutputJSON: outputJSON,
+		Replayable: entry.replayable, CreatedAt: entry.createdAt,
+		AccessedAt: entry.accessedAt, SizeBytes: entry.size,
+	}
+	if err := db.UpsertResponsesContinuation(ctx, &row); err != nil {
+		registry.recordPersistenceFailure()
+		log.Printf("Responses 续链持久化失败，已降级为内存缓存: %v", err)
+		return
+	}
+	if err := db.TouchResponsesContinuations(ctx, ancestorIDs, entry.accessedAt); err != nil {
+		registry.recordPersistenceFailure()
+		log.Printf("Responses 续链访问时间持久化失败: %v", err)
+	}
+	if cleanup {
+		if _, err := db.PruneResponsesContinuations(ctx, entry.accessedAt.Add(-registry.limits.ttl)); err != nil {
+			registry.recordPersistenceFailure()
+			log.Printf("Responses 续链过期数据清理失败: %v", err)
+		}
+		if _, err := db.TrimResponsesContinuations(ctx, registry.limits.maxEntries, registry.limits.maxBytes); err != nil {
+			registry.recordPersistenceFailure()
+			log.Printf("Responses 续链磁盘容量清理失败: %v", err)
+		}
+	}
 }
 
 func (registry *openAIResponsesContinuityRegistry) canStoreReplayableLocked(parentID string, input, output []json.RawMessage) bool {
@@ -401,6 +625,7 @@ func (registry *openAIResponsesContinuityRegistry) materialize(responseID string
 	if responseID == "" {
 		return nil, false
 	}
+	registry.ensureLoaded(responseID)
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	now := registry.now()
@@ -440,6 +665,7 @@ func (registry *openAIResponsesContinuityRegistry) isReplayable(responseID strin
 	if responseID == "" {
 		return false
 	}
+	registry.ensureLoaded(responseID)
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	now := registry.now()
@@ -544,10 +770,18 @@ func (registry *openAIResponsesContinuityRegistry) stats() openAIResponsesContin
 	defer registry.mu.Unlock()
 	registry.purgeExpiredLocked(registry.now())
 	return openAIResponsesContinuityStats{
-		Entries:   len(registry.entries),
-		Bytes:     registry.totalBytes,
-		Evictions: registry.evictions,
+		Entries:             len(registry.entries),
+		Bytes:               registry.totalBytes,
+		Evictions:           registry.evictions,
+		Persistent:          registry.persistence != nil,
+		PersistenceFailures: registry.persistFail,
 	}
+}
+
+func (registry *openAIResponsesContinuityRegistry) recordPersistenceFailure() {
+	registry.mu.Lock()
+	registry.persistFail++
+	registry.mu.Unlock()
 }
 
 func (registry *openAIResponsesContinuityRegistry) reset() {
@@ -555,6 +789,9 @@ func (registry *openAIResponsesContinuityRegistry) reset() {
 	registry.entries = make(map[string]openAIResponsesContinuation)
 	registry.totalBytes = 0
 	registry.evictions = 0
+	registry.persistence = nil
+	registry.lastCleanup = time.Time{}
+	registry.persistFail = 0
 	registry.mu.Unlock()
 }
 

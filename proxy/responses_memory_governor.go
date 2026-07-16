@@ -68,9 +68,11 @@ type responsesGovernorStats struct {
 
 type ResponsesMemorySnapshot struct {
 	responsesGovernorStats
-	ContinuityEntries   int    `json:"continuity_entries"`
-	ContinuityBytes     int    `json:"continuity_bytes"`
-	ContinuityEvictions uint64 `json:"continuity_evictions"`
+	ContinuityEntries             int    `json:"continuity_entries"`
+	ContinuityBytes               int    `json:"continuity_bytes"`
+	ContinuityEvictions           uint64 `json:"continuity_evictions"`
+	ContinuityPersistent          bool   `json:"continuity_persistent"`
+	ContinuityPersistenceFailures uint64 `json:"continuity_persistence_failures"`
 }
 
 var defaultResponsesMemoryGovernor = newResponsesMemoryGovernor(responsesMemoryLimitsFromEnv(os.Getenv))
@@ -201,10 +203,12 @@ func (governor *responsesMemoryGovernor) stats() responsesGovernorStats {
 func ResponsesMemoryStats() ResponsesMemorySnapshot {
 	continuity := openAIResponsesContinuity.stats()
 	return ResponsesMemorySnapshot{
-		responsesGovernorStats: defaultResponsesMemoryGovernor.stats(),
-		ContinuityEntries:      continuity.Entries,
-		ContinuityBytes:        continuity.Bytes,
-		ContinuityEvictions:    continuity.Evictions,
+		responsesGovernorStats:        defaultResponsesMemoryGovernor.stats(),
+		ContinuityEntries:             continuity.Entries,
+		ContinuityBytes:               continuity.Bytes,
+		ContinuityEvictions:           continuity.Evictions,
+		ContinuityPersistent:          continuity.Persistent,
+		ContinuityPersistenceFailures: continuity.PersistenceFailures,
 	}
 }
 

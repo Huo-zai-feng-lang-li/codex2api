@@ -304,6 +304,20 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 			expires_at TIMESTAMP NULL,
 			capture_error TEXT DEFAULT ''
 		);`,
+		`CREATE TABLE IF NOT EXISTS responses_continuity (
+			response_id TEXT PRIMARY KEY,
+			parent_id TEXT DEFAULT '',
+			account_id INTEGER DEFAULT 0,
+			base_url TEXT DEFAULT '',
+			input_json BLOB NOT NULL DEFAULT '[]',
+			output_json BLOB NOT NULL DEFAULT '[]',
+			replayable INTEGER NOT NULL DEFAULT 0,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			accessed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			size_bytes INTEGER NOT NULL DEFAULT 0
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_responses_continuity_accessed_at ON responses_continuity(accessed_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_responses_continuity_parent_id ON responses_continuity(parent_id);`,
 	}
 	for _, stmt := range statements {
 		if _, err := db.conn.ExecContext(ctx, stmt); err != nil {
