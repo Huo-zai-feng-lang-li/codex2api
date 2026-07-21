@@ -30,7 +30,7 @@ Thumbs.db
 .deploy/
 USAGE_WINDOW_LOGIC.md
 .claude/settings.local.json
-scripts
+
 
 # Local runtime state
 data/*.db
@@ -47,3 +47,5 @@ CLIProxyAPI/
 sub2api/
 new-api/
 .gstack/
+nul
+tmp_*

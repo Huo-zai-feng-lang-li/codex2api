@@ -822,6 +822,64 @@ func TestDeleteAccountGroupDoesNotBroadenScopedAPIKey(t *testing.T) {
 	}
 }
 
+func TestUsageStatsLatencyCalculationConsistency(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "latency_test.db")
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+
+	// 插入一条成功请求：完成 5000ms，首字 2000ms
+	if err := db.InsertUsageLog(ctx, &UsageLogInput{
+		AccountID:    1,
+		Endpoint:     "/v1/responses",
+		Model:        "gpt-5.4",
+		StatusCode:   200,
+		DurationMs:   5000,
+		FirstTokenMs: 2000,
+	}); err != nil {
+		t.Fatalf("InsertUsageLog success 返回错误: %v", err)
+	}
+
+	// 插入两条快速报错请求：完成 50ms，无首字
+	for i := 0; i < 2; i++ {
+		if err := db.InsertUsageLog(ctx, &UsageLogInput{
+			AccountID:    1,
+			Endpoint:     "/v1/responses",
+			Model:        "gpt-5.4",
+			StatusCode:   500,
+			DurationMs:   50,
+			FirstTokenMs: 0,
+		}); err != nil {
+			t.Fatalf("InsertUsageLog error 返回错误: %v", err)
+		}
+	}
+	db.flushLogs()
+
+	stats, err := db.getUsageStatsSQLite(ctx, time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatalf("getUsageStatsSQLite 返回错误: %v", err)
+	}
+
+	// 验证首字延迟为 2000ms
+	if stats.AvgFirstTokenMs != 2000 {
+		t.Fatalf("AvgFirstTokenMs = %f, want 2000", stats.AvgFirstTokenMs)
+	}
+
+	// 验证完成延迟仅计算成功请求 (5000ms)，而不是被失败请求稀释成 1700ms
+	if stats.AvgDurationMs != 5000 {
+		t.Fatalf("AvgDurationMs = %f, want 5000", stats.AvgDurationMs)
+	}
+
+	// 核心断言：完成延迟必须 >= 首字延迟
+	if stats.AvgDurationMs < stats.AvgFirstTokenMs {
+		t.Fatalf("完成延迟 (%f) 小于 首字延迟 (%f)，违反物理常理！", stats.AvgDurationMs, stats.AvgFirstTokenMs)
+	}
+}
+
 func TestUsageLogsPersistEffectiveModel(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
 

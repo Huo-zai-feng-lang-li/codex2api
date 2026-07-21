@@ -53,9 +53,9 @@ func TestNormalizeRuntimeSettingsFirstTokenTimeout(t *testing.T) {
 	}
 }
 
-func TestDefaultRuntimeSettingsFirstTokenTimeoutIsFifteenSeconds(t *testing.T) {
-	if got := DefaultRuntimeSettings().FirstTokenTimeoutSec; got != 15 {
-		t.Fatalf("default FirstTokenTimeoutSec = %d, want 15", got)
+func TestDefaultRuntimeSettingsFirstTokenTimeoutIsThirtySeconds(t *testing.T) {
+	if got := DefaultRuntimeSettings().FirstTokenTimeoutSec; got != 30 {
+		t.Fatalf("default FirstTokenTimeoutSec = %d, want 30", got)
 	}
 }
 
@@ -76,17 +76,17 @@ func TestApplyRuntimeSettingsFromSystemFirstTokenTimeout(t *testing.T) {
 
 func TestFirstTokenTimeoutForReasoningEffortUsesLongerTimeoutForHighEffort(t *testing.T) {
 	previous := CurrentRuntimeSettings()
-	ApplyRuntimeSettings(RuntimeSettings{FirstTokenTimeoutSec: 15})
+	ApplyRuntimeSettings(RuntimeSettings{FirstTokenTimeoutSec: 30})
 	t.Cleanup(func() { ApplyRuntimeSettings(previous) })
 
-	if got := firstTokenTimeoutForReasoningEffort("low"); got != 15*time.Second {
-		t.Fatalf("low effort timeout = %s, want 15s", got)
+	if got := firstTokenTimeoutForReasoningEffort("low"); got != 30*time.Second {
+		t.Fatalf("low effort timeout = %s, want 30s", got)
 	}
-	if got := firstTokenTimeoutForReasoningEffort("high"); got != 15*time.Second {
-		t.Fatalf("high effort timeout = %s, want 15s", got)
+	if got := firstTokenTimeoutForReasoningEffort("high"); got != 30*time.Second {
+		t.Fatalf("high effort timeout = %s, want 30s", got)
 	}
-	if got := firstTokenTimeoutForReasoningEffort("xhigh"); got != 15*time.Second {
-		t.Fatalf("xhigh effort timeout = %s, want 15s", got)
+	if got := firstTokenTimeoutForReasoningEffort("xhigh"); got != 30*time.Second {
+		t.Fatalf("xhigh effort timeout = %s, want 30s", got)
 	}
 }
 

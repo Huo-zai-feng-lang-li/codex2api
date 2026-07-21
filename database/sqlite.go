@@ -142,7 +142,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 				usage_log_flush_interval_seconds INTEGER DEFAULT 5,
 				stream_flush_policy TEXT DEFAULT 'immediate',
 				stream_flush_interval_ms INTEGER DEFAULT 20,
-				first_token_timeout_seconds INTEGER DEFAULT 8,
+				first_token_timeout_seconds INTEGER DEFAULT 30,
 				dispatch_queue_limit INTEGER DEFAULT 0,
 				image_storage_config TEXT DEFAULT '{}',
 				show_full_usage_numbers INTEGER DEFAULT 0,
@@ -412,7 +412,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "usage_log_flush_interval_seconds", "INTEGER DEFAULT 5"},
 		{"system_settings", "stream_flush_policy", "TEXT DEFAULT 'immediate'"},
 		{"system_settings", "stream_flush_interval_ms", "INTEGER DEFAULT 20"},
-		{"system_settings", "first_token_timeout_seconds", "INTEGER DEFAULT 8"},
+		{"system_settings", "first_token_timeout_seconds", "INTEGER DEFAULT 30"},
 		{"system_settings", "dispatch_queue_limit", "INTEGER DEFAULT 0"},
 		{"system_settings", "image_storage_config", "TEXT DEFAULT '{}'"},
 		{"system_settings", "show_full_usage_numbers", "INTEGER DEFAULT 0"},
@@ -831,7 +831,8 @@ func (db *DB) getUsageStatsSQLite(ctx context.Context, rangeStart, rangeEnd time
 
 	stats := &UsageStats{}
 	var todayErrors int64
-	var totalDuration float64
+	var totalSuccessDuration float64
+	var successRequests int64
 	var totalFirstTokenMs float64
 	var totalFirstTokenSamples int64
 	var todayCacheHitRequests int64
@@ -859,7 +860,10 @@ func (db *DB) getUsageStatsSQLite(ctx context.Context, rangeStart, rangeEnd time
 		stats.TodayCachedTokens += cachedTokens
 		stats.TodayAccountBilled += accountBilled
 		stats.TodayUserBilled += userBilled
-		totalDuration += float64(durationMs)
+		if statusCode < 400 && durationMs > 0 {
+			totalSuccessDuration += float64(durationMs)
+			successRequests++
+		}
 		if firstTokenMs > 0 {
 			totalFirstTokenMs += float64(firstTokenMs)
 			totalFirstTokenSamples++
@@ -882,9 +886,11 @@ func (db *DB) getUsageStatsSQLite(ctx context.Context, rangeStart, rangeEnd time
 	}
 
 	if stats.TodayRequests > 0 {
-		stats.AvgDurationMs = totalDuration / float64(stats.TodayRequests)
 		stats.ErrorRate = float64(todayErrors) / float64(stats.TodayRequests) * 100
 		stats.TodayCacheRate = float64(todayCacheHitRequests) / float64(stats.TodayRequests) * 100
+	}
+	if successRequests > 0 {
+		stats.AvgDurationMs = totalSuccessDuration / float64(successRequests)
 	}
 	if totalFirstTokenSamples > 0 {
 		stats.AvgFirstTokenMs = totalFirstTokenMs / float64(totalFirstTokenSamples)
@@ -930,8 +936,10 @@ func (db *DB) getUsageStatsSQLite(ctx context.Context, rangeStart, rangeEnd time
 	if stats.TotalRequests > 0 {
 		stats.TotalCacheRate = float64(visibleCacheHitRequests+bCacheHitRequests) / float64(stats.TotalRequests) * 100
 	}
-	if visibleFirstTokenSamples+bFirstTokenSamples > 0 {
-		stats.AvgFirstTokenMs = (currentFirstTokenMsSum + bFirstTokenMsSum) / float64(visibleFirstTokenSamples+bFirstTokenSamples)
+	totalFirstTokenSamplesAll := visibleFirstTokenSamples + bFirstTokenSamples
+	totalFirstTokenMsSumAll := currentFirstTokenMsSum + bFirstTokenMsSum
+	if totalFirstTokenSamplesAll > 0 {
+		stats.AvgFirstTokenMs = totalFirstTokenMsSumAll / float64(totalFirstTokenSamplesAll)
 	}
 	if stats.TotalRequests > 0 {
 		stats.AvgAccountBilled = stats.TotalAccountBilled / float64(stats.TotalRequests)

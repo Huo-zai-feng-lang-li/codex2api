@@ -295,7 +295,7 @@ func DefaultSystemSettings() *SystemSettings {
 		UsageLogFlushIntervalSeconds:     defaultUsageLogFlushIntervalSeconds,
 		StreamFlushPolicy:                "immediate",
 		StreamFlushIntervalMS:            20,
-		FirstTokenTimeoutSeconds:         15,
+		FirstTokenTimeoutSeconds:         30,
 		ImageStorageConfig:               "{}",
 		BackgroundConfig:                 "{}",
 		SecurityAuditEnabled:             DefaultSecurityAuditEnabled,
@@ -838,7 +838,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS usage_log_flush_interval_seconds INT DEFAULT 5;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS stream_flush_policy VARCHAR(20) DEFAULT 'immediate';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS stream_flush_interval_ms INT DEFAULT 20;
-	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS first_token_timeout_seconds INT DEFAULT 8;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS first_token_timeout_seconds INT DEFAULT 30;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS dispatch_queue_limit INT DEFAULT 0;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS image_storage_config TEXT DEFAULT '{}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS show_full_usage_numbers BOOLEAN DEFAULT FALSE;
@@ -2420,7 +2420,7 @@ func (db *DB) GetUsageStats(ctx context.Context, rangeStart, rangeEnd time.Time)
 		COALESCE(SUM(CASE WHEN created_at >= $2 THEN 1 ELSE 0 END), 0) AS rpm,
 		COALESCE(SUM(CASE WHEN created_at >= $2 THEN total_tokens ELSE 0 END), 0) AS tpm,
 		COALESCE(AVG(NULLIF(first_token_ms, 0)), 0) AS avg_first_token_ms,
-		COALESCE(AVG(duration_ms), 0) AS avg_duration_ms,
+		COALESCE(AVG(CASE WHEN status_code < 400 THEN NULLIF(duration_ms, 0) ELSE NULL END), 0) AS avg_duration_ms,
 		COALESCE(SUM(CASE WHEN cached_tokens > 0 THEN 1 ELSE 0 END), 0) AS today_cache_hit_requests,
 		COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS today_errors
 	FROM usage_logs
@@ -2490,8 +2490,10 @@ func (db *DB) GetUsageStats(ctx context.Context, rangeStart, rangeEnd time.Time)
 	if stats.TotalRequests > 0 {
 		stats.TotalCacheRate = float64(visibleCacheHitRequests+bCacheHitRequests) / float64(stats.TotalRequests) * 100
 	}
-	if totalFirstTokenSamples := visibleFirstTokenSamples + bFirstTokenSamples; totalFirstTokenSamples > 0 {
-		stats.AvgFirstTokenMs = (currentFirstTokenMsSum + bFirstTokenMsSum) / float64(totalFirstTokenSamples)
+	totalFirstTokenSamplesAll := visibleFirstTokenSamples + bFirstTokenSamples
+	totalFirstTokenMsSumAll := currentFirstTokenMsSum + bFirstTokenMsSum
+	if totalFirstTokenSamplesAll > 0 {
+		stats.AvgFirstTokenMs = totalFirstTokenMsSumAll / float64(totalFirstTokenSamplesAll)
 	}
 	if stats.TotalRequests > 0 {
 		stats.AvgAccountBilled = stats.TotalAccountBilled / float64(stats.TotalRequests)

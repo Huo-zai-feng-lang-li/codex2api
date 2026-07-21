@@ -336,21 +336,16 @@ func main() {
 
 	reason := <-shutdownRequests
 
-	log.Printf("正在关闭... reason=%s", security.SanitizeLog(reason))
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutdownCancel()
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Printf("HTTP 服务优雅关闭失败: %v", err)
-	}
+	log.Printf("收到停止指令，直接终止服务... reason=%s", security.SanitizeLog(reason))
+	_ = server.Close()
 	if oauthCallbackServer != nil {
-		if err := oauthCallbackServer.Shutdown(shutdownCtx); err != nil {
-			log.Printf("OAuth 回调服务优雅关闭失败: %v", err)
-		}
+		_ = oauthCallbackServer.Close()
 	}
 	store.Stop()
 	wsrelay.ShutdownExecutor()
 	proxy.CloseErrorLogger()
-	log.Println("已关闭")
+	log.Println("已终止服务")
+	os.Exit(0)
 }
 
 // loggerMiddleware 简单日志中间件（增强版，支持敏感信息脱敏）
