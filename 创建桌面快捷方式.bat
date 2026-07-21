@@ -5,7 +5,7 @@ set "CODEXPROXY_ROOT=%~dp0"
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$root=$env:CODEXPROXY_ROOT.TrimEnd('\');" ^
-  "$target=Join-Path $root 'start-codex2api.bat';" ^
+  "$target=Join-Path $root 'start-codex2api.vbs';" ^
   "$icon=Join-Path $root 'assets\codexproxy.ico';" ^
   "if (-not (Test-Path -LiteralPath $target)) { throw ('Missing start script: ' + $target) }" ^
   "$name=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('Q29kZXhQcm94eSDnrqHnkIblkI7lj7AubG5r'));" ^
