@@ -17,17 +17,17 @@
 - Modify: `database/sqlite_test.go`
 - Modify: `database/security_events_test.go`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 新增测试覆盖 `PruneUsageLogsBefore` 的总量守恒、499 排除、仅 200 缓存分母、幂等和事务回滚，并覆盖安全事件、Prompt 日志、账号事件截止时间清理。
 
-- [ ] **Step 2: 验证 RED**
+- [x] **Step 2: 验证 RED**
 
 Run: `go test ./database -run "TestPrune(UsageLogsBefore|OperationalDataBefore)" -count=1`
 
 Expected: FAIL，提示保留方法不存在或旧数据未删除。
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 实现：
 
@@ -45,7 +45,7 @@ func (db *DB) PruneOperationalDataBefore(ctx context.Context, policy RetentionPo
 
 SQLite 与 PostgreSQL 在单事务内汇总并删除相同截止范围；`ClearUsageLogs` 复用原子核心。
 
-- [ ] **Step 4: 验证 GREEN**
+- [x] **Step 4: 验证 GREEN**
 
 Run: `go test ./database -run "TestPrune(UsageLogsBefore|OperationalDataBefore)" -count=1`
 
@@ -167,4 +167,3 @@ Expected: 全部退出码 0。
 - [ ] **Step 4: 提交**
 
 仅暂存本任务文件，提交信息：`feat(ops): 增加日志保留与存储治理`。
-
