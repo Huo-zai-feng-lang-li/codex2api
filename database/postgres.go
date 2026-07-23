@@ -3319,37 +3319,9 @@ func (db *DB) ListUsageLogsByFilter(ctx context.Context, f UsageLogFilter) ([]*U
 	return logs, rows.Err()
 }
 
-// ClearUsageLogs 清空所有使用日志（先快照累计值到基线表）
+// ClearUsageLogs 清空所有使用日志（原子快照累计值到基线表）
 func (db *DB) ClearUsageLogs(ctx context.Context) error {
-	// 先将当前日志的累计值叠加到基线表
-	_, err := db.conn.ExecContext(ctx, `
-		UPDATE usage_stats_baseline SET
-			total_requests  = total_requests  + COALESCE((SELECT COUNT(*) FROM usage_logs WHERE status_code <> 499), 0),
-			total_tokens    = total_tokens    + COALESCE((SELECT SUM(total_tokens) FROM usage_logs WHERE status_code <> 499), 0),
-			prompt_tokens   = prompt_tokens   + COALESCE((SELECT SUM(prompt_tokens) FROM usage_logs WHERE status_code <> 499), 0),
-			completion_tokens = completion_tokens + COALESCE((SELECT SUM(completion_tokens) FROM usage_logs WHERE status_code <> 499), 0),
-			cached_tokens   = cached_tokens   + COALESCE((SELECT SUM(cached_tokens) FROM usage_logs WHERE status_code <> 499), 0),
-			cache_hit_requests = cache_hit_requests + COALESCE((SELECT SUM(CASE WHEN cached_tokens > 0 THEN 1 ELSE 0 END) FROM usage_logs WHERE status_code = 200), 0),
-			cache_rate_requests = cache_rate_requests + COALESCE((SELECT COUNT(*) FROM usage_logs WHERE status_code = 200), 0),
-			first_token_ms_sum = first_token_ms_sum + COALESCE((SELECT SUM(CASE WHEN first_token_ms > 0 THEN first_token_ms ELSE 0 END) FROM usage_logs WHERE status_code <> 499), 0),
-			first_token_samples = first_token_samples + COALESCE((SELECT SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END) FROM usage_logs WHERE status_code <> 499), 0),
-			account_billed  = account_billed  + COALESCE((SELECT SUM(account_billed) FROM usage_logs WHERE status_code <> 499), 0),
-			user_billed     = user_billed     + COALESCE((SELECT SUM(user_billed) FROM usage_logs WHERE status_code <> 499), 0)
-			WHERE id = 1
-		`)
-	if err != nil {
-		return fmt.Errorf("快照统计基线失败: %w", err)
-	}
-
-	// 再清空日志
-	if db.isSQLite() {
-		if _, err = db.conn.ExecContext(ctx, `DELETE FROM usage_logs`); err != nil {
-			return err
-		}
-		_, err = db.conn.ExecContext(ctx, `DELETE FROM sqlite_sequence WHERE name = 'usage_logs'`)
-		return err
-	}
-	_, err = db.conn.ExecContext(ctx, `TRUNCATE TABLE usage_logs RESTART IDENTITY`)
+	_, err := db.pruneUsageLogs(ctx, usageLogPruneScope{})
 	return err
 }
 
