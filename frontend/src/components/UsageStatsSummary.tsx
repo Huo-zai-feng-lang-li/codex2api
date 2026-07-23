@@ -6,10 +6,17 @@ import { Card, CardContent } from '@/components/ui/card'
 
 interface UsageStatsSummaryProps {
   stats: UsageStats
+  firstTokenLatencyMs?: number
+  completionLatencyMs?: number
   className?: string
 }
 
-export default function UsageStatsSummary({ stats, className = '' }: UsageStatsSummaryProps) {
+export default function UsageStatsSummary({
+  stats,
+  firstTokenLatencyMs,
+  completionLatencyMs,
+  className = '',
+}: UsageStatsSummaryProps) {
   const { t, i18n } = useTranslation()
   const locale = i18n.language
   const tokenCountUnit = t('dashboard.tokenCountUnit')
@@ -70,9 +77,9 @@ export default function UsageStatsSummary({ stats, className = '' }: UsageStatsS
             iconBg="bg-cyan-500/10 text-cyan-500"
             title={t('dashboard.healthGroup')}
             primaryLabel={t('dashboard.avgFirstTokenLatency')}
-            primaryValue={formatLatency(stats.avg_first_token_ms)}
+            primaryValue={formatLatency(firstTokenLatencyMs)}
           >
-            <MetricLine label={t('dashboard.avgCompletionLatency')} value={formatLatency(stats.avg_duration_ms)} />
+            <MetricLine label={t('dashboard.avgCompletionLatency')} value={formatLatency(completionLatencyMs)} />
             <MetricLine label={t('dashboard.todayErrorRate')} value={formatPercent(stats.error_rate)} tone={stats.error_rate > 1 ? 'danger' : 'default'} />
           </MetricGroup>
         </div>

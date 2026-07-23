@@ -158,7 +158,11 @@ export default function Dashboard() {
         {/* Usage stats */}
         {usageStats && (
           <div className="space-y-6">
-            <UsageStatsSummary stats={usageStats} />
+            <UsageStatsSummary
+              stats={usageStats}
+              firstTokenLatencyMs={chartLoading ? undefined : chartData?.avg_first_token_ms}
+              completionLatencyMs={chartLoading ? undefined : chartData?.avg_duration_ms}
+            />
             <ActiveRequestsPanel requests={runtimeStatus?.accounts.active_request_details ?? []} />
             <Suspense fallback={<ChartsSkeleton />}>
               <DashboardUsageCharts

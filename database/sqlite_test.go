@@ -844,17 +844,17 @@ func TestUsageStatsLatencyCalculationConsistency(t *testing.T) {
 		t.Fatalf("InsertUsageLog success 返回错误: %v", err)
 	}
 
-	// 插入两条快速报错请求：完成 50ms，无首字
-	for i := 0; i < 2; i++ {
+	// 插入带有效延迟的非 200 请求，验证它们不会污染健康指标。
+	for _, statusCode := range []int{201, 500} {
 		if err := db.InsertUsageLog(ctx, &UsageLogInput{
 			AccountID:    1,
 			Endpoint:     "/v1/responses",
 			Model:        "gpt-5.4",
-			StatusCode:   500,
+			StatusCode:   statusCode,
 			DurationMs:   50,
-			FirstTokenMs: 0,
+			FirstTokenMs: 25,
 		}); err != nil {
-			t.Fatalf("InsertUsageLog error 返回错误: %v", err)
+			t.Fatalf("InsertUsageLog status=%d 返回错误: %v", statusCode, err)
 		}
 	}
 	db.flushLogs()
@@ -869,7 +869,7 @@ func TestUsageStatsLatencyCalculationConsistency(t *testing.T) {
 		t.Fatalf("AvgFirstTokenMs = %f, want 2000", stats.AvgFirstTokenMs)
 	}
 
-	// 验证完成延迟仅计算成功请求 (5000ms)，而不是被失败请求稀释成 1700ms
+	// 验证完成延迟仅计算状态码 200 的请求。
 	if stats.AvgDurationMs != 5000 {
 		t.Fatalf("AvgDurationMs = %f, want 5000", stats.AvgDurationMs)
 	}
@@ -877,6 +877,99 @@ func TestUsageStatsLatencyCalculationConsistency(t *testing.T) {
 	// 核心断言：完成延迟必须 >= 首字延迟
 	if stats.AvgDurationMs < stats.AvgFirstTokenMs {
 		t.Fatalf("完成延迟 (%f) 小于 首字延迟 (%f)，违反物理常理！", stats.AvgDurationMs, stats.AvgFirstTokenMs)
+	}
+}
+
+func TestUsageStatsLatencyFollowsSelectedRange(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "latency_range_test.db")
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+	for _, usageLog := range []*UsageLogInput{
+		{
+			AccountID:    1,
+			Endpoint:     "/v1/responses",
+			Model:        "range-current",
+			StatusCode:   200,
+			DurationMs:   3000,
+			FirstTokenMs: 1000,
+		},
+		{
+			AccountID:    1,
+			Endpoint:     "/v1/responses",
+			Model:        "range-old",
+			StatusCode:   200,
+			DurationMs:   10000,
+			FirstTokenMs: 9000,
+		},
+	} {
+		if err := db.InsertUsageLog(ctx, usageLog); err != nil {
+			t.Fatalf("InsertUsageLog 返回错误: %v", err)
+		}
+	}
+	db.flushLogs()
+	if _, err := db.conn.ExecContext(ctx,
+		`UPDATE usage_logs SET created_at = $1 WHERE model = $2`,
+		db.timeArg(now.Add(-48*time.Hour)), "range-old",
+	); err != nil {
+		t.Fatalf("更新区间外日志时间返回错误: %v", err)
+	}
+
+	stats, err := db.GetUsageStats(ctx, now.Add(-time.Hour), now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("GetUsageStats 返回错误: %v", err)
+	}
+	if stats.AvgFirstTokenMs != 1000 {
+		t.Fatalf("AvgFirstTokenMs = %f, want 1000", stats.AvgFirstTokenMs)
+	}
+	if stats.AvgDurationMs != 3000 {
+		t.Fatalf("AvgDurationMs = %f, want 3000", stats.AvgDurationMs)
+	}
+}
+
+func TestChartAggregationLatencyFollowsRangeAndExcludesNon200(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "chart_latency_test.db")
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+	logs := []*UsageLogInput{
+		{AccountID: 1, Endpoint: "/v1/responses", Model: "chart-current", StatusCode: 200, DurationMs: 3000, FirstTokenMs: 1000},
+		{AccountID: 1, Endpoint: "/v1/responses", Model: "chart-created", StatusCode: 201, DurationMs: 100, FirstTokenMs: 50},
+		{AccountID: 1, Endpoint: "/v1/responses", Model: "chart-error", StatusCode: 500, DurationMs: 50, FirstTokenMs: 25},
+		{AccountID: 1, Endpoint: "/v1/responses", Model: "chart-old", StatusCode: 200, DurationMs: 10000, FirstTokenMs: 9000},
+	}
+	for _, usageLog := range logs {
+		if err := db.InsertUsageLog(ctx, usageLog); err != nil {
+			t.Fatalf("InsertUsageLog 返回错误: %v", err)
+		}
+	}
+	db.flushLogs()
+	if _, err := db.conn.ExecContext(ctx,
+		`UPDATE usage_logs SET created_at = $1 WHERE model = $2`,
+		db.timeArg(now.Add(-48*time.Hour)), "chart-old",
+	); err != nil {
+		t.Fatalf("更新区间外日志时间返回错误: %v", err)
+	}
+
+	charts, err := db.GetChartAggregation(ctx, now.Add(-time.Hour), now.Add(time.Hour), 5)
+	if err != nil {
+		t.Fatalf("GetChartAggregation 返回错误: %v", err)
+	}
+	if charts.AvgFirstTokenMs != 1000 {
+		t.Fatalf("AvgFirstTokenMs = %f, want 1000", charts.AvgFirstTokenMs)
+	}
+	if charts.AvgDurationMs != 3000 {
+		t.Fatalf("AvgDurationMs = %f, want 3000", charts.AvgDurationMs)
 	}
 }
 
@@ -1290,7 +1383,7 @@ func TestUsageStatsIncludeCodex2APIBreakdowns(t *testing.T) {
 	}
 }
 
-func TestUsageStatsBaselinePreservesCacheRateAndFirstTokenAfterClear(t *testing.T) {
+func TestUsageStatsBaselinePreservesCacheRateWithoutLatencyLeakAfterClear(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
 
 	db, err := New("sqlite", dbPath)
@@ -1343,8 +1436,8 @@ func TestUsageStatsBaselinePreservesCacheRateAndFirstTokenAfterClear(t *testing.
 	if stats.TotalCacheRate < 49.9 || stats.TotalCacheRate > 50.1 {
 		t.Fatalf("TotalCacheRate = %.4f, want about 50.00", stats.TotalCacheRate)
 	}
-	if stats.AvgFirstTokenMs < 449.9 || stats.AvgFirstTokenMs > 450.1 {
-		t.Fatalf("AvgFirstTokenMs = %.4f, want about 450.00", stats.AvgFirstTokenMs)
+	if stats.AvgFirstTokenMs != 0 {
+		t.Fatalf("AvgFirstTokenMs = %.4f, want 0 after clearing visible latency samples", stats.AvgFirstTokenMs)
 	}
 }
 

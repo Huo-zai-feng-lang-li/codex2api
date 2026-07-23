@@ -2419,8 +2419,8 @@ func (db *DB) GetUsageStats(ctx context.Context, rangeStart, rangeEnd time.Time)
 		COALESCE(SUM(user_billed), 0) AS today_user_billed,
 		COALESCE(SUM(CASE WHEN created_at >= $2 THEN 1 ELSE 0 END), 0) AS rpm,
 		COALESCE(SUM(CASE WHEN created_at >= $2 THEN total_tokens ELSE 0 END), 0) AS tpm,
-		COALESCE(AVG(NULLIF(first_token_ms, 0)), 0) AS avg_first_token_ms,
-		COALESCE(AVG(CASE WHEN status_code < 400 THEN NULLIF(duration_ms, 0) ELSE NULL END), 0) AS avg_duration_ms,
+		COALESCE(AVG(CASE WHEN status_code = 200 THEN NULLIF(first_token_ms, 0) ELSE NULL END), 0) AS avg_first_token_ms,
+		COALESCE(AVG(CASE WHEN status_code = 200 THEN NULLIF(duration_ms, 0) ELSE NULL END), 0) AS avg_duration_ms,
 		COALESCE(SUM(CASE WHEN cached_tokens > 0 THEN 1 ELSE 0 END), 0) AS today_cache_hit_requests,
 		COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS today_errors
 	FROM usage_logs
@@ -2447,9 +2447,7 @@ func (db *DB) GetUsageStats(ctx context.Context, rangeStart, rangeEnd time.Time)
 	// 统计当前可见请求总数和计费总额（排除 499，保证与使用统计列表口径一致）
 	var visibleTotal int64
 	var visibleCacheHitRequests int64
-	var visibleFirstTokenSamples int64
 	var currentTokens, currentPrompt, currentCompletion, currentCached int64
-	var currentFirstTokenMsSum float64
 	var currentAccountBilled, currentUserBilled float64
 	_ = db.conn.QueryRowContext(ctx, `
 			SELECT
@@ -2459,22 +2457,19 @@ func (db *DB) GetUsageStats(ctx context.Context, rangeStart, rangeEnd time.Time)
 				COALESCE(SUM(completion_tokens), 0),
 				COALESCE(SUM(cached_tokens), 0),
 				COALESCE(SUM(CASE WHEN cached_tokens > 0 THEN 1 ELSE 0 END), 0),
-				COALESCE(SUM(CASE WHEN first_token_ms > 0 THEN first_token_ms ELSE 0 END), 0),
-				COALESCE(SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END), 0),
 				COALESCE(SUM(account_billed), 0),
 				COALESCE(SUM(user_billed), 0)
 			FROM usage_logs
 			WHERE status_code <> 499
-		`).Scan(&visibleTotal, &currentTokens, &currentPrompt, &currentCompletion, &currentCached, &visibleCacheHitRequests, &currentFirstTokenMsSum, &visibleFirstTokenSamples, &currentAccountBilled, &currentUserBilled)
+		`).Scan(&visibleTotal, &currentTokens, &currentPrompt, &currentCompletion, &currentCached, &visibleCacheHitRequests, &currentAccountBilled, &currentUserBilled)
 
 	// 加上基线值（清空日志前保存的累计值）
-	var bReq, bTok, bPrompt, bComp, bCached, bCacheHitRequests, bFirstTokenSamples int64
-	var bFirstTokenMsSum float64
+	var bReq, bTok, bPrompt, bComp, bCached, bCacheHitRequests int64
 	var bAccountBilled, bUserBilled float64
 	_ = db.conn.QueryRowContext(ctx, `
-			SELECT total_requests, total_tokens, prompt_tokens, completion_tokens, cached_tokens, cache_hit_requests, first_token_ms_sum, first_token_samples, account_billed, user_billed
+			SELECT total_requests, total_tokens, prompt_tokens, completion_tokens, cached_tokens, cache_hit_requests, account_billed, user_billed
 			FROM usage_stats_baseline WHERE id = 1
-		`).Scan(&bReq, &bTok, &bPrompt, &bComp, &bCached, &bCacheHitRequests, &bFirstTokenMsSum, &bFirstTokenSamples, &bAccountBilled, &bUserBilled)
+		`).Scan(&bReq, &bTok, &bPrompt, &bComp, &bCached, &bCacheHitRequests, &bAccountBilled, &bUserBilled)
 
 	stats.TotalRequests = visibleTotal + bReq
 	stats.TotalTokens = currentTokens + bTok
@@ -2489,11 +2484,6 @@ func (db *DB) GetUsageStats(ctx context.Context, rangeStart, rangeEnd time.Time)
 	}
 	if stats.TotalRequests > 0 {
 		stats.TotalCacheRate = float64(visibleCacheHitRequests+bCacheHitRequests) / float64(stats.TotalRequests) * 100
-	}
-	totalFirstTokenSamplesAll := visibleFirstTokenSamples + bFirstTokenSamples
-	totalFirstTokenMsSumAll := currentFirstTokenMsSum + bFirstTokenMsSum
-	if totalFirstTokenSamplesAll > 0 {
-		stats.AvgFirstTokenMs = totalFirstTokenMsSumAll / float64(totalFirstTokenSamplesAll)
 	}
 	if stats.TotalRequests > 0 {
 		stats.AvgAccountBilled = stats.TotalAccountBilled / float64(stats.TotalRequests)
@@ -2803,8 +2793,10 @@ type ChartModelPoint struct {
 
 // ChartAggregation 仪表盘图表聚合结果
 type ChartAggregation struct {
-	Timeline []ChartTimelinePoint `json:"timeline"`
-	Models   []ChartModelPoint    `json:"models"`
+	Timeline        []ChartTimelinePoint `json:"timeline"`
+	Models          []ChartModelPoint    `json:"models"`
+	AvgFirstTokenMs float64              `json:"avg_first_token_ms"`
+	AvgDurationMs   float64              `json:"avg_duration_ms"`
 }
 
 // AccountEventPoint 账号事件趋势数据点
@@ -2858,7 +2850,11 @@ func (db *DB) GetChartAggregation(ctx context.Context, start, end time.Time, buc
 		COALESCE(SUM(reasoning_tokens), 0)    AS reasoning_tokens,
 		COALESCE(SUM(cached_tokens), 0)       AS cached_tokens,
 		COALESCE(SUM(CASE WHEN status_code >= 400 AND status_code < 500 THEN 1 ELSE 0 END), 0) AS errors_4xx,
-		COALESCE(SUM(CASE WHEN status_code >= 500 AND status_code < 600 THEN 1 ELSE 0 END), 0) AS errors_5xx
+		COALESCE(SUM(CASE WHEN status_code >= 500 AND status_code < 600 THEN 1 ELSE 0 END), 0) AS errors_5xx,
+		COALESCE(SUM(CASE WHEN status_code = 200 AND first_token_ms > 0 THEN first_token_ms ELSE 0 END), 0) AS first_token_ms_sum,
+		COALESCE(SUM(CASE WHEN status_code = 200 AND first_token_ms > 0 THEN 1 ELSE 0 END), 0) AS first_token_samples,
+		COALESCE(SUM(CASE WHEN status_code = 200 AND duration_ms > 0 THEN duration_ms ELSE 0 END), 0) AS duration_ms_sum,
+		COALESCE(SUM(CASE WHEN status_code = 200 AND duration_ms > 0 THEN 1 ELSE 0 END), 0) AS duration_samples
 	FROM usage_logs
 	WHERE created_at >= $1 AND created_at <= $2
 	  AND status_code <> 499
@@ -2871,11 +2867,24 @@ func (db *DB) GetChartAggregation(ctx context.Context, start, end time.Time, buc
 	}
 	defer rows.Close()
 
+	var firstTokenMsSum, firstTokenSamples int64
+	var durationMsSum, durationSamples int64
 	for rows.Next() {
 		var p ChartTimelinePoint
-		if err := rows.Scan(&p.Bucket, &p.Requests, &p.AvgLatency, &p.InputTokens, &p.OutputTokens, &p.ReasoningTokens, &p.CachedTokens, &p.Errors4xx, &p.Errors5xx); err != nil {
+		var bucketFirstTokenMsSum, bucketFirstTokenSamples int64
+		var bucketDurationMsSum, bucketDurationSamples int64
+		if err := rows.Scan(
+			&p.Bucket, &p.Requests, &p.AvgLatency, &p.InputTokens, &p.OutputTokens,
+			&p.ReasoningTokens, &p.CachedTokens, &p.Errors4xx, &p.Errors5xx,
+			&bucketFirstTokenMsSum, &bucketFirstTokenSamples,
+			&bucketDurationMsSum, &bucketDurationSamples,
+		); err != nil {
 			return nil, err
 		}
+		firstTokenMsSum += bucketFirstTokenMsSum
+		firstTokenSamples += bucketFirstTokenSamples
+		durationMsSum += bucketDurationMsSum
+		durationSamples += bucketDurationSamples
 		result.Timeline = append(result.Timeline, p)
 	}
 	if err := rows.Err(); err != nil {
@@ -2883,6 +2892,12 @@ func (db *DB) GetChartAggregation(ctx context.Context, start, end time.Time, buc
 	}
 	if result.Timeline == nil {
 		result.Timeline = []ChartTimelinePoint{}
+	}
+	if firstTokenSamples > 0 {
+		result.AvgFirstTokenMs = float64(firstTokenMsSum) / float64(firstTokenSamples)
+	}
+	if durationSamples > 0 {
+		result.AvgDurationMs = float64(durationMsSum) / float64(durationSamples)
 	}
 
 	// 模型排行聚合：Top 10

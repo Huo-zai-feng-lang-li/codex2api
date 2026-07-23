@@ -993,6 +993,8 @@ export interface ChartModelPoint {
 export interface ChartAggregation {
   timeline: ChartTimelinePoint[]
   models: ChartModelPoint[]
+  avg_first_token_ms: number
+  avg_duration_ms: number
 }
 
 export interface APIKeyLimits {

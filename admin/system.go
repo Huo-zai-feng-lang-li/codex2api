@@ -2,24 +2,26 @@ package admin
 
 import (
 	"net/http"
-	"os"
-	"time"
 
 	"github.com/codex2api/security"
 	"github.com/gin-gonic/gin"
 )
 
-// ShutdownSystem 收到后台停止指令后，直接终止进程。
+// ShutdownSystem 将关机请求交给 main 持有的服务生命周期控制器。
 func (h *Handler) ShutdownSystem(c *gin.Context) {
+	started := h.RequestShutdown("admin_api:" + c.ClientIP())
+	if !started {
+		security.SecurityAuditLog("ADMIN_SHUTDOWN_DUPLICATE", "ip="+c.ClientIP())
+		c.JSON(http.StatusAccepted, gin.H{
+			"message":  "服务关停已在进行",
+			"shutting": true,
+		})
+		return
+	}
+
 	security.SecurityAuditLog("ADMIN_SHUTDOWN_REQUESTED", "ip="+c.ClientIP())
 	c.JSON(http.StatusOK, gin.H{
-		"message":  "服务已直接终止",
+		"message":  "服务正在关闭",
 		"shutting": true,
 	})
-
-	// 异步延迟 100ms 允许 HTTP 200 响应成功写回给前端，然后直接退出进程
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		os.Exit(0)
-	}()
 }
