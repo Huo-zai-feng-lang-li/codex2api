@@ -1,10 +1,16 @@
 import { useEffect, useRef } from 'react'
+import {
+  resolveMetricAnimationStart,
+  resolveMetricSizingValue,
+  startMetricAnimation,
+} from '../lib/metricAnimation'
 
 interface AnimatedMetricValueProps {
   id: string
   value?: number
   format: (value?: number) => string
   durationMs?: number
+  animationKey?: string
   className?: string
 }
 
@@ -14,13 +20,15 @@ export default function AnimatedMetricValue({
   id,
   value,
   format,
-  durationMs = 1_000,
+  durationMs = 3_000,
+  animationKey,
   className,
 }: AnimatedMetricValueProps) {
   const targetValue = typeof value === 'number' && Number.isFinite(value) ? value : undefined
   const displayValueRef = useRef<number | undefined>(
-    targetValue === undefined ? undefined : metricDisplayCache.get(id) ?? targetValue,
+    targetValue === undefined ? undefined : metricDisplayCache.get(id) ?? 0,
   )
+  const animationKeyRef = useRef(animationKey)
   const valueNodeRef = useRef<HTMLSpanElement>(null)
   const formatRef = useRef(format)
   formatRef.current = format
@@ -42,30 +50,50 @@ export default function AnimatedMetricValue({
       return
     }
 
-    const startValue = displayValueRef.current ?? metricDisplayCache.get(id)
+    const resetToZero = animationKey !== undefined && animationKeyRef.current !== animationKey
+    animationKeyRef.current = animationKey
+    const startValue = resolveMetricAnimationStart(
+      displayValueRef.current ?? metricDisplayCache.get(id),
+      resetToZero,
+    )
     const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
-    if (startValue === undefined || startValue === targetValue || reduceMotion) {
+    if (startValue === targetValue || reduceMotion) {
       updateDisplay(targetValue)
       return
     }
 
-    let startedAt: number | null = null
-    let frameId = 0
-    const animate = (now: number) => {
-      startedAt ??= now
-      const progress = Math.min((now - startedAt) / durationMs, 1)
-      const easedProgress = 1 - (1 - progress) ** 3
-      updateDisplay(startValue + (targetValue - startValue) * easedProgress)
-      if (progress < 1) frameId = requestAnimationFrame(animate)
-    }
+    updateDisplay(startValue)
+    return startMetricAnimation({
+      from: startValue,
+      to: targetValue,
+      durationMs,
+      onUpdate: updateDisplay,
+    })
+  }, [animationKey, durationMs, id, targetValue])
 
-    frameId = requestAnimationFrame(animate)
-    return () => cancelAnimationFrame(frameId)
-  }, [durationMs, id, targetValue])
+  const resetForSizing = animationKey !== undefined && animationKeyRef.current !== animationKey
+  const sizingValue = resolveMetricSizingValue(
+    resetForSizing ? 0 : displayValueRef.current,
+    targetValue,
+    format,
+  )
+  const displayText = format(displayValueRef.current)
 
   return (
-    <span ref={valueNodeRef} className={className} data-metric-id={id}>
-      {format(displayValueRef.current)}
+    <span className={`inline-grid align-baseline ${className ?? ''}`}>
+      <span
+        aria-hidden="true"
+        className="invisible col-start-1 row-start-1 whitespace-nowrap text-right tabular-nums"
+      >
+        {format(sizingValue)}
+      </span>
+      <span
+        ref={valueNodeRef}
+        className="col-start-1 row-start-1 whitespace-nowrap text-right tabular-nums"
+        data-metric-id={id}
+      >
+        {displayText}
+      </span>
     </span>
   )
 }

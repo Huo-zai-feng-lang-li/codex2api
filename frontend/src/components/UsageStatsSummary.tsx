@@ -9,6 +9,7 @@ interface UsageStatsSummaryProps {
   stats: UsageStats
   firstTokenLatencyMs?: number
   completionLatencyMs?: number
+  latencyAnimationKey?: string
   latencyLoading?: boolean
   className?: string
 }
@@ -17,6 +18,7 @@ export default function UsageStatsSummary({
   stats,
   firstTokenLatencyMs,
   completionLatencyMs,
+  latencyAnimationKey,
   latencyLoading = false,
   className = '',
 }: UsageStatsSummaryProps) {
@@ -164,12 +166,12 @@ export default function UsageStatsSummary({
             iconBg="bg-cyan-500/10 text-cyan-500"
             title={t('dashboard.healthGroup')}
             primaryLabel={t('dashboard.avgFirstTokenLatency')}
-            primaryValue={<LatencyValue id="first-token" value={firstTokenLatencyMs} loading={latencyLoading} />}
+            primaryValue={<LatencyValue id="first-token" value={firstTokenLatencyMs} animationKey={latencyAnimationKey} loading={latencyLoading} />}
             primaryTitle={formatLatency(firstTokenLatencyMs)}
           >
             <MetricLine
               label={t('dashboard.avgCompletionLatency')}
-              value={<LatencyValue id="completion" value={completionLatencyMs} loading={latencyLoading} />}
+              value={<LatencyValue id="completion" value={completionLatencyMs} animationKey={latencyAnimationKey} loading={latencyLoading} />}
               title={formatLatency(completionLatencyMs)}
             />
             <MetricLine
@@ -293,24 +295,33 @@ function formatPercent(value: number): string {
   return `${value.toFixed(value >= 10 ? 1 : 2)}%`
 }
 
-function LatencyValue({ id, value, loading }: { id: string; value?: number; loading: boolean }) {
+function LatencyValue({
+  id,
+  value,
+  animationKey,
+  loading,
+}: {
+  id: string
+  value?: number
+  animationKey?: string
+  loading: boolean
+}) {
   return (
-    <span
-      className={`inline-block transition-opacity duration-200 ${loading ? 'opacity-60' : 'opacity-100'}`}
-      aria-busy={loading}
-    >
+    <span className="inline-block" aria-busy={loading}>
       <AnimatedMetricValue
         id={`dashboard-usage:${id}`}
         value={value && value > 0 ? value : undefined}
         format={formatLatency}
+        animationKey={animationKey}
       />
     </span>
   )
 }
 
 function formatLatency(value?: number): string {
-  const ms = value ?? 0
-  if (ms <= 0) return '-'
+  if (value === undefined) return '-'
+  const ms = Math.max(value, 0)
+  if (ms === 0) return '0ms'
   if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`
   return `${Math.round(ms)}ms`
 }

@@ -167,6 +167,7 @@ export default function Dashboard() {
               stats={usageStats}
               firstTokenLatencyMs={chartData?.avg_first_token_ms}
               completionLatencyMs={chartData?.avg_duration_ms}
+              latencyAnimationKey={chartDataRange ?? undefined}
               latencyLoading={latencyLoading}
             />
             <ActiveRequestsPanel requests={runtimeStatus?.accounts.active_request_details ?? []} />
