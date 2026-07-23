@@ -119,6 +119,10 @@ Do not double-click `codex2api.exe` directly for daily startup. The batch launch
 
 After moving the folder to another PC or another path, run `create-desktop-shortcut.bat` in the project root to regenerate the desktop shortcut with the correct path and icon.
 
+### Updating the running Windows service
+
+Build and validate `codex2api.new.exe` while the current service remains online, then perform graceful shutdown, backup, replacement, detached WMI/CIM startup, health verification, and rollback handling in one uninterrupted local script. The authoritative runbook is [`.agent/rules/README.md`](.agent/rules/README.md#14-标准执行模板). A single-instance replacement has a brief reconnect window; strict zero-downtime upgrades require the blue-green proxy flow documented there.
+
 ### Deployment Modes
 
 | Mode | File | Use Case |
