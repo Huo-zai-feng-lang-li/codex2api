@@ -592,7 +592,7 @@ func TestSQLiteUsageStatsBaselineHasBillingColumns(t *testing.T) {
 		t.Fatalf("sqliteTableColumns 返回错误: %v", err)
 	}
 
-	for _, name := range []string{"account_billed", "user_billed", "cache_hit_requests", "first_token_ms_sum", "first_token_samples"} {
+	for _, name := range []string{"account_billed", "user_billed", "cache_hit_requests", "cache_rate_requests", "first_token_ms_sum", "first_token_samples"} {
 		if _, ok := columns[name]; !ok {
 			t.Fatalf("usage_stats_baseline 缺少列 %q", name)
 		}
@@ -929,6 +929,39 @@ func TestUsageStatsLatencyFollowsSelectedRange(t *testing.T) {
 	}
 	if stats.AvgDurationMs != 3000 {
 		t.Fatalf("AvgDurationMs = %f, want 3000", stats.AvgDurationMs)
+	}
+}
+
+func TestUsageStatsCacheRateExcludesNonSuccessfulRequests(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "cache_rate_success_only.db")
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	for _, usageLog := range []*UsageLogInput{
+		{AccountID: 1, Endpoint: "/v1/responses", Model: "gpt-5.6", StatusCode: 200, CachedTokens: 32},
+		{AccountID: 1, Endpoint: "/v1/responses", Model: "gpt-5.6", StatusCode: 200},
+		{AccountID: 1, Endpoint: "/v1/responses", Model: "gpt-5.6", StatusCode: 400},
+		{AccountID: 1, Endpoint: "/v1/responses", Model: "gpt-5.6", StatusCode: 598, IsRetryAttempt: true, AttemptIndex: 1},
+	} {
+		if err := db.InsertUsageLog(ctx, usageLog); err != nil {
+			t.Fatalf("InsertUsageLog 返回错误: %v", err)
+		}
+	}
+	db.flushLogs()
+
+	stats, err := db.GetUsageStats(ctx, time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatalf("GetUsageStats 返回错误: %v", err)
+	}
+	if stats.TodayCacheRate < 49.9 || stats.TodayCacheRate > 50.1 {
+		t.Fatalf("TodayCacheRate = %.4f, want about 50.00", stats.TodayCacheRate)
+	}
+	if stats.TotalCacheRate < 49.9 || stats.TotalCacheRate > 50.1 {
+		t.Fatalf("TotalCacheRate = %.4f, want about 50.00", stats.TotalCacheRate)
 	}
 }
 
@@ -1347,11 +1380,11 @@ func TestUsageStatsIncludeCodex2APIBreakdowns(t *testing.T) {
 	if stats.TodayCachedTokens != 128 {
 		t.Fatalf("TodayCachedTokens = %d, want 128", stats.TodayCachedTokens)
 	}
-	if stats.TodayCacheRate < 33.3 || stats.TodayCacheRate > 33.4 {
-		t.Fatalf("TodayCacheRate = %.4f, want about 33.33", stats.TodayCacheRate)
+	if stats.TodayCacheRate < 49.9 || stats.TodayCacheRate > 50.1 {
+		t.Fatalf("TodayCacheRate = %.4f, want about 50.00", stats.TodayCacheRate)
 	}
-	if stats.TotalCacheRate < 33.3 || stats.TotalCacheRate > 33.4 {
-		t.Fatalf("TotalCacheRate = %.4f, want about 33.33", stats.TotalCacheRate)
+	if stats.TotalCacheRate < 49.9 || stats.TotalCacheRate > 50.1 {
+		t.Fatalf("TotalCacheRate = %.4f, want about 50.00", stats.TotalCacheRate)
 	}
 	if stats.AvgFirstTokenMs != 820 {
 		t.Fatalf("AvgFirstTokenMs = %.2f, want 820", stats.AvgFirstTokenMs)
@@ -1415,6 +1448,12 @@ func TestUsageStatsBaselinePreservesCacheRateWithoutLatencyLeakAfterClear(t *tes
 			TotalTokens:  100,
 			FirstTokenMs: 300,
 		},
+		{
+			AccountID:  1,
+			Endpoint:   "/v1/responses",
+			Model:      "gpt-5.5",
+			StatusCode: 400,
+		},
 	} {
 		if err := db.InsertUsageLog(ctx, usageLog); err != nil {
 			t.Fatalf("InsertUsageLog 返回错误: %v", err)
@@ -1430,8 +1469,8 @@ func TestUsageStatsBaselinePreservesCacheRateWithoutLatencyLeakAfterClear(t *tes
 	if err != nil {
 		t.Fatalf("GetUsageStats 返回错误: %v", err)
 	}
-	if stats.TotalRequests != 2 {
-		t.Fatalf("TotalRequests = %d, want 2", stats.TotalRequests)
+	if stats.TotalRequests != 3 {
+		t.Fatalf("TotalRequests = %d, want 3", stats.TotalRequests)
 	}
 	if stats.TotalCacheRate < 49.9 || stats.TotalCacheRate > 50.1 {
 		t.Fatalf("TotalCacheRate = %.4f, want about 50.00", stats.TotalCacheRate)

@@ -853,6 +853,7 @@ func (db *DB) getUsageStatsSQLite(ctx context.Context, rangeStart, rangeEnd time
 	var successRequests int64
 	var totalFirstTokenMs float64
 	var totalFirstTokenSamples int64
+	var todayCacheRateRequests int64
 	var todayCacheHitRequests int64
 
 	for rows.Next() {
@@ -886,8 +887,11 @@ func (db *DB) getUsageStatsSQLite(ctx context.Context, rangeStart, rangeEnd time
 			totalFirstTokenMs += float64(firstTokenMs)
 			totalFirstTokenSamples++
 		}
-		if cachedTokens > 0 {
-			todayCacheHitRequests++
+		if statusCode == 200 {
+			todayCacheRateRequests++
+			if cachedTokens > 0 {
+				todayCacheHitRequests++
+			}
 		}
 
 		if statusCode >= 400 {
@@ -905,7 +909,9 @@ func (db *DB) getUsageStatsSQLite(ctx context.Context, rangeStart, rangeEnd time
 
 	if stats.TodayRequests > 0 {
 		stats.ErrorRate = float64(todayErrors) / float64(stats.TodayRequests) * 100
-		stats.TodayCacheRate = float64(todayCacheHitRequests) / float64(stats.TodayRequests) * 100
+	}
+	if todayCacheRateRequests > 0 {
+		stats.TodayCacheRate = float64(todayCacheHitRequests) / float64(todayCacheRateRequests) * 100
 	}
 	if successRequests > 0 {
 		stats.AvgDurationMs = totalSuccessDuration / float64(successRequests)
@@ -915,7 +921,7 @@ func (db *DB) getUsageStatsSQLite(ctx context.Context, rangeStart, rangeEnd time
 	}
 
 	// 可见请求总数（排除 499）
-	var visibleTotal, visibleCacheHitRequests int64
+	var visibleTotal, visibleCacheRateRequests, visibleCacheHitRequests int64
 	var currentTokens, currentPrompt, currentCompletion, currentCached int64
 	var currentAccountBilled, currentUserBilled float64
 	_ = db.conn.QueryRowContext(ctx, `
@@ -925,20 +931,21 @@ func (db *DB) getUsageStatsSQLite(ctx context.Context, rangeStart, rangeEnd time
 			COALESCE(SUM(prompt_tokens), 0),
 			COALESCE(SUM(completion_tokens), 0),
 			COALESCE(SUM(cached_tokens), 0),
-			COALESCE(SUM(CASE WHEN cached_tokens > 0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status_code = 200 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status_code = 200 AND cached_tokens > 0 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(account_billed), 0),
 			COALESCE(SUM(user_billed), 0)
 		FROM usage_logs
 		WHERE status_code <> 499
-	`).Scan(&visibleTotal, &currentTokens, &currentPrompt, &currentCompletion, &currentCached, &visibleCacheHitRequests, &currentAccountBilled, &currentUserBilled)
+	`).Scan(&visibleTotal, &currentTokens, &currentPrompt, &currentCompletion, &currentCached, &visibleCacheRateRequests, &visibleCacheHitRequests, &currentAccountBilled, &currentUserBilled)
 
 	// 基线值
-	var bReq, bTok, bPrompt, bComp, bCached, bCacheHitRequests int64
+	var bReq, bTok, bPrompt, bComp, bCached, bCacheHitRequests, bCacheRateRequests int64
 	var bAccountBilled, bUserBilled float64
 	_ = db.conn.QueryRowContext(ctx, `
-		SELECT total_requests, total_tokens, prompt_tokens, completion_tokens, cached_tokens, cache_hit_requests, account_billed, user_billed
+		SELECT total_requests, total_tokens, prompt_tokens, completion_tokens, cached_tokens, cache_hit_requests, cache_rate_requests, account_billed, user_billed
 		FROM usage_stats_baseline WHERE id = 1
-	`).Scan(&bReq, &bTok, &bPrompt, &bComp, &bCached, &bCacheHitRequests, &bAccountBilled, &bUserBilled)
+	`).Scan(&bReq, &bTok, &bPrompt, &bComp, &bCached, &bCacheHitRequests, &bCacheRateRequests, &bAccountBilled, &bUserBilled)
 
 	stats.TotalRequests = visibleTotal + bReq
 	stats.TotalTokens = currentTokens + bTok
@@ -947,8 +954,9 @@ func (db *DB) getUsageStatsSQLite(ctx context.Context, rangeStart, rangeEnd time
 	stats.TotalCachedTokens = currentCached + bCached
 	stats.TotalAccountBilled = currentAccountBilled + bAccountBilled
 	stats.TotalUserBilled = currentUserBilled + bUserBilled
-	if stats.TotalRequests > 0 {
-		stats.TotalCacheRate = float64(visibleCacheHitRequests+bCacheHitRequests) / float64(stats.TotalRequests) * 100
+	totalCacheRateRequests := visibleCacheRateRequests + bCacheRateRequests
+	if totalCacheRateRequests > 0 {
+		stats.TotalCacheRate = float64(visibleCacheHitRequests+bCacheHitRequests) / float64(totalCacheRateRequests) * 100
 	}
 	if stats.TotalRequests > 0 {
 		stats.AvgAccountBilled = stats.TotalAccountBilled / float64(stats.TotalRequests)
