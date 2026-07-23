@@ -69,8 +69,14 @@ func (db *DB) pruneUsageLogsTx(ctx context.Context, tx *sql.Tx, scope usageLogPr
 		return 0, err
 	}
 	delta, err := db.aggregateUsageLogsTx(ctx, tx, scope)
-	if err != nil || delta.rows == 0 {
+	if err != nil {
 		return 0, err
+	}
+	if delta.rows == 0 {
+		if scope.cutoff == nil {
+			return 0, db.resetUsageLogIdentityTx(ctx, tx)
+		}
+		return 0, nil
 	}
 	if err := applyUsageBaselineDelta(ctx, tx, delta); err != nil {
 		return 0, err

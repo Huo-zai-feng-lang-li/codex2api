@@ -187,6 +187,32 @@ func TestClearUsageLogsResetsSQLiteIdentity(t *testing.T) {
 	}
 }
 
+func TestClearUsageLogsResetsSQLiteIdentityWhenTableAlreadyEmpty(t *testing.T) {
+	db := newRetentionTestDB(t)
+	ctx := context.Background()
+	if _, err := db.conn.ExecContext(ctx, `INSERT INTO usage_logs (status_code) VALUES (200)`); err != nil {
+		t.Fatalf("插入 usage_logs 返回错误: %v", err)
+	}
+	if _, err := db.conn.ExecContext(ctx, `DELETE FROM usage_logs`); err != nil {
+		t.Fatalf("预清空 usage_logs 返回错误: %v", err)
+	}
+
+	if err := db.ClearUsageLogs(ctx); err != nil {
+		t.Fatalf("ClearUsageLogs 返回错误: %v", err)
+	}
+	result, err := db.conn.ExecContext(ctx, `INSERT INTO usage_logs (status_code) VALUES (200)`)
+	if err != nil {
+		t.Fatalf("清空后插入 usage_logs 返回错误: %v", err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("读取 usage_logs ID 返回错误: %v", err)
+	}
+	if id != 1 {
+		t.Fatalf("空表清理后 ID = %d, want 1", id)
+	}
+}
+
 func TestPruneOperationalDataBeforeUsesDurationsWithoutDeletingImages(t *testing.T) {
 	db := newRetentionTestDB(t)
 	ctx := context.Background()
