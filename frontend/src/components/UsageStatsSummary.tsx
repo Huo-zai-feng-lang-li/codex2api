@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { BarChart3, Clock, Gauge, Zap } from 'lucide-react'
 import type { UsageStats } from '../types'
 import { Card, CardContent } from '@/components/ui/card'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import AnimatedMetricValue from './AnimatedMetricValue'
 
 interface UsageStatsSummaryProps {
@@ -27,8 +28,9 @@ export default function UsageStatsSummary({
   const tokenCountUnit = t('dashboard.tokenCountUnit')
 
   return (
-    <Card className={`py-0 ${className}`}>
-      <CardContent className="p-4">
+    <TooltipProvider delayDuration={200} skipDelayDuration={100}>
+      <Card className={`py-0 ${className}`}>
+        <CardContent className="p-4">
         <h3 className="mb-3 text-base font-semibold text-foreground">{t('dashboard.usageStats')}</h3>
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           <MetricGroup
@@ -56,7 +58,25 @@ export default function UsageStatsSummary({
               title={formatInteger(stats.total_requests, locale)}
             />
             <MetricLine
-              label={t('dashboard.rpmTpm')}
+              label={(
+                <span className="inline-flex items-center gap-1">
+                  <span>{t('dashboard.rpmTpm')}</span>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        aria-label={t('dashboard.rpmTpmHelpLabel')}
+                        className="inline-flex size-4 shrink-0 items-center justify-center rounded-full bg-amber-400/25 text-[10px] font-bold leading-none text-amber-600 ring-1 ring-inset ring-amber-500/35 transition-colors hover:bg-amber-400/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-amber-300"
+                      >
+                        ?
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent side="top" sideOffset={6} className="max-w-[320px] whitespace-normal text-left leading-relaxed">
+                      {t('dashboard.rpmTpmHelp')}
+                    </TooltipContent>
+                  </Tooltip>
+                </span>
+              )}
               value={(
                 <>
                   <AnimatedMetricValue
@@ -188,8 +208,9 @@ export default function UsageStatsSummary({
             />
           </MetricGroup>
         </div>
-      </CardContent>
-    </Card>
+        </CardContent>
+      </Card>
+    </TooltipProvider>
   )
 }
 
@@ -234,10 +255,10 @@ function MetricGroup({
   )
 }
 
-function MetricLine({ label, value, title, tone = 'default' }: { label: string; value: ReactNode; title?: string; tone?: 'default' | 'danger' }) {
+function MetricLine({ label, value, title, tone = 'default' }: { label: ReactNode; value: ReactNode; title?: string; tone?: 'default' | 'danger' }) {
   return (
     <div className="flex min-w-0 items-center justify-between gap-3 text-sm">
-      <span className="truncate text-muted-foreground" title={label}>{label}</span>
+      <span className="min-w-0 truncate text-muted-foreground" title={typeof label === 'string' ? label : undefined}>{label}</span>
       <span
         className={`shrink-0 font-semibold tabular-nums ${tone === 'danger' ? 'text-destructive' : 'text-foreground'}`}
         title={title ?? (typeof value === 'string' ? value : undefined)}

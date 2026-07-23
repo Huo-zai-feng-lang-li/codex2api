@@ -129,6 +129,8 @@
     "tokenCountUnit": "个",
     "cachedTokens": "缓存读取 Token",
     "rpmTpm": "RPM / TPM",
+    "rpmTpmHelpLabel": "查看 RPM / TPM 统计口径",
+    "rpmTpmHelp": "RPM 是最近 60 秒内已完成并写入统计的请求数；TPM 是这些请求消耗的 Token 总量。当前活跃请求是此刻仍在处理的请求，因此这些数字不需要保持一致。",
     "avgLatency": "平均延迟",
     "todayErrorRate": "今日错误率",
     "trafficGroup": "流量",

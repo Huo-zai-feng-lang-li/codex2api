@@ -129,6 +129,8 @@
     "tokenCountUnit": "tokens",
     "cachedTokens": "Cached Tokens",
     "rpmTpm": "RPM / TPM",
+    "rpmTpmHelpLabel": "Explain RPM and TPM metrics",
+    "rpmTpmHelp": "RPM is the number of requests completed and recorded in the last 60 seconds. TPM is the total tokens consumed by those requests. Active requests are still in progress, so these values do not need to match.",
     "avgLatency": "Avg Latency",
     "todayErrorRate": "Error Rate (Today)",
     "trafficGroup": "Traffic",
