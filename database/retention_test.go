@@ -160,6 +160,33 @@ func TestPruneUsageLogsBeforeRollsBackOnDeleteFailure(t *testing.T) {
 	}
 }
 
+func TestClearUsageLogsResetsSQLiteIdentity(t *testing.T) {
+	db := newRetentionTestDB(t)
+	ctx := context.Background()
+	insert := func() int64 {
+		t.Helper()
+		result, err := db.conn.ExecContext(ctx, `INSERT INTO usage_logs (status_code) VALUES (200)`)
+		if err != nil {
+			t.Fatalf("插入 usage_logs 返回错误: %v", err)
+		}
+		id, err := result.LastInsertId()
+		if err != nil {
+			t.Fatalf("读取 usage_logs ID 返回错误: %v", err)
+		}
+		return id
+	}
+
+	if id := insert(); id != 1 {
+		t.Fatalf("首次 ID = %d, want 1", id)
+	}
+	if err := db.ClearUsageLogs(ctx); err != nil {
+		t.Fatalf("ClearUsageLogs 返回错误: %v", err)
+	}
+	if id := insert(); id != 1 {
+		t.Fatalf("清空后 ID = %d, want 1", id)
+	}
+}
+
 func TestPruneOperationalDataBeforeUsesDurationsWithoutDeletingImages(t *testing.T) {
 	db := newRetentionTestDB(t)
 	ctx := context.Background()

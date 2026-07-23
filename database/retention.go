@@ -62,6 +62,9 @@ func (db *DB) pruneUsageLogs(ctx context.Context, scope usageLogPruneScope) (int
 }
 
 func (db *DB) pruneUsageLogsTx(ctx context.Context, tx *sql.Tx, scope usageLogPruneScope) (int64, error) {
+	if err := db.lockUsageLogsTx(ctx, tx, scope); err != nil {
+		return 0, err
+	}
 	if err := lockUsageBaseline(ctx, tx); err != nil {
 		return 0, err
 	}
@@ -72,6 +75,24 @@ func (db *DB) pruneUsageLogsTx(ctx context.Context, tx *sql.Tx, scope usageLogPr
 	if err := applyUsageBaselineDelta(ctx, tx, delta); err != nil {
 		return 0, err
 	}
+	return db.deleteUsageLogsAndResetTx(ctx, tx, scope, delta)
+}
+
+func (db *DB) lockUsageLogsTx(ctx context.Context, tx *sql.Tx, scope usageLogPruneScope) error {
+	if db.isSQLite() {
+		return nil
+	}
+	mode := "SHARE ROW EXCLUSIVE"
+	if scope.cutoff == nil {
+		mode = "ACCESS EXCLUSIVE"
+	}
+	if _, err := tx.ExecContext(ctx, "LOCK TABLE usage_logs IN "+mode+" MODE"); err != nil {
+		return fmt.Errorf("锁定 usage_logs 失败: %w", err)
+	}
+	return nil
+}
+
+func (db *DB) deleteUsageLogsAndResetTx(ctx context.Context, tx *sql.Tx, scope usageLogPruneScope, delta usageLogBaselineDelta) (int64, error) {
 	deleted, err := db.deleteAggregatedUsageLogsTx(ctx, tx, scope, delta.maxID)
 	if err != nil {
 		return 0, err
@@ -79,7 +100,23 @@ func (db *DB) pruneUsageLogsTx(ctx context.Context, tx *sql.Tx, scope usageLogPr
 	if deleted != delta.rows {
 		return 0, fmt.Errorf("usage_logs 原子删除计数不一致: aggregated=%d deleted=%d", delta.rows, deleted)
 	}
+	if scope.cutoff == nil {
+		if err := db.resetUsageLogIdentityTx(ctx, tx); err != nil {
+			return 0, err
+		}
+	}
 	return deleted, nil
+}
+
+func (db *DB) resetUsageLogIdentityTx(ctx context.Context, tx *sql.Tx) error {
+	query := `TRUNCATE TABLE usage_logs RESTART IDENTITY`
+	if db.isSQLite() {
+		query = `DELETE FROM sqlite_sequence WHERE name = 'usage_logs'`
+	}
+	if _, err := tx.ExecContext(ctx, query); err != nil {
+		return fmt.Errorf("重置 usage_logs ID 失败: %w", err)
+	}
+	return nil
 }
 
 func lockUsageBaseline(ctx context.Context, tx *sql.Tx) error {
