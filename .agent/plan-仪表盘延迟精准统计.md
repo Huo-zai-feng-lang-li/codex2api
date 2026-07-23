@@ -48,7 +48,7 @@ AVG(CASE WHEN status_code = 200 THEN NULLIF(duration_ms, 0) END)
 - 修改：`frontend/src/components/UsageStatsSummary.tsx`
 
 - [x] 为 `ChartAggregation` 增加 `avg_first_token_ms`、`avg_duration_ms`。
-- [x] 健康卡从当前 `chartData` 读取两个延迟；切换时间范围、数据加载期间显示 `-`，不短暂展示旧区间数据。
+- [x] 健康卡从当前 `chartData` 读取两个延迟；首次无数据时显示 `-`，切换时间范围时保留旧值作为过渡态，新数据返回后滚动替换。
 - [x] 保留 `UsageStatsSummary` 中请求、Token、缓存、错误率的原有数据来源和口径。
 
 ### 阶段 4：闭环验证
@@ -63,7 +63,22 @@ AVG(CASE WHEN status_code = 200 THEN NULLIF(duration_ms, 0) END)
 
 - [x] Playwright 跨越一个 15 秒刷新周期复现健康首字延迟短暂变为 `-`。
 - [x] 自动刷新采用 stale-while-revalidate：请求期间保留旧值，响应成功后原位替换。
-- [x] 首次加载和用户切换趋势时间范围时仍显示 `-`，避免把旧区间数据冒充新口径。
-- [x] 首字延迟和完成延迟更新时执行 400ms 数字滚动，并尊重 `prefers-reduced-motion`。
+- [x] 首次加载无历史值时仍显示 `-`；用户切换趋势时间范围时保留旧值作为过渡态，新口径返回后滚动替换。
+- [x] 首字延迟和完成延迟更新时执行数字滚动，并尊重 `prefers-reduced-motion`。
 - [x] 不改变 15 秒刷新频率，不增加接口请求，不影响流量、Token、缓存和错误率口径。
 - [x] 热更新后 Playwright 连续采样 17 秒共 519 次，`dashSamples=0`；可控数据变化验证数字滚动路径生效。
+
+### 阶段 6：消除手动切换闪烁
+
+- [x] Playwright 复现切换 `24 小时`、`7 天`、`30 天` 时健康首字延迟/完成延迟出现瞬时 `-`。
+- [x] 取消切换范围时清空 `chartData`，保留上一范围延迟作为过渡起点。
+- [x] 记录 `chartDataRange`，仅在新范围加载中给延迟数字加轻量过渡态，避免把旧值误认为新范围最终值。
+- [x] 运行前端类型检查、生产构建、Go 测试、Go vet。
+- [x] 构建新 EXE，热替换当前 `codex2api.exe`，核对 PID、端口、运行哈希和 `/health`。
+
+### 阶段 7：统一仪表盘数字滚动
+
+- [x] 顶部账号卡、今日请求、Token、缓存、错误率、首字延迟和完成延迟统一接入 1 秒数字滚动。
+- [x] 动画仅在数值变化时执行；不增加接口请求，不改变任何统计口径。
+- [x] Playwright 验证恢复日志写入后，今日请求、今日 Token、TPM、1 小时首字延迟和完成延迟均可刷新显示。
+- [x] 运行态发现 `usage_log.mode=off` 时，已恢复为 `full`；该配置关闭会导致仪表盘统计不增长。

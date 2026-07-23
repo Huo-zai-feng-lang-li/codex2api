@@ -48,6 +48,7 @@ export default function Dashboard() {
   const { t } = useTranslation()
   const [timeRange, setTimeRange] = useState<TimeRangeKey>('1h')
   const [chartData, setChartData] = useState<ChartAggregation | null>(null)
+  const [chartDataRange, setChartDataRange] = useState<TimeRangeKey | null>(null)
   const [chartRefreshedAt, setChartRefreshedAt] = useState<number | null>(null)
   const [chartLoading, setChartLoading] = useState(true)
   const chartAbort = useRef<AbortController | null>(null)
@@ -83,6 +84,7 @@ export default function Dashboard() {
       const res = await api.getChartData({ start, end, bucketMinutes })
       if (!controller.signal.aborted) {
         setChartData(res)
+        setChartDataRange(timeRange)
         setChartRefreshedAt(Date.now())
       }
     } catch {
@@ -96,7 +98,6 @@ export default function Dashboard() {
 
   // 首次加载 + timeRange 变更时重新拉取图表数据
   useEffect(() => {
-    setChartData(null)
     void loadChartData()
   }, [loadChartData])
 
@@ -111,6 +112,7 @@ export default function Dashboard() {
   const rateLimited = stats?.rate_limited ?? 0
   const errorCount = stats?.error ?? 0
   const todayRequests = stats?.today_requests ?? 0
+  const latencyLoading = chartLoading && chartData !== null && chartDataRange !== timeRange
 
   const icons: Record<string, ReactNode> = {
     total: <Users className="size-[22px]" />,
@@ -139,21 +141,23 @@ export default function Dashboard() {
 
         {/* Account status */}
         <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-4 mb-6">
-          <StatCard icon={icons.total} iconClass="blue" label={t('dashboard.totalAccounts')} value={total} />
+          <StatCard metricId="total" icon={icons.total} iconClass="blue" label={t('dashboard.totalAccounts')} value={total} />
           <StatCard
+            metricId="available"
             icon={icons.available}
             iconClass="green"
             label={t('dashboard.available')}
             value={available}
           />
           <StatCard
+            metricId="rate-limited"
             icon={icons.rateLimited}
             iconClass="amber"
             label={t('dashboard.rateLimited')}
             value={rateLimited}
           />
-          <StatCard icon={icons.error} iconClass="red" label={t('dashboard.error')} value={errorCount} />
-          <StatCard icon={icons.requests} iconClass="purple" label={t('dashboard.todayRequests')} value={todayRequests} />
+          <StatCard metricId="error" icon={icons.error} iconClass="red" label={t('dashboard.error')} value={errorCount} />
+          <StatCard metricId="today-requests" icon={icons.requests} iconClass="purple" label={t('dashboard.todayRequests')} value={todayRequests} />
         </div>
 
         {/* Usage stats */}
@@ -163,6 +167,7 @@ export default function Dashboard() {
               stats={usageStats}
               firstTokenLatencyMs={chartData?.avg_first_token_ms}
               completionLatencyMs={chartData?.avg_duration_ms}
+              latencyLoading={latencyLoading}
             />
             <ActiveRequestsPanel requests={runtimeStatus?.accounts.active_request_details ?? []} />
             <Suspense fallback={<ChartsSkeleton />}>

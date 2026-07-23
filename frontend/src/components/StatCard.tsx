@@ -1,9 +1,11 @@
 import type { ReactNode } from 'react'
 import { Card, CardContent } from '@/components/ui/card'
+import AnimatedMetricValue from './AnimatedMetricValue'
 
 interface StatCardProps {
   icon: ReactNode
   iconClass: string
+  metricId: string
   label: string
   value: number | string
   sub?: string
@@ -17,7 +19,17 @@ const iconColors: Record<string, string> = {
   purple: 'bg-primary/12 text-primary',
 }
 
-export default function StatCard({ icon, iconClass, label, value, sub }: StatCardProps) {
+export default function StatCard({ icon, iconClass, metricId, label, value, sub }: StatCardProps) {
+  const displayValue = typeof value === 'number'
+    ? (
+        <AnimatedMetricValue
+          id={`dashboard-stat:${metricId}`}
+          value={value}
+          format={(nextValue) => String(Math.round(nextValue ?? 0))}
+        />
+      )
+    : value
+
   return (
     <Card className="transition-all duration-150 hover:-translate-y-0.5 hover:shadow-md py-0">
       <CardContent className="flex flex-col justify-between gap-2 p-4">
@@ -26,8 +38,8 @@ export default function StatCard({ icon, iconClass, label, value, sub }: StatCar
             <label className="block text-[11px] font-bold uppercase text-muted-foreground">
               {label}
             </label>
-            <div className="mt-2 text-[26px] font-bold leading-none text-foreground">
-              {value}
+            <div className="mt-2 text-[26px] font-bold leading-none tabular-nums text-foreground">
+              {displayValue}
             </div>
           </div>
           <div className={`size-10 flex items-center justify-center shrink-0 rounded-xl ${iconColors[iconClass] || 'bg-primary/12 text-primary'}`} aria-hidden="true">

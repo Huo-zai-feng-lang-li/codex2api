@@ -1,13 +1,15 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { BarChart3, Clock, Gauge, Zap } from 'lucide-react'
 import type { UsageStats } from '../types'
 import { Card, CardContent } from '@/components/ui/card'
+import AnimatedMetricValue from './AnimatedMetricValue'
 
 interface UsageStatsSummaryProps {
   stats: UsageStats
   firstTokenLatencyMs?: number
   completionLatencyMs?: number
+  latencyLoading?: boolean
   className?: string
 }
 
@@ -15,6 +17,7 @@ export default function UsageStatsSummary({
   stats,
   firstTokenLatencyMs,
   completionLatencyMs,
+  latencyLoading = false,
   className = '',
 }: UsageStatsSummaryProps) {
   const { t, i18n } = useTranslation()
@@ -31,12 +34,42 @@ export default function UsageStatsSummary({
             iconBg="bg-blue-500/10 text-blue-500"
             title={t('dashboard.trafficGroup')}
             primaryLabel={t('dashboard.todayRequests')}
-            primaryValue={formatInteger(stats.today_requests, locale)}
+            primaryValue={
+              <AnimatedMetricValue
+                id="dashboard-usage:today-requests"
+                value={stats.today_requests}
+                format={(value) => formatInteger(value ?? 0, locale)}
+              />
+            }
           >
-            <MetricLine label={t('dashboard.totalRequests')} value={formatInteger(stats.total_requests, locale)} />
+            <MetricLine
+              label={t('dashboard.totalRequests')}
+              value={
+                <AnimatedMetricValue
+                  id="dashboard-usage:total-requests"
+                  value={stats.total_requests}
+                  format={(value) => formatInteger(value ?? 0, locale)}
+                />
+              }
+              title={formatInteger(stats.total_requests, locale)}
+            />
             <MetricLine
               label={t('dashboard.rpmTpm')}
-              value={`${formatInteger(stats.rpm, locale)} / ${formatTokenCount(stats.tpm, locale, tokenCountUnit)}`}
+              value={(
+                <>
+                  <AnimatedMetricValue
+                    id="dashboard-usage:rpm"
+                    value={stats.rpm}
+                    format={(value) => formatInteger(value ?? 0, locale)}
+                  />
+                  {' / '}
+                  <AnimatedMetricValue
+                    id="dashboard-usage:tpm"
+                    value={stats.tpm}
+                    format={(value) => formatTokenCount(value ?? 0, locale, tokenCountUnit)}
+                  />
+                </>
+              )}
               title={`${formatInteger(stats.rpm, locale)} / ${formatInteger(stats.tpm, locale)}`}
             />
           </MetricGroup>
@@ -46,15 +79,47 @@ export default function UsageStatsSummary({
             iconBg="bg-purple-500/10 text-purple-500"
             title={t('dashboard.tokenGroup')}
             primaryLabel={t('dashboard.todayTokens')}
-            primaryValue={formatTokenCount(stats.today_tokens, locale, tokenCountUnit)}
+            primaryValue={
+              <AnimatedMetricValue
+                id="dashboard-usage:today-tokens"
+                value={stats.today_tokens}
+                format={(value) => formatTokenCount(value ?? 0, locale, tokenCountUnit)}
+              />
+            }
             primaryTitle={formatInteger(stats.today_tokens, locale)}
           >
             <MetricLine
               label={t('dashboard.totalTokens')}
-              value={formatTokenCount(stats.total_tokens, locale, tokenCountUnit)}
+              value={
+                <AnimatedMetricValue
+                  id="dashboard-usage:total-tokens"
+                  value={stats.total_tokens}
+                  format={(value) => formatTokenCount(value ?? 0, locale, tokenCountUnit)}
+                />
+              }
               title={formatInteger(stats.total_tokens, locale)}
             />
-            <MetricLine label={t('dashboard.billing')} value={`${t('usage.todayCost')}: ${formatMoney(stats.today_user_billed)} / ${t('dashboard.totalCostShort')}: ${formatMoney(stats.total_user_billed)}`} />
+            <MetricLine
+              label={t('dashboard.billing')}
+              value={(
+                <>
+                  {t('usage.todayCost')}: {' '}
+                  <AnimatedMetricValue
+                    id="dashboard-usage:today-user-billed"
+                    value={stats.today_user_billed}
+                    format={(value) => formatMoney(value ?? 0)}
+                  />
+                  {' / '}
+                  {t('dashboard.totalCostShort')}: {' '}
+                  <AnimatedMetricValue
+                    id="dashboard-usage:total-user-billed"
+                    value={stats.total_user_billed}
+                    format={(value) => formatMoney(value ?? 0)}
+                  />
+                </>
+              )}
+              title={`${t('usage.todayCost')}: ${formatMoney(stats.today_user_billed)} / ${t('dashboard.totalCostShort')}: ${formatMoney(stats.total_user_billed)}`}
+            />
           </MetricGroup>
 
           <MetricGroup
@@ -62,14 +127,36 @@ export default function UsageStatsSummary({
             iconBg="bg-teal-500/10 text-teal-500"
             title={t('dashboard.cacheGroup')}
             primaryLabel={t('dashboard.todayCacheHitRate')}
-            primaryValue={formatPercent(stats.today_cache_rate ?? 0)}
+            primaryValue={
+              <AnimatedMetricValue
+                id="dashboard-usage:today-cache-rate"
+                value={stats.today_cache_rate ?? 0}
+                format={(value) => formatPercent(value ?? 0)}
+              />
+            }
           >
             <MetricLine
               label={t('dashboard.todayCachedTokens')}
-              value={formatTokenCount(stats.today_cached_tokens ?? 0, locale, tokenCountUnit)}
+              value={
+                <AnimatedMetricValue
+                  id="dashboard-usage:today-cached-tokens"
+                  value={stats.today_cached_tokens ?? 0}
+                  format={(value) => formatTokenCount(value ?? 0, locale, tokenCountUnit)}
+                />
+              }
               title={formatInteger(stats.today_cached_tokens ?? 0, locale)}
             />
-            <MetricLine label={t('dashboard.totalCacheHitRate')} value={formatPercent(stats.total_cache_rate ?? 0)} />
+            <MetricLine
+              label={t('dashboard.totalCacheHitRate')}
+              value={
+                <AnimatedMetricValue
+                  id="dashboard-usage:total-cache-rate"
+                  value={stats.total_cache_rate ?? 0}
+                  format={(value) => formatPercent(value ?? 0)}
+                />
+              }
+              title={formatPercent(stats.total_cache_rate ?? 0)}
+            />
           </MetricGroup>
 
           <MetricGroup
@@ -77,15 +164,26 @@ export default function UsageStatsSummary({
             iconBg="bg-cyan-500/10 text-cyan-500"
             title={t('dashboard.healthGroup')}
             primaryLabel={t('dashboard.avgFirstTokenLatency')}
-            primaryValue={<AnimatedLatency value={firstTokenLatencyMs} />}
+            primaryValue={<LatencyValue id="first-token" value={firstTokenLatencyMs} loading={latencyLoading} />}
             primaryTitle={formatLatency(firstTokenLatencyMs)}
           >
             <MetricLine
               label={t('dashboard.avgCompletionLatency')}
-              value={<AnimatedLatency value={completionLatencyMs} />}
+              value={<LatencyValue id="completion" value={completionLatencyMs} loading={latencyLoading} />}
               title={formatLatency(completionLatencyMs)}
             />
-            <MetricLine label={t('dashboard.todayErrorRate')} value={formatPercent(stats.error_rate)} tone={stats.error_rate > 1 ? 'danger' : 'default'} />
+            <MetricLine
+              label={t('dashboard.todayErrorRate')}
+              value={
+                <AnimatedMetricValue
+                  id="dashboard-usage:error-rate"
+                  value={stats.error_rate}
+                  format={(value) => formatPercent(value ?? 0)}
+                />
+              }
+              title={formatPercent(stats.error_rate)}
+              tone={stats.error_rate > 1 ? 'danger' : 'default'}
+            />
           </MetricGroup>
         </div>
       </CardContent>
@@ -195,40 +293,19 @@ function formatPercent(value: number): string {
   return `${value.toFixed(value >= 10 ? 1 : 2)}%`
 }
 
-function AnimatedLatency({ value }: { value?: number }) {
-  const animatedValue = useAnimatedNumber(value)
-  return formatLatency(animatedValue)
-}
-
-function useAnimatedNumber(value?: number, durationMs = 400): number | undefined {
-  const [displayValue, setDisplayValue] = useState(value)
-  const displayValueRef = useRef(value)
-
-  useEffect(() => {
-    const startValue = displayValueRef.current
-    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
-    if (!value || value <= 0 || !startValue || startValue <= 0 || value === startValue || reduceMotion) {
-      displayValueRef.current = value
-      setDisplayValue(value)
-      return
-    }
-
-    const startedAt = performance.now()
-    let frameId = 0
-    const animate = (now: number) => {
-      const progress = Math.min((now - startedAt) / durationMs, 1)
-      const easedProgress = 1 - (1 - progress) ** 3
-      const nextValue = startValue + (value - startValue) * easedProgress
-      displayValueRef.current = nextValue
-      setDisplayValue(nextValue)
-      if (progress < 1) frameId = requestAnimationFrame(animate)
-    }
-
-    frameId = requestAnimationFrame(animate)
-    return () => cancelAnimationFrame(frameId)
-  }, [durationMs, value])
-
-  return displayValue
+function LatencyValue({ id, value, loading }: { id: string; value?: number; loading: boolean }) {
+  return (
+    <span
+      className={`inline-block transition-opacity duration-200 ${loading ? 'opacity-60' : 'opacity-100'}`}
+      aria-busy={loading}
+    >
+      <AnimatedMetricValue
+        id={`dashboard-usage:${id}`}
+        value={value && value > 0 ? value : undefined}
+        format={formatLatency}
+      />
+    </span>
+  )
 }
 
 function formatLatency(value?: number): string {
