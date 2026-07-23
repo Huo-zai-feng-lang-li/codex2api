@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { BarChart3, Clock, Gauge, Zap } from 'lucide-react'
 import type { UsageStats } from '../types'
@@ -77,9 +77,14 @@ export default function UsageStatsSummary({
             iconBg="bg-cyan-500/10 text-cyan-500"
             title={t('dashboard.healthGroup')}
             primaryLabel={t('dashboard.avgFirstTokenLatency')}
-            primaryValue={formatLatency(firstTokenLatencyMs)}
+            primaryValue={<AnimatedLatency value={firstTokenLatencyMs} />}
+            primaryTitle={formatLatency(firstTokenLatencyMs)}
           >
-            <MetricLine label={t('dashboard.avgCompletionLatency')} value={formatLatency(completionLatencyMs)} />
+            <MetricLine
+              label={t('dashboard.avgCompletionLatency')}
+              value={<AnimatedLatency value={completionLatencyMs} />}
+              title={formatLatency(completionLatencyMs)}
+            />
             <MetricLine label={t('dashboard.todayErrorRate')} value={formatPercent(stats.error_rate)} tone={stats.error_rate > 1 ? 'danger' : 'default'} />
           </MetricGroup>
         </div>
@@ -101,7 +106,7 @@ function MetricGroup({
   iconBg: string
   title: string
   primaryLabel: string
-  primaryValue: string
+  primaryValue: ReactNode
   primaryTitle?: string
   children: ReactNode
 }) {
@@ -116,7 +121,10 @@ function MetricGroup({
           <div className="truncate text-xs text-muted-foreground" title={primaryLabel}>{primaryLabel}</div>
         </div>
       </div>
-      <div className="truncate text-[26px] font-bold leading-none tabular-nums text-foreground" title={primaryTitle ?? primaryValue}>
+      <div
+        className="truncate text-[26px] font-bold leading-none tabular-nums text-foreground"
+        title={primaryTitle ?? (typeof primaryValue === 'string' ? primaryValue : undefined)}
+      >
         {primaryValue}
       </div>
       <div className="mt-2.5 space-y-1.5 border-t border-border/60 pt-2">
@@ -126,11 +134,14 @@ function MetricGroup({
   )
 }
 
-function MetricLine({ label, value, title, tone = 'default' }: { label: string; value: string; title?: string; tone?: 'default' | 'danger' }) {
+function MetricLine({ label, value, title, tone = 'default' }: { label: string; value: ReactNode; title?: string; tone?: 'default' | 'danger' }) {
   return (
     <div className="flex min-w-0 items-center justify-between gap-3 text-sm">
       <span className="truncate text-muted-foreground" title={label}>{label}</span>
-      <span className={`shrink-0 font-semibold tabular-nums ${tone === 'danger' ? 'text-destructive' : 'text-foreground'}`} title={title ?? value}>
+      <span
+        className={`shrink-0 font-semibold tabular-nums ${tone === 'danger' ? 'text-destructive' : 'text-foreground'}`}
+        title={title ?? (typeof value === 'string' ? value : undefined)}
+      >
         {value}
       </span>
     </div>
@@ -182,6 +193,42 @@ function formatIntlCompactCount(value: number, locale: string): string {
 
 function formatPercent(value: number): string {
   return `${value.toFixed(value >= 10 ? 1 : 2)}%`
+}
+
+function AnimatedLatency({ value }: { value?: number }) {
+  const animatedValue = useAnimatedNumber(value)
+  return formatLatency(animatedValue)
+}
+
+function useAnimatedNumber(value?: number, durationMs = 400): number | undefined {
+  const [displayValue, setDisplayValue] = useState(value)
+  const displayValueRef = useRef(value)
+
+  useEffect(() => {
+    const startValue = displayValueRef.current
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    if (!value || value <= 0 || !startValue || startValue <= 0 || value === startValue || reduceMotion) {
+      displayValueRef.current = value
+      setDisplayValue(value)
+      return
+    }
+
+    const startedAt = performance.now()
+    let frameId = 0
+    const animate = (now: number) => {
+      const progress = Math.min((now - startedAt) / durationMs, 1)
+      const easedProgress = 1 - (1 - progress) ** 3
+      const nextValue = startValue + (value - startValue) * easedProgress
+      displayValueRef.current = nextValue
+      setDisplayValue(nextValue)
+      if (progress < 1) frameId = requestAnimationFrame(animate)
+    }
+
+    frameId = requestAnimationFrame(animate)
+    return () => cancelAnimationFrame(frameId)
+  }, [durationMs, value])
+
+  return displayValue
 }
 
 function formatLatency(value?: number): string {

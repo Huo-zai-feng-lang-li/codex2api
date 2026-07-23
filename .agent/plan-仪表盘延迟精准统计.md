@@ -58,3 +58,12 @@ AVG(CASE WHEN status_code = 200 THEN NULLIF(duration_ms, 0) END)
 - [x] 运行 `go test ./... -count=1`（本次相关包通过；仓库既有 `admin` 关机测试稳定触发 `os.Exit`，`proxy` 偶发失败后单包复跑通过）。
 - [x] 运行前端类型检查与生产构建。
 - [x] 运行 `go vet ./...`、`git diff --check` 并检查最终差异范围。
+
+### 阶段 5：消除自动刷新闪烁
+
+- [x] Playwright 跨越一个 15 秒刷新周期复现健康首字延迟短暂变为 `-`。
+- [x] 自动刷新采用 stale-while-revalidate：请求期间保留旧值，响应成功后原位替换。
+- [x] 首次加载和用户切换趋势时间范围时仍显示 `-`，避免把旧区间数据冒充新口径。
+- [x] 首字延迟和完成延迟更新时执行 400ms 数字滚动，并尊重 `prefers-reduced-motion`。
+- [x] 不改变 15 秒刷新频率，不增加接口请求，不影响流量、Token、缓存和错误率口径。
+- [x] 热更新后 Playwright 连续采样 17 秒共 519 次，`dashSamples=0`；可控数据变化验证数字滚动路径生效。

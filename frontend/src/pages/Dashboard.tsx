@@ -96,6 +96,7 @@ export default function Dashboard() {
 
   // 首次加载 + timeRange 变更时重新拉取图表数据
   useEffect(() => {
+    setChartData(null)
     void loadChartData()
   }, [loadChartData])
 
@@ -160,8 +161,8 @@ export default function Dashboard() {
           <div className="space-y-6">
             <UsageStatsSummary
               stats={usageStats}
-              firstTokenLatencyMs={chartLoading ? undefined : chartData?.avg_first_token_ms}
-              completionLatencyMs={chartLoading ? undefined : chartData?.avg_duration_ms}
+              firstTokenLatencyMs={chartData?.avg_first_token_ms}
+              completionLatencyMs={chartData?.avg_duration_ms}
             />
             <ActiveRequestsPanel requests={runtimeStatus?.accounts.active_request_details ?? []} />
             <Suspense fallback={<ChartsSkeleton />}>
