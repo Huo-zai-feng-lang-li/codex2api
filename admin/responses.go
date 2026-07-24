@@ -115,6 +115,30 @@ type opsOverviewResponse struct {
 	Postgres       opsDatabaseResponse `json:"postgres"`
 	Redis          opsRedisResponse    `json:"redis"`
 	Traffic        opsTrafficResponse  `json:"traffic"`
+	Storage        opsStorageResponse  `json:"storage"`
+}
+
+type opsStorageResponse struct {
+	Status    string              `json:"status"`
+	SampledAt string              `json:"sampled_at"`
+	Disk      opsStorageDiskInfo  `json:"disk"`
+	Managed   opsStorageManaged   `json:"managed"`
+	Error     string              `json:"error,omitempty"`
+}
+
+type opsStorageDiskInfo struct {
+	MountPoint   string  `json:"mount_point"`
+	TotalBytes   uint64  `json:"total_bytes"`
+	UsedBytes    uint64  `json:"used_bytes"`
+	FreeBytes    uint64  `json:"free_bytes"`
+	UsagePercent float64 `json:"usage_percent"`
+}
+
+type opsStorageManaged struct {
+	DatabaseBytes int64 `json:"database_bytes"`
+	LogsBytes     int64 `json:"logs_bytes"`
+	ImagesBytes   int64 `json:"images_bytes"`
+	TotalBytes    int64 `json:"total_bytes"`
 }
 
 type opsCPUResponse struct {

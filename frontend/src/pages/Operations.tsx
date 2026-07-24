@@ -264,6 +264,9 @@ export default function Operations() {
                     }
                     t={t}
                   />
+                  {overview.storage && (
+                    <StorageCard storage={overview.storage} t={t} />
+                  )}
                 </div>
               </CardContent>
             </Card>
@@ -382,6 +385,111 @@ function getCacheTone(overview: OpsOverviewResponse): MetricTone {
   if (!overview.redis.healthy) return "danger";
   if (overview.cache_driver === "memory") return "normal";
   return getPercentTone(overview.redis.usage_percent, 70, 90);
+}
+
+function getStorageTone(overview: OpsOverviewResponse): MetricTone {
+  if (!overview.storage) return "normal";
+  if (overview.storage.status === "critical") return "danger";
+  if (overview.storage.status === "warning") return "warning";
+  return "normal";
+}
+
+function StorageCard({
+  storage,
+  t,
+}: {
+  storage: NonNullable<OpsOverviewResponse["storage"]>;
+  t: (key: string, options?: any) => string;
+}) {
+  const tone =
+    storage.status === "critical"
+      ? "danger"
+      : storage.status === "warning"
+        ? "warning"
+        : "normal";
+
+  const toneStyle = {
+    normal: {
+      badge: "bg-[hsl(var(--success-bg))] text-[hsl(var(--success))]",
+      dot: "bg-[hsl(var(--success))]",
+      label: t("common.normal"),
+    },
+    warning: {
+      badge: "bg-amber-500/10 text-amber-600",
+      dot: "bg-amber-500",
+      label: t("common.warning"),
+    },
+    danger: {
+      badge: "bg-destructive/10 text-destructive",
+      dot: "bg-destructive",
+      label: t("common.danger"),
+    },
+    info: {
+      badge: "bg-primary/10 text-primary",
+      dot: "bg-primary",
+      label: t("common.info"),
+    },
+  }[tone];
+
+  const mount = storage.disk.mount_point || "C:";
+  const managedSize = formatBytes(storage.managed.total_bytes);
+  const dbSize = formatBytes(storage.managed.database_bytes);
+  const logSize = formatBytes(storage.managed.logs_bytes);
+  const diskPct = storage.disk.usage_percent.toFixed(1);
+  const diskUsed = formatBytes(storage.disk.used_bytes);
+  const diskTotal = formatBytes(storage.disk.total_bytes);
+
+  return (
+    <Card className="col-span-1 py-0 transition-all duration-150 hover:-translate-y-0.5 hover:shadow-md sm:col-span-2 lg:col-span-2">
+      <CardContent className="p-4">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            <span className="text-[14px] font-bold text-foreground">
+              {t("ops.storage")}
+            </span>
+            <span className="rounded-md bg-primary/10 px-2 py-0.5 text-[13px] font-bold text-primary border border-primary/20">
+              {mount} 盘
+            </span>
+          </div>
+          <span
+            className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[12px] font-semibold ${toneStyle.badge}`}
+          >
+            <span className={`size-2 rounded-full ${toneStyle.dot}`} />
+            {toneStyle.label}
+          </span>
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-baseline justify-between gap-2">
+          <div className="flex items-baseline gap-2">
+            <span className="whitespace-nowrap text-[22px] font-bold leading-none text-foreground">
+              {managedSize}
+            </span>
+            <span className="text-[12px] text-muted-foreground">
+              {t("ops.systemUsage", { defaultValue: "系统占用" })}
+            </span>
+          </div>
+          <span className="whitespace-nowrap text-[12px] font-medium text-muted-foreground">
+            {mount}盘已用 {diskPct}% ({diskUsed} / {diskTotal})
+          </span>
+        </div>
+
+        <div className="mt-3 flex items-center gap-4 border-t border-border/50 pt-2 text-[12px] text-muted-foreground">
+          <div className="flex items-center gap-1.5">
+            <span className="size-2 rounded-full bg-primary/70" />
+            <span>
+              SQLite: <strong className="font-semibold text-foreground">{dbSize}</strong>
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="size-2 rounded-full bg-amber-500/70" />
+            <span>
+              日志: <strong className="font-semibold text-foreground">{logSize}</strong>
+            </span>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
 }
 
 function formatBytes(bytes: number): string {

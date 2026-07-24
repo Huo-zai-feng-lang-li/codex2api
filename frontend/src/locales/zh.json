@@ -854,7 +854,16 @@
     "shutdownConfirmDesc": "确认后当前进程会优雅关闭，新的 API 请求和管理后台访问都会中断。浏览器可能不会自动关闭当前页面。",
     "shutdownConfirm": "确认停止",
     "shutdownStarted": "服务正在关闭",
-    "shutdownFailed": "停止服务失败"
+    "shutdownFailed": "停止服务失败",
+    "storage": "存储占用",
+    "storageDiskUsage": "磁盘 {{used}} / {{total}}",
+    "storageManaged": "管理 {{size}}",
+    "storageDb": "数据库 {{size}}",
+    "storageLogs": "日志 {{size}}",
+    "storageImages": "图片 {{size}}",
+    "storageImagesUnknown": "图片（远程）",
+    "storageSampledAt": "采样 {{time}}",
+    "storageSub": "DB {{db}} · 日志 {{logs}} · 磁盘 {{percent}}%"
   },
   "runtime": {
     "title": "运行时状态",

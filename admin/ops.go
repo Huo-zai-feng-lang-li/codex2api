@@ -215,6 +215,7 @@ func (h *Handler) GetOpsOverview(c *gin.Context) {
 		totalRuntimeRequests += acc.GetTotalRequests()
 	}
 
+	storageresp := h.buildStorageResponse()
 	c.JSON(200, opsOverviewResponse{
 		UpdatedAt:      time.Now().Format(time.RFC3339),
 		UptimeSeconds:  int64(time.Since(h.startedAt).Seconds()),
@@ -271,5 +272,35 @@ func (h *Handler) GetOpsOverview(c *gin.Context) {
 			RPMLimit:      h.rateLimiter.GetRPM(),
 			AvgDurationMs: usageStats.AvgDurationMs,
 		},
+		Storage: storageresp,
 	})
+}
+
+// buildStorageResponse reads the cached snapshot; returns unknown if not injected.
+func (h *Handler) buildStorageResponse() opsStorageResponse {
+	if h.storageSnapshot == nil {
+		return opsStorageResponse{Status: "unknown"}
+	}
+	status, sampledAt, mountPoint,
+		diskTotal, diskUsed, diskFree, diskPct,
+		dbBytes, logsBytes, imagesBytes, totalBytes,
+		errMsg := h.storageSnapshot()
+	return opsStorageResponse{
+		Status:    status,
+		SampledAt: sampledAt,
+		Disk: opsStorageDiskInfo{
+			MountPoint:   mountPoint,
+			TotalBytes:   diskTotal,
+			UsedBytes:    diskUsed,
+			FreeBytes:    diskFree,
+			UsagePercent: diskPct,
+		},
+		Managed: opsStorageManaged{
+			DatabaseBytes: dbBytes,
+			LogsBytes:     logsBytes,
+			ImagesBytes:   imagesBytes,
+			TotalBytes:    totalBytes,
+		},
+		Error: errMsg,
+	}
 }

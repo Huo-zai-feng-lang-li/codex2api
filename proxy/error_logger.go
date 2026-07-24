@@ -37,12 +37,16 @@ const (
 	maxErrorLogSizeMiB     = (1<<63 - 1) / bytesPerMiB
 )
 
-func errorLogDir() string {
+// ErrorLogDir returns the directory used to store error log files.
+// It reads LOG_DIR env var and falls back to the default "logs" directory.
+func ErrorLogDir() string {
 	if dir := strings.TrimSpace(os.Getenv("LOG_DIR")); dir != "" {
 		return dir
 	}
 	return defaultLogDir
 }
+
+func errorLogDir() string { return ErrorLogDir() }
 
 func errorLogMaxSize() int64 {
 	value, err := strconv.ParseInt(strings.TrimSpace(os.Getenv("ERROR_LOG_MAX_MB")), 10, 64)

@@ -59,6 +59,7 @@ type Handler struct {
 	adminSecretEnv         string
 	imageProxy             *proxy.Handler
 	shutdownFunc           func(string) bool
+	storageSnapshot        func() (string, string, string, uint64, uint64, uint64, float64, int64, int64, int64, int64, string)
 
 	// 图表聚合内存缓存（10秒 TTL）
 	chartCacheMu   sync.RWMutex
@@ -203,6 +204,13 @@ func NewHandler(store *auth.Store, db *database.DB, tc cache.TokenCache, rl *pro
 func (h *Handler) SetPoolSizes(pgMaxConns, redisPoolSize int) {
 	h.pgMaxConns = pgMaxConns
 	h.redisPoolSize = redisPoolSize
+}
+
+// SetStorageSnapshot 注入容量快照读取函数（由 main.go 在维护管理器启动后调用）。
+// 返回值依次为：status, sampled_at(RFC3339), mount_point,
+// disk.(total,used,free,pct), managed.(db,logs,images,total), error
+func (h *Handler) SetStorageSnapshot(fn func() (string, string, string, uint64, uint64, uint64, float64, int64, int64, int64, int64, string)) {
+	h.storageSnapshot = fn
 }
 
 // SetShutdownFunc 注入服务关停触发器。main 包持有真正的 http.Server 生命周期。

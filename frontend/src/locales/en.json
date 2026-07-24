@@ -854,7 +854,16 @@
     "shutdownConfirmDesc": "After confirmation, the current process will shut down gracefully. New API requests and admin access will be interrupted. The browser may not close this page automatically.",
     "shutdownConfirm": "Stop Service",
     "shutdownStarted": "Service is shutting down",
-    "shutdownFailed": "Failed to stop service"
+    "shutdownFailed": "Failed to stop service",
+    "storage": "System Storage",
+    "storageDiskUsage": "Disk {{used}} / {{total}}",
+    "storageManaged": "Managed {{size}}",
+    "storageDb": "DB {{size}}",
+    "storageLogs": "Logs {{size}}",
+    "storageImages": "Images {{size}}",
+    "storageImagesUnknown": "Images (remote)",
+    "storageSampledAt": "Sampled {{time}}",
+    "storageSub": "DB {{db}} · Logs {{logs}} · Disk {{percent}}%"
   },
   "runtime": {
     "title": "Runtime Status",

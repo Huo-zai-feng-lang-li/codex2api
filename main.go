@@ -24,6 +24,7 @@ import (
 	"github.com/codex2api/config"
 	"github.com/codex2api/database"
 	"github.com/codex2api/internal/imagestore"
+	"github.com/codex2api/maintenance"
 	"github.com/codex2api/proxy"
 	"github.com/codex2api/proxy/wsrelay"
 	"github.com/codex2api/security"
@@ -199,6 +200,28 @@ func main() {
 	// 初始化 admin handler 的连接池设置跟踪
 	adminHandler.SetPoolSizes(settings.PgMaxConns, settings.RedisPoolSize)
 	store.SetUsageProbeFunc(adminHandler.ProbeUsageSnapshot)
+
+	// 启动维护管理器（数据保留清理 + 容量采样）
+	dbPath := ""
+	if cfg.Database.Driver == "sqlite" {
+		dbPath = cfg.Database.Path
+	}
+	maintMgr := maintenance.New(maintenance.Config{
+		DB:        db,
+		DBPath:    dbPath,
+		LogDir:    proxy.ErrorLogDir(),
+		ImagesDir: imagestore.CurrentConfig().LocalDir,
+		Retention: maintenance.DefaultRetentionConfig(settings.SecurityEventRetentionDays),
+	})
+	adminHandler.SetStorageSnapshot(func() (string, string, string, uint64, uint64, uint64, float64, int64, int64, int64, int64, string) {
+		s := maintMgr.Snapshot()
+		return string(s.Status), s.SampledAt.Format("2006-01-02T15:04:05Z07:00"), s.Disk.MountPoint,
+			s.Disk.TotalBytes, s.Disk.UsedBytes, s.Disk.FreeBytes, s.Disk.UsagePercent,
+			s.Managed.DatabaseBytes, s.Managed.LogsBytes, s.Managed.ImagesBytes, s.Managed.TotalBytes,
+			s.Error
+	})
+	maintMgr.Start()
+	defer maintMgr.Stop()
 
 	// 启动后台刷新
 	store.StartBackgroundRefresh()

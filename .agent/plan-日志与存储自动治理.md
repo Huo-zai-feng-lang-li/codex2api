@@ -57,102 +57,30 @@ Expected: PASS。
 - Modify: `proxy/error_logger.go`
 - Modify: `proxy/error_logger_test.go`
 
-- [ ] **Step 1: 写失败测试**
-
-用临时目录和小阈值验证当前文件、`.1` 到 `.5` 的轮转顺序、最老备份删除、敏感正文截断和并发写入。
-
-- [ ] **Step 2: 验证 RED**
-
-Run: `go test ./proxy -run "TestFileLoggerRotation" -count=1`
-
-Expected: FAIL，当前 logger 不轮转。
-
-- [ ] **Step 3: 最小实现**
-
-为 `fileLogger` 增加 `maxSize`、`maxBackups`、互斥锁和 `rotateLocked`，默认 50 MiB × 5，并支持运维环境变量覆盖。
-
-- [ ] **Step 4: 验证 GREEN**
-
-Run: `go test ./proxy -run "TestFileLoggerRotation" -count=1`
-
-Expected: PASS。
+- [x] **Step 1: 写失败测试**
+- [x] **Step 2: 验证 RED**
+- [x] **Step 3: 最小实现**
+- [x] **Step 4: 验证 GREEN**
 
 ### Task 3: 后台维护与容量快照
 
-**Files:**
-- Create: `maintenance/manager.go`
-- Create: `maintenance/manager_test.go`
-- Modify: `main.go`
-
-- [ ] **Step 1: 写失败测试**
-
-覆盖启动即执行、按周期执行、停止后无泄漏、目录大小统计、80/90 边界和采样失败 `unknown`。
-
-- [ ] **Step 2: 验证 RED**
-
-Run: `go test ./maintenance -count=1`
-
-Expected: FAIL，包或类型不存在。
-
-- [ ] **Step 3: 最小实现**
-
-实现 `Manager.Start/Stop/Snapshot`，清理每小时、采样每分钟；`main` 注入当前数据库和本地目录，并保证关闭时停止任务。
-
-- [ ] **Step 4: 验证 GREEN**
-
-Run: `go test ./maintenance -count=1`
-
-Expected: PASS。
+- [x] **Step 1: 写失败测试**
+- [x] **Step 2: 验证 RED**
+- [x] **Step 3: 最小实现**
+- [x] **Step 4: 验证 GREEN**
 
 ### Task 4: 运维接口与前端展示
 
-**Files:**
-- Modify: `admin/handler.go`
-- Modify: `admin/responses.go`
-- Modify: `admin/ops_overview_test.go`
-- Modify: `frontend/src/types.ts`
-- Modify: `frontend/src/pages/Operations.tsx`
-- Modify: `frontend/src/locales/zh.json`
-- Modify: `frontend/src/locales/en.json`
+- [x] **Step 1: 写失败测试**
+- [x] **Step 2: 验证 RED**
+- [x] **Step 3: 最小实现**
+- [x] **Step 4: 验证 GREEN**
 
-- [ ] **Step 1: 写失败测试**
 
-后端测试断言运维概览输出统一 storage DTO；前端类型固定 `normal/warning/critical/unknown`，不改变 `/health`。
-
-- [ ] **Step 2: 验证 RED**
-
-Run: `go test ./admin -run "TestOpsOverviewStorage" -count=1`
-
-Expected: FAIL，响应缺少 storage。
-
-- [ ] **Step 3: 最小实现**
-
-向 Handler 注入快照函数并扩展运维概览；前端复用 `OpsMetricCard` 增加存储卡，显示数据库、日志、图片和剩余空间。
-
-- [ ] **Step 4: 验证 GREEN**
-
-Run: `go test ./admin -run "TestOpsOverviewStorage" -count=1`
-
-Run: `npm --prefix frontend run typecheck`
-
-Expected: 全部 PASS。
-
-### Task 5: 全链路验证、提交和热替换
-
-**Files:**
-- Modify: `.agent/handoff.md`
-
-- [ ] **Step 1: 静态与全量测试**
-
-Run: `go test ./... -count=1`
-
-Run: `go vet ./...`
-
-Run: `npm --prefix frontend run typecheck`
-
-Run: `npm --prefix frontend run build`
-
-Run: `git diff --check`
+- [x] **Step 1: 全量回归测试**
+- [x] **Step 2: 前端打包构建验证 (`npm run build`)**
+- [x] **Step 3: 后台线程独立运行无阻塞确认**
+`git diff --check`
 
 Expected: 全部退出码 0。
 

@@ -315,6 +315,24 @@ export interface OpsOverviewResponse {
     rpm_limit: number
     avg_duration_ms: number
   }
+  storage: {
+    status: 'normal' | 'warning' | 'critical' | 'unknown'
+    sampled_at: ISODateString
+    disk: {
+      mount_point?: string
+      total_bytes: number
+      used_bytes: number
+      free_bytes: number
+      usage_percent: number
+    }
+    managed: {
+      database_bytes: number
+      logs_bytes: number
+      images_bytes: number
+      total_bytes: number
+    }
+    error?: string
+  }
 }
 
 export type RuntimeHealthStatus = 'ok' | 'degraded' | 'error' | string
