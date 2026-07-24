@@ -1,22 +1,9 @@
 """
 ====== 批量添加账号提示词（直接复制本段发送给 AI 即可） ======
 
-我需要你使用项目本地的 `scripts/batch_add_accounts.py` 脚本帮我批量添加账号。
-我提供的待添加账号列表如下（请自行修改/粘贴）：
+添加账号-API Key-账号名称填写https://kaiycb.com-43递增，Base URL统一填写https://kaiycb.com，
 
-1. 账号名称：https://kaiycb.com-XX
-   API Key：sk-XXXX
-   Base URL：https://kaiycb.com
-
-2. 账号名称：https://kaiycb.com-YY
-   API Key：sk-YYYY
-   Base URL：https://kaiycb.com
-
-【请 AI 执行以下步骤】
-1. 在项目根目录下临时生成 `accounts_to_add.json` 文件，填入上面提供的账号参数。
-2. 运行本地命令行指令：python scripts/batch_add_accounts.py --input accounts_to_add.json
-3. 执行成功后，彻底清理/删除临时生成的 `accounts_to_add.json` 保持库整洁。
-4. 反馈全部批量导入的最终状态给我。
+下面是key：
 
 ==============================================================
 """
