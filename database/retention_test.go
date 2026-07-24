@@ -72,6 +72,51 @@ func tableCount(t *testing.T, db *DB, table string) int64 {
 	return count
 }
 
+func appendBufferedUsageLog(db *DB, endpoint string) {
+	db.logMu.Lock()
+	db.logBuf = append(db.logBuf, usageLogEntry{Endpoint: endpoint, StatusCode: 200})
+	db.logMu.Unlock()
+}
+
+func bufferedUsageLogEndpoints(db *DB) []string {
+	db.logMu.Lock()
+	defer db.logMu.Unlock()
+
+	endpoints := make([]string, len(db.logBuf))
+	for i, entry := range db.logBuf {
+		endpoints[i] = entry.Endpoint
+	}
+	return endpoints
+}
+
+func waitForLogBufferLength(t *testing.T, db *DB, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		db.logMu.Lock()
+		got := len(db.logBuf)
+		db.logMu.Unlock()
+		if got == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("等待 logBuf 长度变为 %d 超时，当前 endpoints=%v", want, bufferedUsageLogEndpoints(db))
+}
+
+func installUsageLogInsertFailure(t *testing.T, db *DB) {
+	t.Helper()
+	if _, err := db.conn.ExecContext(context.Background(), `
+		CREATE TRIGGER fail_usage_log_insert BEFORE INSERT ON usage_logs
+		BEGIN SELECT RAISE(ABORT, 'forced usage log flush failure'); END
+	`); err != nil {
+		t.Fatalf("创建日志写入失败触发器返回错误: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.conn.ExecContext(context.Background(), `DROP TRIGGER IF EXISTS fail_usage_log_insert`)
+	})
+}
+
 func TestPruneUsageLogsBeforePreservesLifecycleTotals(t *testing.T) {
 	db := newRetentionTestDB(t)
 	ctx := context.Background()
@@ -134,6 +179,84 @@ func TestPruneUsageLogsBeforeFlushesBufferedLogs(t *testing.T) {
 	}
 	if got := readUsageBaseline(t, db); got.totalTokens != 10 || got.firstTokenMSSum != 75 {
 		t.Fatalf("baseline = %#v, want flushed totals", got)
+	}
+}
+
+func TestFlushLogsRestoresFailedBatchBeforeConcurrentLogs(t *testing.T) {
+	db := newRetentionTestDB(t)
+	db.SetUsageLogConfig(UsageLogModeFull, defaultUsageLogBatchSize, maxUsageLogFlushIntervalSeconds)
+	installUsageLogInsertFailure(t, db)
+	appendBufferedUsageLog(db, "old")
+
+	heldConn, err := db.conn.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("占用 SQLite 连接返回错误: %v", err)
+	}
+	t.Cleanup(func() { _ = heldConn.Close() })
+
+	flushDone := make(chan struct{})
+	go func() {
+		db.flushLogs()
+		close(flushDone)
+	}()
+
+	waitForLogBufferLength(t, db, 0)
+	appendBufferedUsageLog(db, "new")
+	if err := heldConn.Close(); err != nil {
+		t.Fatalf("释放 SQLite 连接返回错误: %v", err)
+	}
+
+	select {
+	case <-flushDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("等待 flushLogs 返回超时")
+	}
+
+	got := bufferedUsageLogEndpoints(db)
+	if len(got) != 2 || got[0] != "old" || got[1] != "new" {
+		t.Fatalf("flush 失败后 logBuf endpoints = %v, want [old new]", got)
+	}
+}
+
+func TestPruneUsageLogsReturnsFlushErrorWithoutDeleting(t *testing.T) {
+	db := newRetentionTestDB(t)
+	ctx := context.Background()
+	cutoff := time.Now().UTC().Truncate(time.Second)
+	insertRetentionUsageLog(t, db, cutoff.Add(-time.Hour), 200, 1, 2, 3, 0, 40, 0, 0)
+	installUsageLogInsertFailure(t, db)
+	appendBufferedUsageLog(db, "buffered")
+
+	deleted, err := db.pruneUsageLogs(ctx, usageLogPruneScope{cutoff: &cutoff})
+	if err == nil {
+		t.Fatal("pruneUsageLogs 应返回 flush 失败")
+	}
+	if deleted != 0 {
+		t.Fatalf("deleted = %d, want 0", deleted)
+	}
+	if got := tableCount(t, db, "usage_logs"); got != 1 {
+		t.Fatalf("flush 失败后 usage_logs count = %d, want 1", got)
+	}
+}
+
+func TestPruneOperationalDataBeforeReturnsFlushErrorWithoutDeleting(t *testing.T) {
+	db := newRetentionTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	if _, err := db.conn.ExecContext(ctx, `INSERT INTO security_events (created_at) VALUES ($1)`, db.timeArg(now.Add(-48*time.Hour))); err != nil {
+		t.Fatalf("插入 security_events 返回错误: %v", err)
+	}
+	installUsageLogInsertFailure(t, db)
+	appendBufferedUsageLog(db, "buffered")
+
+	result, err := db.PruneOperationalDataBefore(ctx, RetentionPolicy{SecurityEvents: 24 * time.Hour}, now)
+	if err == nil {
+		t.Fatal("PruneOperationalDataBefore 应返回 flush 失败")
+	}
+	if result != (RetentionResult{}) {
+		t.Fatalf("result = %#v, want zero", result)
+	}
+	if got := tableCount(t, db, "security_events"); got != 1 {
+		t.Fatalf("flush 失败后 security_events count = %d, want 1", got)
 	}
 }
 

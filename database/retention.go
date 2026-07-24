@@ -51,7 +51,9 @@ func (db *DB) PruneUsageLogsBefore(ctx context.Context, cutoff time.Time) (int64
 }
 
 func (db *DB) pruneUsageLogs(ctx context.Context, scope usageLogPruneScope) (int64, error) {
-	db.flushLogs()
+	if err := db.flushLogsStrict(); err != nil {
+		return 0, fmt.Errorf("刷新 usage_logs 失败: %w", err)
+	}
 	var deleted int64
 	err := db.withRetentionTx(ctx, func(tx *sql.Tx) error {
 		var err error
@@ -230,7 +232,9 @@ func (db *DB) deleteAggregatedUsageLogsTx(ctx context.Context, tx *sql.Tx, scope
 // PruneOperationalDataBefore prunes configured operational tables in one
 // transaction. Retention defaults remain the caller's responsibility.
 func (db *DB) PruneOperationalDataBefore(ctx context.Context, policy RetentionPolicy, now time.Time) (RetentionResult, error) {
-	db.flushLogs()
+	if err := db.flushLogsStrict(); err != nil {
+		return RetentionResult{}, fmt.Errorf("刷新 usage_logs 失败: %w", err)
+	}
 	var result RetentionResult
 	err := db.withRetentionTx(ctx, func(tx *sql.Tx) error {
 		if policy.UsageLogs > 0 {
