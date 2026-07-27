@@ -1,22 +1,20 @@
-# 最新接续状态 (2026-07-27)
+# 最新接续状态 (2026-07-27 23:39)
 
 ## 核心进展
-- 错误统计与上游降级闭环已完成并部署：业务统计只计 `status_code <> 499 AND is_retry_attempt = false`，重试 attempt 独立留痕且不占用户限额。
-- 使用统计启用 baseline v2，返回 `stats_version=2`、`accurate_since`、`legacy_baseline_available`；旧 baseline 保留审计但不进入主统计。
-- Responses WSS 可恢复失败会在同账号内降级 HTTP，并按规范化端点缓存 30 分钟/2 分钟能力；fallback 失败保留真实终态错误。
-- 运维错误汇总新增 `terminal_errors`、`retry_errors`，旧 `total_errors` 保持 attempt 级语义；前端已区分“错误请求”和“错误尝试”。
+- 错误统计与上游降级闭环已完成、提交、合并 `main` 并热替换：业务统计统一使用 `status_code <> 499 AND is_retry_attempt = false`，baseline v2、WSS→HTTP fallback、终态/重试错误分栏均已上线。
+- `zk/error-stats-upstream-fallback` 已由 `4102115` 合并；`zk/dashboard-usage-range` 已由 `52aaeb8` 合并；当前 `main` 为 `c49f0ee`，运行服务 PID `34956`，EXE SHA256 为 `7CAFDC09FC4EF9F536568A13FCB3A30A14DCC8BBDBAD157D549145F098869453`。
+- 账号可用数波动已定位：`/health.available` 使用 `Store.AvailableCount()` 的模型无关口径；当前运行态实际为 active=11、rate_limited=19、unauthorized=11、payment_required=4，但 `/health.available=29`，因此“可用”会包含部分仅特定模型冷却/已到期冷却的账号。
 
-## 生产验证
-- 正式服务监听 `127.0.0.1:18080`；最终 PID 与运行 EXE SHA256 以本轮交付时的实时校验为准。
-- 两个功能分支及本 handoff 提交完成后重新构建候选并执行热替换，运行文件与最终 `main` 源码一致。
-- `/health` 连续 3 次 `status=ok`、`responses_memory.inflight_requests=0`。
-- `/api/admin/usage/stats` 返回 `stats_version=2`；运维错误汇总四个兼容字段齐全；前端入口和构建资产均为 HTTP 200。
-- `npm --prefix frontend run typecheck/build`、`go test ./... -count=1`、`go vet ./...`、`git diff --check` 全部通过。
+## 变更决策
+- 用户统计、限额和计费仅使用终态请求；内部 retry attempt 保留取证并单独统计，账号上游实际成本仍保留全部 attempt。
+- 限流账号采用冷却到期与恢复探针机制：普通冷却到期后 `Account.IsAvailable()` 自动重新纳入；模型冷却按 `reset_at` 失效；恢复探针当前间隔 30 分钟，后台刷新间隔 2 分钟。
+- 当前“账号可用数”是全局可调度近似值，不等于目标模型实时可用数；下一轮应改为模型感知指标或并列展示 `active / model_available / rate_limited`，避免管理界面误导。
 
-## Git 集成
-- `zk/error-stats-upstream-fallback` 已由功能提交 `5bd3b9a` 合并到 `main`，合并提交为 `4102115`。
-- `zk/dashboard-usage-range` 已提交并合并到 `main`，合并提交为 `52aaeb8`；`scripts/batch_add_accounts.py` 的 `hhttps://` 拼写已在 `aba7515` 修正。
+## 待办事项 (Next Steps)
+- [ ] 修正账号可用统计口径：禁止将仍处于目标模型 cooldown 的账号计入该模型可用数，并补充 runtime/API/UI 回归测试。
+- [ ] 通过已恢复的 `http://127.0.0.1:51081` VPN 代理推送本地 `main` 到 `origin/main`，推送后核对远端提交。
+- [ ] 有真实 PostgreSQL 实例时补做 baseline v2、retention 与统计谓词运行态验证。
 
-## 仓库边界
-- 临时候选、验证、回滚和失败程序均已清理；仅正式服务保留运行。
-- PostgreSQL 路径已通过编译与方言契约测试；本机未配置真实 PostgreSQL 实例，运行态证据来自 SQLite/正式服务。
+## 关键上下文
+- 目录: `C:\Users\Administrator\Desktop\codex2api`
+- 主要文件: `auth/store.go`、`database/usage_attempts.go`、`proxy/responses_ws.go`
