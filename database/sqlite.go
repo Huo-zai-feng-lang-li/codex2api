@@ -541,6 +541,8 @@ func (db *DB) getTrafficSnapshotSQLite(ctx context.Context) (*TrafficSnapshot, e
 		SELECT created_at, total_tokens
 		FROM usage_logs
 		WHERE created_at >= $1
+		  AND status_code <> 499
+		  AND COALESCE(is_retry_attempt, false) = false
 	`, db.timeArg(time.Now().Add(-5*time.Minute)))
 	if err != nil {
 		return nil, err
@@ -602,6 +604,7 @@ func (db *DB) getChartAggregationSQLite(ctx context.Context, start, end time.Tim
 		FROM usage_logs
 		WHERE created_at >= $1 AND created_at <= $2
 		  AND status_code <> 499
+		  AND COALESCE(is_retry_attempt, false) = false
 	`, startArg, endArg)
 	if err != nil {
 		return nil, err
@@ -831,7 +834,8 @@ func (db *DB) getUsageStatsSQLite(ctx context.Context, rangeStart, rangeEnd time
 
 	query := `
 			SELECT created_at, total_tokens, prompt_tokens, completion_tokens,
-			       cached_tokens, first_token_ms, duration_ms, status_code, account_billed, user_billed
+			       cached_tokens, first_token_ms, duration_ms, status_code,
+			       account_billed, user_billed, COALESCE(is_retry_attempt, 0)
 			FROM usage_logs
 			WHERE created_at >= $1 AND status_code <> 499
 		`
@@ -862,12 +866,19 @@ func (db *DB) getUsageStatsSQLite(ctx context.Context, rangeStart, rangeEnd time
 		var firstTokenMs, durationMs int
 		var statusCode int
 		var accountBilled, userBilled float64
+		var isRetryAttempt int
 		if err := rows.Scan(&createdRaw, &totalTokens, &promptTokens, &completionTokens,
-			&cachedTokens, &firstTokenMs, &durationMs, &statusCode, &accountBilled, &userBilled); err != nil {
+			&cachedTokens, &firstTokenMs, &durationMs, &statusCode,
+			&accountBilled, &userBilled, &isRetryAttempt); err != nil {
 			return nil, err
 		}
 		createdAt, err := parseDBTimeValue(createdRaw)
 		if err != nil || createdAt.IsZero() {
+			continue
+		}
+
+		stats.TodayAccountBilled += accountBilled
+		if isRetryAttempt != 0 {
 			continue
 		}
 
@@ -877,7 +888,6 @@ func (db *DB) getUsageStatsSQLite(ctx context.Context, rangeStart, rangeEnd time
 		stats.TotalCompletion += completionTokens
 		stats.TotalCachedTokens += cachedTokens
 		stats.TodayCachedTokens += cachedTokens
-		stats.TodayAccountBilled += accountBilled
 		stats.TodayUserBilled += userBilled
 		if statusCode == 200 && durationMs > 0 {
 			totalSuccessDuration += float64(durationMs)
@@ -920,43 +930,48 @@ func (db *DB) getUsageStatsSQLite(ctx context.Context, rangeStart, rangeEnd time
 		stats.AvgFirstTokenMs = totalFirstTokenMs / float64(totalFirstTokenSamples)
 	}
 
-	// 可见请求总数（排除 499）
+	// 业务量只计终态；账号成本保留全部非 499 attempt。
 	var visibleTotal, visibleCacheRateRequests, visibleCacheHitRequests int64
 	var currentTokens, currentPrompt, currentCompletion, currentCached int64
 	var currentAccountBilled, currentUserBilled float64
-	_ = db.conn.QueryRowContext(ctx, `
+	if err := db.conn.QueryRowContext(ctx, `
 		SELECT
-			COUNT(*),
-			COALESCE(SUM(total_tokens), 0),
-			COALESCE(SUM(prompt_tokens), 0),
-			COALESCE(SUM(completion_tokens), 0),
-			COALESCE(SUM(cached_tokens), 0),
-			COALESCE(SUM(CASE WHEN status_code = 200 THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN status_code = 200 AND cached_tokens > 0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN COALESCE(is_retry_attempt, false) = false THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN COALESCE(is_retry_attempt, false) = false THEN total_tokens ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN COALESCE(is_retry_attempt, false) = false THEN prompt_tokens ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN COALESCE(is_retry_attempt, false) = false THEN completion_tokens ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN COALESCE(is_retry_attempt, false) = false THEN cached_tokens ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status_code = 200 AND COALESCE(is_retry_attempt, false) = false THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status_code = 200 AND cached_tokens > 0 AND COALESCE(is_retry_attempt, false) = false THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(account_billed), 0),
-			COALESCE(SUM(user_billed), 0)
+			COALESCE(SUM(CASE WHEN COALESCE(is_retry_attempt, false) = false THEN user_billed ELSE 0 END), 0)
 		FROM usage_logs
 		WHERE status_code <> 499
-	`).Scan(&visibleTotal, &currentTokens, &currentPrompt, &currentCompletion, &currentCached, &visibleCacheRateRequests, &visibleCacheHitRequests, &currentAccountBilled, &currentUserBilled)
+	`).Scan(&visibleTotal, &currentTokens, &currentPrompt, &currentCompletion, &currentCached, &visibleCacheRateRequests, &visibleCacheHitRequests, &currentAccountBilled, &currentUserBilled); err != nil {
+		return nil, err
+	}
 
-	// 基线值
-	var bReq, bTok, bPrompt, bComp, bCached, bCacheHitRequests, bCacheRateRequests int64
-	var bAccountBilled, bUserBilled float64
-	_ = db.conn.QueryRowContext(ctx, `
-		SELECT total_requests, total_tokens, prompt_tokens, completion_tokens, cached_tokens, cache_hit_requests, cache_rate_requests, account_billed, user_billed
-		FROM usage_stats_baseline WHERE id = 1
-	`).Scan(&bReq, &bTok, &bPrompt, &bComp, &bCached, &bCacheHitRequests, &bCacheRateRequests, &bAccountBilled, &bUserBilled)
+	baseline, err := db.readUsageStatsBaselineV2(ctx)
+	if err != nil {
+		return nil, err
+	}
+	stats.StatsVersion = usageStatsVersion
+	stats.AccurateSince = baseline.accurateSince
+	stats.LegacyBaselineAvailable, err = db.legacyUsageStatsBaselineAvailable(ctx)
+	if err != nil {
+		return nil, err
+	}
 
-	stats.TotalRequests = visibleTotal + bReq
-	stats.TotalTokens = currentTokens + bTok
-	stats.TotalPrompt = currentPrompt + bPrompt
-	stats.TotalCompletion = currentCompletion + bComp
-	stats.TotalCachedTokens = currentCached + bCached
-	stats.TotalAccountBilled = currentAccountBilled + bAccountBilled
-	stats.TotalUserBilled = currentUserBilled + bUserBilled
-	totalCacheRateRequests := visibleCacheRateRequests + bCacheRateRequests
+	stats.TotalRequests = visibleTotal + baseline.totalRequests
+	stats.TotalTokens = currentTokens + baseline.totalTokens
+	stats.TotalPrompt = currentPrompt + baseline.promptTokens
+	stats.TotalCompletion = currentCompletion + baseline.completionTokens
+	stats.TotalCachedTokens = currentCached + baseline.cachedTokens
+	stats.TotalAccountBilled = currentAccountBilled + baseline.accountBilled
+	stats.TotalUserBilled = currentUserBilled + baseline.userBilled
+	totalCacheRateRequests := visibleCacheRateRequests + baseline.cacheRateRequests
 	if totalCacheRateRequests > 0 {
-		stats.TotalCacheRate = float64(visibleCacheHitRequests+bCacheHitRequests) / float64(totalCacheRateRequests) * 100
+		stats.TotalCacheRate = float64(visibleCacheHitRequests+baseline.cacheHitRequests) / float64(totalCacheRateRequests) * 100
 	}
 	if stats.TotalRequests > 0 {
 		stats.AvgAccountBilled = stats.TotalAccountBilled / float64(stats.TotalRequests)

@@ -51,16 +51,31 @@ func readUsageBaseline(t *testing.T, db *DB) usageBaseline {
 		SELECT total_requests, total_tokens, prompt_tokens, completion_tokens,
 			cached_tokens, cache_hit_requests, cache_rate_requests,
 			first_token_ms_sum, first_token_samples, account_billed, user_billed
-		FROM usage_stats_baseline WHERE id = 1
+		FROM usage_stats_baseline_v2 WHERE id = 1
 	`).Scan(
 		&got.totalRequests, &got.totalTokens, &got.promptTokens, &got.completionTokens,
 		&got.cachedTokens, &got.cacheHitRequests, &got.cacheRateRequests,
 		&got.firstTokenMSSum, &got.firstTokenSamples, &got.accountBilled, &got.userBilled,
 	)
 	if err != nil {
-		t.Fatalf("读取 usage_stats_baseline 返回错误: %v", err)
+		t.Fatalf("读取 usage_stats_baseline_v2 返回错误: %v", err)
 	}
 	return got
+}
+
+func readUsageBaselineAccurateSince(t *testing.T, db *DB) time.Time {
+	t.Helper()
+	var raw interface{}
+	if err := db.conn.QueryRowContext(context.Background(), `
+		SELECT accurate_since FROM usage_stats_baseline_v2 WHERE id = 1
+	`).Scan(&raw); err != nil {
+		t.Fatalf("读取 usage_stats_baseline_v2 accurate_since 返回错误: %v", err)
+	}
+	accurateSince, err := parseDBTimeValue(raw)
+	if err != nil {
+		t.Fatalf("解析 usage_stats_baseline_v2 accurate_since 返回错误: %v", err)
+	}
+	return accurateSince
 }
 
 func tableCount(t *testing.T, db *DB, table string) int64 {
@@ -333,6 +348,78 @@ func TestClearUsageLogsResetsSQLiteIdentityWhenTableAlreadyEmpty(t *testing.T) {
 	}
 	if id != 1 {
 		t.Fatalf("空表清理后 ID = %d, want 1", id)
+	}
+}
+
+func TestClearUsageLogsResetsBaselineAndAdvancesAccurateSince(t *testing.T) {
+	db := newRetentionTestDB(t)
+	ctx := context.Background()
+	oldAccurateSince := time.Now().UTC().Add(-24 * time.Hour).Truncate(time.Second)
+	if _, err := db.conn.ExecContext(ctx, `
+		UPDATE usage_stats_baseline_v2 SET
+			total_requests = 3,
+			total_tokens = 9,
+			account_billed = 1.5,
+			user_billed = 2.5,
+			accurate_since = $1
+		WHERE id = 1
+	`, db.timeArg(oldAccurateSince)); err != nil {
+		t.Fatalf("准备 v2 baseline 返回错误: %v", err)
+	}
+	insertRetentionUsageLog(t, db, time.Now(), 200, 1, 2, 3, 0, 40, 0.5, 1)
+
+	if err := db.ClearUsageLogs(ctx); err != nil {
+		t.Fatalf("ClearUsageLogs 返回错误: %v", err)
+	}
+	if got := readUsageBaseline(t, db); got != (usageBaseline{}) {
+		t.Fatalf("清理后 v2 baseline = %#v, want zero", got)
+	}
+	if got := readUsageBaselineAccurateSince(t, db); !got.After(oldAccurateSince) {
+		t.Fatalf("清理后 accurate_since = %s, want after %s", got, oldAccurateSince)
+	}
+	if got := tableCount(t, db, "usage_logs"); got != 0 {
+		t.Fatalf("清理后 usage_logs count = %d, want 0", got)
+	}
+}
+
+func TestClearUsageLogsRollsBackDeleteWhenBaselineResetFails(t *testing.T) {
+	db := newRetentionTestDB(t)
+	ctx := context.Background()
+	oldAccurateSince := time.Now().UTC().Add(-24 * time.Hour).Truncate(time.Second)
+	wantBaseline := usageBaseline{totalRequests: 3, totalTokens: 9, accountBilled: 1.5, userBilled: 2.5}
+	if _, err := db.conn.ExecContext(ctx, `
+		UPDATE usage_stats_baseline_v2 SET
+			total_requests = $1,
+			total_tokens = $2,
+			account_billed = $3,
+			user_billed = $4,
+			accurate_since = $5
+		WHERE id = 1
+	`, wantBaseline.totalRequests, wantBaseline.totalTokens,
+		wantBaseline.accountBilled, wantBaseline.userBilled, db.timeArg(oldAccurateSince)); err != nil {
+		t.Fatalf("准备 v2 baseline 返回错误: %v", err)
+	}
+	insertRetentionUsageLog(t, db, time.Now(), 200, 1, 2, 3, 0, 40, 0.5, 1)
+	if _, err := db.conn.ExecContext(ctx, `
+		CREATE TRIGGER fail_usage_baseline_reset
+		BEFORE UPDATE ON usage_stats_baseline_v2
+		WHEN OLD.total_requests <> 0 AND NEW.total_requests = 0
+		BEGIN SELECT RAISE(ABORT, 'forced usage baseline reset failure'); END
+	`); err != nil {
+		t.Fatalf("创建 v2 baseline 重置失败触发器返回错误: %v", err)
+	}
+
+	if err := db.ClearUsageLogs(ctx); err == nil {
+		t.Fatal("ClearUsageLogs 应返回 baseline 重置失败")
+	}
+	if got := tableCount(t, db, "usage_logs"); got != 1 {
+		t.Fatalf("回滚后 usage_logs count = %d, want 1", got)
+	}
+	if got := readUsageBaseline(t, db); got != wantBaseline {
+		t.Fatalf("回滚后 v2 baseline = %#v, want %#v", got, wantBaseline)
+	}
+	if got := readUsageBaselineAccurateSince(t, db); !got.Equal(oldAccurateSince) {
+		t.Fatalf("回滚后 accurate_since = %s, want %s", got, oldAccurateSince)
 	}
 }
 

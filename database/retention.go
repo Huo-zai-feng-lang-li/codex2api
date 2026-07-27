@@ -128,7 +128,7 @@ func (db *DB) resetUsageLogIdentityTx(ctx context.Context, tx *sql.Tx) error {
 }
 
 func lockUsageBaseline(ctx context.Context, tx *sql.Tx) error {
-	result, err := tx.ExecContext(ctx, `UPDATE usage_stats_baseline SET id = id WHERE id = 1`)
+	result, err := tx.ExecContext(ctx, `UPDATE usage_stats_baseline_v2 SET id = id WHERE id = 1`)
 	if err != nil {
 		return fmt.Errorf("锁定使用统计基线失败: %w", err)
 	}
@@ -147,17 +147,17 @@ func (db *DB) aggregateUsageLogsTx(ctx context.Context, tx *sql.Tx, scope usageL
 		SELECT
 			COALESCE(MAX(id), 0),
 			COUNT(*),
-			COALESCE(SUM(CASE WHEN status_code <> 499 THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN status_code <> 499 THEN total_tokens ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN status_code <> 499 THEN prompt_tokens ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN status_code <> 499 THEN completion_tokens ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN status_code <> 499 THEN cached_tokens ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN status_code = 200 AND cached_tokens > 0 THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN status_code = 200 THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN status_code = 200 AND first_token_ms > 0 THEN first_token_ms ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN status_code = 200 AND first_token_ms > 0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status_code <> 499 AND COALESCE(is_retry_attempt, false) = false THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status_code <> 499 AND COALESCE(is_retry_attempt, false) = false THEN total_tokens ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status_code <> 499 AND COALESCE(is_retry_attempt, false) = false THEN prompt_tokens ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status_code <> 499 AND COALESCE(is_retry_attempt, false) = false THEN completion_tokens ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status_code <> 499 AND COALESCE(is_retry_attempt, false) = false THEN cached_tokens ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status_code = 200 AND cached_tokens > 0 AND COALESCE(is_retry_attempt, false) = false THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status_code = 200 AND COALESCE(is_retry_attempt, false) = false THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status_code = 200 AND first_token_ms > 0 AND COALESCE(is_retry_attempt, false) = false THEN first_token_ms ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status_code = 200 AND first_token_ms > 0 AND COALESCE(is_retry_attempt, false) = false THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN status_code <> 499 THEN account_billed ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN status_code <> 499 THEN user_billed ELSE 0 END), 0)
+			COALESCE(SUM(CASE WHEN status_code <> 499 AND COALESCE(is_retry_attempt, false) = false THEN user_billed ELSE 0 END), 0)
 		FROM usage_logs`
 	args := []interface{}{}
 	if scope.cutoff != nil {
@@ -181,7 +181,7 @@ func (db *DB) aggregateUsageLogsTx(ctx context.Context, tx *sql.Tx, scope usageL
 
 func applyUsageBaselineDelta(ctx context.Context, tx *sql.Tx, delta usageLogBaselineDelta) error {
 	result, err := tx.ExecContext(ctx, `
-		UPDATE usage_stats_baseline SET
+		UPDATE usage_stats_baseline_v2 SET
 			total_requests = total_requests + $1,
 			total_tokens = total_tokens + $2,
 			prompt_tokens = prompt_tokens + $3,
@@ -207,6 +207,57 @@ func applyUsageBaselineDelta(ctx context.Context, tx *sql.Tx, delta usageLogBase
 	}
 	if affected != 1 {
 		return fmt.Errorf("使用统计基线更新异常: affected=%d", affected)
+	}
+	return nil
+}
+
+func (db *DB) clearUsageLogs(ctx context.Context) error {
+	if err := db.flushLogsStrict(); err != nil {
+		return fmt.Errorf("刷新 usage_logs 失败: %w", err)
+	}
+	return db.withRetentionTx(ctx, func(tx *sql.Tx) error {
+		if err := db.lockUsageLogsTx(ctx, tx, usageLogPruneScope{}); err != nil {
+			return err
+		}
+		if err := lockUsageBaseline(ctx, tx); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM usage_logs`); err != nil {
+			return fmt.Errorf("删除 usage_logs 失败: %w", err)
+		}
+		if err := db.resetUsageStatsBaselineV2Tx(ctx, tx); err != nil {
+			return err
+		}
+		return db.resetUsageLogIdentityTx(ctx, tx)
+	})
+}
+
+func (db *DB) resetUsageStatsBaselineV2Tx(ctx context.Context, tx *sql.Tx) error {
+	result, err := tx.ExecContext(ctx, `
+		UPDATE usage_stats_baseline_v2 SET
+			total_requests = 0,
+			total_tokens = 0,
+			prompt_tokens = 0,
+			completion_tokens = 0,
+			cached_tokens = 0,
+			cache_hit_requests = 0,
+			cache_rate_requests = 0,
+			first_token_ms_sum = 0,
+			first_token_samples = 0,
+			account_billed = 0,
+			user_billed = 0,
+			accurate_since = $1
+		WHERE id = 1
+	`, db.timeArg(time.Now()))
+	if err != nil {
+		return fmt.Errorf("重置使用统计 v2 基线失败: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("检查使用统计 v2 基线重置失败: %w", err)
+	}
+	if affected != 1 {
+		return fmt.Errorf("使用统计 v2 基线重置异常: affected=%d", affected)
 	}
 	return nil
 }

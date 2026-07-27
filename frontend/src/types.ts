@@ -981,6 +981,8 @@ export interface UsageLogsPagedResponse {
 
 export interface OpsErrorSummary {
   total_errors: number
+  terminal_errors: number
+  retry_errors: number
   status_4xx: number
   status_5xx: number
   unauthorized: number

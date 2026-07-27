@@ -403,6 +403,9 @@ func TestUsageErrorSummaryAndFilters(t *testing.T) {
 	if summary.Status5xx != 1 || summary.Unauthorized != 1 || summary.Canceled != 1 || summary.Timeouts != 1 || summary.RetryAttempts != 1 {
 		t.Fatalf("summary = %+v, want one 5xx/401/499/timeout/retry", summary)
 	}
+	if summary.TerminalErrors != 1 || summary.RetryErrors != 1 {
+		t.Fatalf("summary terminal/retry errors = %d/%d, want 1/1", summary.TerminalErrors, summary.RetryErrors)
+	}
 
 	charts, err := db.GetChartAggregation(ctx, filter.Start, filter.End, 5)
 	if err != nil {
@@ -413,8 +416,8 @@ func TestUsageErrorSummaryAndFilters(t *testing.T) {
 		chart4xx += point.Errors4xx
 		chart5xx += point.Errors5xx
 	}
-	if chart4xx != 1 || chart5xx != 1 {
-		t.Fatalf("chart errors = 4xx:%d 5xx:%d, want 1/1", chart4xx, chart5xx)
+	if chart4xx != 1 || chart5xx != 0 {
+		t.Fatalf("chart errors = 4xx:%d 5xx:%d, want terminal-only 1/0", chart4xx, chart5xx)
 	}
 
 	filter.StatusFamily = "5xx"
@@ -1374,8 +1377,8 @@ func TestUsageStatsIncludeCodex2APIBreakdowns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetUsageStats 返回错误: %v", err)
 	}
-	if stats.TotalRequests != 3 {
-		t.Fatalf("TotalRequests = %d, want 3", stats.TotalRequests)
+	if stats.TotalRequests != 2 {
+		t.Fatalf("TotalRequests = %d, want terminal-only 2", stats.TotalRequests)
 	}
 	if stats.TodayCachedTokens != 128 {
 		t.Fatalf("TodayCachedTokens = %d, want 128", stats.TodayCachedTokens)
@@ -1390,17 +1393,17 @@ func TestUsageStatsIncludeCodex2APIBreakdowns(t *testing.T) {
 		t.Fatalf("AvgFirstTokenMs = %.2f, want 820", stats.AvgFirstTokenMs)
 	}
 	features := stats.FeatureStats
-	if features.StreamRequests != 1 || features.SyncRequests != 2 || features.FastRequests != 1 ||
+	if features.StreamRequests != 1 || features.SyncRequests != 1 || features.FastRequests != 1 ||
 		features.CacheHitRequests != 1 || features.ReasoningRequests != 1 || features.ImageRequests != 1 ||
-		features.RetryRequests != 1 || features.ErrorRequests != 1 {
-		t.Fatalf("FeatureStats = %+v, want stream/sync/fast/cache/reasoning/image/retry/error = 1/2/1/1/1/1/1/1", features)
+		features.RetryRequests != 1 || features.ErrorRequests != 0 {
+		t.Fatalf("FeatureStats = %+v, want stream/sync/fast/cache/reasoning/image/retry/error = 1/1/1/1/1/1/1/0", features)
 	}
 
 	endpoints := make(map[string]UsageEndpointStat)
 	for _, item := range stats.EndpointStats {
 		endpoints[item.Endpoint] = item
 	}
-	if endpoints["/v1/responses"].Requests != 1 || endpoints["/v1/images/generations"].Requests != 1 || endpoints["/v1/chat/completions"].ErrorCount != 1 {
+	if endpoints["/v1/responses"].Requests != 1 || endpoints["/v1/images/generations"].Requests != 1 || endpoints["/v1/chat/completions"].Requests != 0 {
 		t.Fatalf("EndpointStats = %+v", stats.EndpointStats)
 	}
 
@@ -1411,12 +1414,12 @@ func TestUsageStatsIncludeCodex2APIBreakdowns(t *testing.T) {
 	if apiKeys[7].Requests != 2 || apiKeys[7].Label != "Claude Code" {
 		t.Fatalf("APIKeyStats[7] = %+v, want Claude Code requests=2", apiKeys[7])
 	}
-	if apiKeys[8].Requests != 1 || apiKeys[8].ErrorCount != 1 {
-		t.Fatalf("APIKeyStats[8] = %+v, want requests=1 errors=1", apiKeys[8])
+	if apiKeys[8].Requests != 0 || apiKeys[8].ErrorCount != 0 {
+		t.Fatalf("APIKeyStats[8] = %+v, want retry-only row excluded", apiKeys[8])
 	}
 }
 
-func TestUsageStatsBaselinePreservesCacheRateWithoutLatencyLeakAfterClear(t *testing.T) {
+func TestUsageStatsBaselineV2ResetsAfterClear(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
 
 	db, err := New("sqlite", dbPath)
@@ -1469,11 +1472,11 @@ func TestUsageStatsBaselinePreservesCacheRateWithoutLatencyLeakAfterClear(t *tes
 	if err != nil {
 		t.Fatalf("GetUsageStats 返回错误: %v", err)
 	}
-	if stats.TotalRequests != 3 {
-		t.Fatalf("TotalRequests = %d, want 3", stats.TotalRequests)
+	if stats.TotalRequests != 0 {
+		t.Fatalf("TotalRequests = %d, want 0", stats.TotalRequests)
 	}
-	if stats.TotalCacheRate < 49.9 || stats.TotalCacheRate > 50.1 {
-		t.Fatalf("TotalCacheRate = %.4f, want about 50.00", stats.TotalCacheRate)
+	if stats.TotalCacheRate != 0 {
+		t.Fatalf("TotalCacheRate = %.4f, want 0", stats.TotalCacheRate)
 	}
 	if stats.AvgFirstTokenMs != 0 {
 		t.Fatalf("AvgFirstTokenMs = %.4f, want 0 after clearing visible latency samples", stats.AvgFirstTokenMs)
