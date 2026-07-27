@@ -40,7 +40,7 @@
 - [x] 阶段 4：运维摘要终态/重试字段与前端卡片完成 RED→GREEN。
 - [x] 阶段 5：规格审查、代码质量审查和全量验证。
 - [x] 阶段 6：候选构建、隔离验证与正式服务安全替换。
-- [ ] 阶段 7：复查、提交、合并主分支与最终热替换。
+- [x] 阶段 7：复查、提交、合并主分支与最终热替换。
 
 ### 已完成证据
 
@@ -59,3 +59,6 @@
 - 正式服务替换：旧 PID `17440` 优雅退出，新 PID `44512` 监听 `127.0.0.1:18080`；连续 3 次 `/health.status=ok` 且 `inflight_requests=0`。
 - 生产接口验证：v2 基线已初始化，legacy 基线保留；`terminal_errors`、`retry_errors`、`retry_attempts` 正常返回；内嵌前端入口与构建资产均为 HTTP 200。
 - 暂存区 patch-id 仍为 `ff722bcbcd3561e730d4a4a82584e744052a0421`；候选、回滚、验证和失败产物均已清理。
+- 最终复查：前端测试/typecheck/build、`go test ./... -count=1`、`go vet ./...`、`git diff --check` 全部通过；三路独立审查无功能阻塞项。
+- 功能分支 `zk/error-stats-upstream-fallback` 与原工作分支 `zk/dashboard-usage-range` 均已提交并合并 `main`；任务外脚本 URL 拼写在合并前修正。
+- 最终热替换：运行 PID `23316`，监听 `127.0.0.1:18080`，EXE SHA256 为 `102FB08B3843D6F3F5CC524FA5C12CAE150E7C4597C0EEF622D2CF89EE6FB4E4`，`/health.status=ok` 且 `inflight_requests=0`。
