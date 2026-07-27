@@ -1,7 +1,7 @@
 """
 ====== 批量添加账号提示词（直接复制本段发送给 AI 即可） ======
 
-添加账号-API Key-账号名称填写hhttps://api.daseinai.xyz-13递增，Base URL统一填写https://api.daseinai.xyz
+添加账号-API Key-账号名称填写https://api.daseinai.xyz-13递增，Base URL统一填写https://api.daseinai.xyz
 
 下面是key：1. 
 ==============================================================
