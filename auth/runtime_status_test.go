@@ -91,13 +91,29 @@ func TestRuntimeStatusKeepsPaymentRequiredAfterCooldownExpires(t *testing.T) {
 	if got := acc.RuntimeStatus(); got != "payment_required" {
 		t.Fatalf("RuntimeStatus() = %q, want payment_required until a successful connection test", got)
 	}
-	if !acc.IsAvailable() {
-		t.Fatal("IsAvailable() = false, want expired cooldown to remain dispatchable")
+	if acc.IsAvailable() {
+		t.Fatal("IsAvailable() = true, want expired sticky cooldown blocked until verification")
 	}
 
 	store.RecordManualTestSuccess(acc, time.Millisecond)
 	if got := acc.RuntimeStatus(); got != "active" {
 		t.Fatalf("RuntimeStatus() after successful connection test = %q, want active", got)
+	}
+	if !acc.IsAvailable() {
+		t.Fatal("IsAvailable() = false after successful connection test")
+	}
+}
+
+func TestExpiredNonStickyCooldownRemainsDispatchable(t *testing.T) {
+	acc := &Account{
+		AccessToken:    "at-test",
+		Status:         StatusCooldown,
+		CooldownReason: "server_error",
+		CooldownUtil:   time.Now().Add(-time.Minute),
+	}
+
+	if !acc.IsAvailable() {
+		t.Fatal("IsAvailable() = false, want expired transient cooldown dispatchable")
 	}
 }
 

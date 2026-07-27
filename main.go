@@ -200,6 +200,7 @@ func main() {
 	// 初始化 admin handler 的连接池设置跟踪
 	adminHandler.SetPoolSizes(settings.PgMaxConns, settings.RedisPoolSize)
 	store.SetUsageProbeFunc(adminHandler.ProbeUsageSnapshot)
+	store.SetRecoveryProbeFunc(adminHandler.ProbeResponsesCapability)
 
 	// 启动维护管理器（数据保留清理 + 容量采样）
 	dbPath := ""

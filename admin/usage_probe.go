@@ -47,6 +47,24 @@ func (h *Handler) ProbeUsageSnapshot(ctx context.Context, account *auth.Account)
 	return h.probeUsageViaResponses(ctx, account)
 }
 
+// ProbeResponsesCapability 通过最小 Responses 请求验证账号真实推理能力。
+// 恢复探针必须使用此入口；wham 200 仅代表用量接口可访问。
+func (h *Handler) ProbeResponsesCapability(ctx context.Context, account *auth.Account) error {
+	if account == nil {
+		return nil
+	}
+	if account.IsOpenAIResponsesAPI() {
+		return h.probeOpenAIResponsesAPI(ctx, account)
+	}
+	account.Mu().RLock()
+	hasToken := account.AccessToken != ""
+	account.Mu().RUnlock()
+	if !hasToken {
+		return fmt.Errorf("账号缺少 access_token")
+	}
+	return h.probeUsageViaResponses(ctx, account)
+}
+
 func (h *Handler) probeOpenAIResponsesAPI(ctx context.Context, account *auth.Account) error {
 	model, err := h.connectionTestModelForAccount(ctx, account, "")
 	if err != nil {
@@ -105,17 +123,17 @@ func (h *Handler) probeUsageViaWham(ctx context.Context, account *auth.Account) 
 		return resp, fmt.Errorf("wham returned empty body")
 	}
 
-	state := proxy.ApplyWhamUsage(h.store, account, usage)
+	proxy.ApplyWhamUsage(h.store, account, usage)
 	h.store.ReportRequestSuccess(account, 0)
-	// 用量未耗尽时重置冷却
-	if !state.Premium5hRateLimited && (!state.HasUsage7d || state.UsagePct7d < 100) {
-		h.store.ClearCooldown(account)
-	}
 	return resp, nil
 }
 
 func shouldFallbackUsageProbeAfterWhamFailure(resp *http.Response, err error) bool {
 	return err != nil && resp != nil
+}
+
+func shouldClearCooldownAfterProbe(responses, limited5h, hasUsage7d bool, usage7d float64) bool {
+	return responses && !limited5h && (!hasUsage7d || usage7d < 100)
 }
 
 // probeUsageViaResponses 原有探针：发送最小 /responses 请求，
@@ -136,7 +154,7 @@ func (h *Handler) probeUsageViaResponses(ctx context.Context, account *auth.Acco
 	case http.StatusOK:
 		h.store.ReportRequestSuccess(account, 0)
 		// 只有用量未耗尽时才重置状态
-		if !usageState.Premium5hRateLimited && (!usageState.HasUsage7d || usageState.UsagePct7d < 100) {
+		if shouldClearCooldownAfterProbe(true, usageState.Premium5hRateLimited, usageState.HasUsage7d, usageState.UsagePct7d) {
 			h.store.ClearCooldown(account)
 		}
 		return nil

@@ -509,6 +509,7 @@ type accountResponse struct {
 	CooldownReason           string                     `json:"cooldown_reason,omitempty"`
 	CooldownUntil            string                     `json:"cooldown_until,omitempty"`
 	ModelCooldowns           []modelCooldownResponse    `json:"model_cooldowns,omitempty"`
+	IsAvailable              bool                       `json:"is_available"`
 	Enabled                  bool                       `json:"enabled"`
 	Locked                   bool                       `json:"locked"`
 	AllowedAPIKeyIDs         []int64                    `json:"allowed_api_key_ids"`
@@ -686,6 +687,7 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 			}
 			// 使用运行时状态（优先于 DB 状态）
 			resp.Status = acc.RuntimeStatus()
+			resp.IsAvailable = acc.IsFullyAvailable()
 			acc.Mu().RLock()
 			resp.ErrorMessage = acc.ErrorMsg
 			acc.Mu().RUnlock()

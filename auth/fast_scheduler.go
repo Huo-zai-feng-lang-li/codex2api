@@ -484,10 +484,13 @@ func (a *Account) fastSchedulerSnapshot(baseLimit int64, now time.Time) (Account
 	}
 
 	available := a.Status != StatusError && tier != HealthTierBanned && a.hasDispatchCredentialLocked()
+	if atomic.LoadInt32(&a.Disabled) != 0 {
+		available = false
+	}
 	if atomic.LoadInt32(&a.DispatchPaused) != 0 {
 		available = false
 	}
-	if a.Status == StatusCooldown && now.Before(a.CooldownUtil) {
+	if cooldownBlocksDispatch(a.Status, a.CooldownReason, a.CooldownUtil, now) {
 		available = false
 	}
 	if a.premium5hRateLimitedLocked(now) {

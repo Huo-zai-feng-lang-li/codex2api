@@ -30,6 +30,7 @@ export interface AccountRow {
   plan_type: string
   subscription_expires_at?: string
   status: AccountStatus
+  is_available?: boolean
   error_message?: string
   at_only?: boolean
   account_type?: string

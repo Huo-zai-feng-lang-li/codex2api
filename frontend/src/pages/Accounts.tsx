@@ -28,6 +28,7 @@ import type {
 import { getErrorMessage } from "../utils/error";
 import { formatCompactEmail } from "../lib/utils";
 import { formatRelativeTime, formatBeijingTime } from "../utils/time";
+import { countNormalAccounts, isNormalAccount } from "./accountAvailability";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -980,7 +981,7 @@ export default function Accounts() {
         account.enabled !== false &&
         (isRateLimitedAccount(account) || isPaymentRequiredAccount(account)),
     ).length;
-    const normalAccounts = accounts.length - abnormalAccounts - rateLimitedExclusive;
+    const normalAccounts = countNormalAccounts(accounts);
     return {
       totalAccounts: accounts.length,
       normalAccounts,
@@ -1039,16 +1040,7 @@ export default function Accounts() {
     return accounts.filter((account) => {
       switch (statusFilter) {
         case "normal":
-          if (
-            account.status === "unauthorized" ||
-            account.status === "error" ||
-            account.enabled === false ||
-            isRateLimitedAccount(account) ||
-            isPaymentRequiredAccount(account)
-          )
-            return false;
-          if (account.status !== "active" && account.status !== "ready")
-            return false;
+          if (!isNormalAccount(account)) return false;
           break;
         case "rate_limited":
           if (
