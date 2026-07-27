@@ -2,9 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { useTranslation } from 'react-i18next'
 import {
   AlertCircle,
+  CircleX,
   Clock3,
   Copy,
   Download,
+  RefreshCcw,
   RefreshCw,
   RotateCcw,
   Search,
@@ -26,6 +28,10 @@ import { getTimeRangeISO, type TimeRangeKey } from '../lib/timeRange'
 import { formatAccountIdentity } from '../lib/utils'
 import { formatBeijingTime } from '../utils/time'
 import type { APIKeyRow, OpsErrorSummary, UsageLog } from '../types'
+import {
+  buildOpsErrorSummaryMetrics,
+  type OpsErrorSummaryMetricKey,
+} from './operationsErrorSummary'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -53,6 +59,12 @@ const pageSizeOptions = DEFAULT_PAGE_SIZE_OPTIONS
 const errorTableHeadClass = 'text-[12px] font-semibold'
 const errorTableTextClass = 'text-[14px]'
 const errorTableMonoClass = 'font-geist-mono text-[13px] tabular-nums'
+const summaryMetricIcons = {
+  terminal_errors: AlertCircle,
+  total_errors: CircleX,
+  retry_errors: RefreshCcw,
+  retry_attempts: RotateCcw,
+} satisfies Record<OpsErrorSummaryMetricKey, typeof AlertCircle>
 
 export default function OperationsErrors() {
   const { t } = useTranslation()
@@ -157,6 +169,7 @@ export default function OperationsErrors() {
   const hasActiveFilters = Boolean(statusFilter || errorKindFilter || endpointFilter || apiKeyFilter || streamFilter || searchQuery)
   const totalPages = Math.max(1, Math.ceil(data.total / pageSize))
   const currentPage = Math.min(page, totalPages)
+  const summaryMetrics = buildOpsErrorSummaryMetrics(data.summary)
   const apiKeyOptions = useMemo(() => [
     { label: t('opsErrors.allApiKeys'), value: '' },
     ...data.apiKeys.map((apiKey) => ({
@@ -253,12 +266,18 @@ export default function OperationsErrors() {
         <OpsTabs />
 
         <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-4 mb-6">
-          <SummaryPill
-            label={t('opsErrors.totalErrors')}
-            value={formatNumber(data.summary?.total_errors ?? 0)}
-            icon={<AlertCircle className="size-4" />}
-            tone="danger"
-          />
+          {summaryMetrics.map((metric) => {
+            const Icon = summaryMetricIcons[metric.key]
+            return (
+              <SummaryPill
+                key={metric.key}
+                label={t(metric.labelKey)}
+                value={formatNumber(metric.value)}
+                icon={<Icon className="size-4" />}
+                tone={metric.tone}
+              />
+            )
+          })}
           <SummaryPill
             label="5xx"
             value={formatNumber(data.summary?.status_5xx ?? 0)}
@@ -282,12 +301,6 @@ export default function OperationsErrors() {
             value={formatNumber(data.summary?.timeouts ?? 0)}
             icon={<Clock3 className="size-4" />}
             tone="warning"
-          />
-          <SummaryPill
-            label={t('opsErrors.retryAttempts')}
-            value={formatNumber(data.summary?.retry_attempts ?? 0)}
-            icon={<RotateCcw className="size-4" />}
-            tone="info"
           />
         </div>
 

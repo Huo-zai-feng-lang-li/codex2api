@@ -476,6 +476,9 @@ func New(driver string, dsn string, schema ...string) (*DB, error) {
 	if err := db.ensureUsageStatsBaselineBillingColumns(ctx); err != nil {
 		return nil, err
 	}
+	if err := db.ensureUsageStatsBaselineV2(ctx); err != nil {
+		return nil, err
+	}
 
 	return db, nil
 }
@@ -2333,15 +2336,12 @@ func (db *DB) applyAPIKeyQuotaUsage(ctx context.Context, tx *sql.Tx, batch []usa
 	}
 	usageByKey := make(map[int64]float64)
 	for _, entry := range batch {
-		if entry.APIKeyID <= 0 || entry.UserBilled <= 0 || entry.StatusCode == 499 {
+		if !shouldApplyAPIKeyQuotaUsage(entry) {
 			continue
 		}
 		usageByKey[entry.APIKeyID] += entry.UserBilled
 	}
 	for id, amount := range usageByKey {
-		if amount <= 0 {
-			continue
-		}
 		if _, err := tx.ExecContext(ctx, `UPDATE api_keys SET quota_used = COALESCE(quota_used, 0) + $1 WHERE id = $2`, amount, id); err != nil {
 			return err
 		}
@@ -2351,31 +2351,34 @@ func (db *DB) applyAPIKeyQuotaUsage(ctx context.Context, tx *sql.Tx, batch []usa
 
 // UsageStats 使用统计
 type UsageStats struct {
-	TotalRequests      int64               `json:"total_requests"`
-	TotalTokens        int64               `json:"total_tokens"`
-	TotalPrompt        int64               `json:"total_prompt_tokens"`
-	TotalCompletion    int64               `json:"total_completion_tokens"`
-	TotalCachedTokens  int64               `json:"total_cached_tokens"`
-	TotalCacheRate     float64             `json:"total_cache_rate"`
-	TotalAccountBilled float64             `json:"total_account_billed"`
-	TotalUserBilled    float64             `json:"total_user_billed"`
-	AvgAccountBilled   float64             `json:"avg_account_billed_per_request"`
-	AvgUserBilled      float64             `json:"avg_user_billed_per_request"`
-	TodayRequests      int64               `json:"today_requests"`
-	TodayTokens        int64               `json:"today_tokens"`
-	TodayCachedTokens  int64               `json:"today_cached_tokens"`
-	TodayCacheRate     float64             `json:"today_cache_rate"`
-	TodayAccountBilled float64             `json:"today_account_billed"`
-	TodayUserBilled    float64             `json:"today_user_billed"`
-	RPM                float64             `json:"rpm"`
-	TPM                float64             `json:"tpm"`
-	AvgFirstTokenMs    float64             `json:"avg_first_token_ms"`
-	AvgDurationMs      float64             `json:"avg_duration_ms"`
-	ErrorRate          float64             `json:"error_rate"`
-	FeatureStats       UsageFeatureStat    `json:"feature_stats"`
-	ModelStats         []UsageModelStat    `json:"model_stats"`
-	EndpointStats      []UsageEndpointStat `json:"endpoint_stats"`
-	APIKeyStats        []UsageAPIKeyStat   `json:"api_key_stats"`
+	StatsVersion            int                 `json:"stats_version"`
+	AccurateSince           time.Time           `json:"accurate_since"`
+	LegacyBaselineAvailable bool                `json:"legacy_baseline_available"`
+	TotalRequests           int64               `json:"total_requests"`
+	TotalTokens             int64               `json:"total_tokens"`
+	TotalPrompt             int64               `json:"total_prompt_tokens"`
+	TotalCompletion         int64               `json:"total_completion_tokens"`
+	TotalCachedTokens       int64               `json:"total_cached_tokens"`
+	TotalCacheRate          float64             `json:"total_cache_rate"`
+	TotalAccountBilled      float64             `json:"total_account_billed"`
+	TotalUserBilled         float64             `json:"total_user_billed"`
+	AvgAccountBilled        float64             `json:"avg_account_billed_per_request"`
+	AvgUserBilled           float64             `json:"avg_user_billed_per_request"`
+	TodayRequests           int64               `json:"today_requests"`
+	TodayTokens             int64               `json:"today_tokens"`
+	TodayCachedTokens       int64               `json:"today_cached_tokens"`
+	TodayCacheRate          float64             `json:"today_cache_rate"`
+	TodayAccountBilled      float64             `json:"today_account_billed"`
+	TodayUserBilled         float64             `json:"today_user_billed"`
+	RPM                     float64             `json:"rpm"`
+	TPM                     float64             `json:"tpm"`
+	AvgFirstTokenMs         float64             `json:"avg_first_token_ms"`
+	AvgDurationMs           float64             `json:"avg_duration_ms"`
+	ErrorRate               float64             `json:"error_rate"`
+	FeatureStats            UsageFeatureStat    `json:"feature_stats"`
+	ModelStats              []UsageModelStat    `json:"model_stats"`
+	EndpointStats           []UsageEndpointStat `json:"endpoint_stats"`
+	APIKeyStats             []UsageAPIKeyStat   `json:"api_key_stats"`
 }
 
 // UsageModelStat 按计费模型聚合的请求和金额统计。
@@ -2454,20 +2457,20 @@ func (db *DB) GetUsageStats(ctx context.Context, rangeStart, rangeEnd time.Time)
 
 	todayQuery := `
 	SELECT
-		COUNT(*) AS today_requests,
-		COALESCE(SUM(total_tokens), 0) AS today_tokens,
-		COALESCE(SUM(prompt_tokens), 0) AS today_prompt,
-		COALESCE(SUM(completion_tokens), 0) AS today_completion,
-		COALESCE(SUM(cached_tokens), 0) AS today_cached,
+		COALESCE(SUM(CASE WHEN COALESCE(is_retry_attempt, false) = false THEN 1 ELSE 0 END), 0) AS today_requests,
+		COALESCE(SUM(CASE WHEN COALESCE(is_retry_attempt, false) = false THEN total_tokens ELSE 0 END), 0) AS today_tokens,
+		COALESCE(SUM(CASE WHEN COALESCE(is_retry_attempt, false) = false THEN prompt_tokens ELSE 0 END), 0) AS today_prompt,
+		COALESCE(SUM(CASE WHEN COALESCE(is_retry_attempt, false) = false THEN completion_tokens ELSE 0 END), 0) AS today_completion,
+		COALESCE(SUM(CASE WHEN COALESCE(is_retry_attempt, false) = false THEN cached_tokens ELSE 0 END), 0) AS today_cached,
 		COALESCE(SUM(account_billed), 0) AS today_account_billed,
-		COALESCE(SUM(user_billed), 0) AS today_user_billed,
-		COALESCE(SUM(CASE WHEN created_at >= $2 THEN 1 ELSE 0 END), 0) AS rpm,
-		COALESCE(SUM(CASE WHEN created_at >= $2 THEN total_tokens ELSE 0 END), 0) AS tpm,
-		COALESCE(AVG(CASE WHEN status_code = 200 THEN NULLIF(first_token_ms, 0) ELSE NULL END), 0) AS avg_first_token_ms,
-		COALESCE(AVG(CASE WHEN status_code = 200 THEN NULLIF(duration_ms, 0) ELSE NULL END), 0) AS avg_duration_ms,
-		COALESCE(SUM(CASE WHEN status_code = 200 THEN 1 ELSE 0 END), 0) AS today_cache_rate_requests,
-		COALESCE(SUM(CASE WHEN status_code = 200 AND cached_tokens > 0 THEN 1 ELSE 0 END), 0) AS today_cache_hit_requests,
-		COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS today_errors
+		COALESCE(SUM(CASE WHEN COALESCE(is_retry_attempt, false) = false THEN user_billed ELSE 0 END), 0) AS today_user_billed,
+		COALESCE(SUM(CASE WHEN created_at >= $2 AND COALESCE(is_retry_attempt, false) = false THEN 1 ELSE 0 END), 0) AS rpm,
+		COALESCE(SUM(CASE WHEN created_at >= $2 AND COALESCE(is_retry_attempt, false) = false THEN total_tokens ELSE 0 END), 0) AS tpm,
+		COALESCE(AVG(CASE WHEN status_code = 200 AND COALESCE(is_retry_attempt, false) = false THEN NULLIF(first_token_ms, 0) ELSE NULL END), 0) AS avg_first_token_ms,
+		COALESCE(AVG(CASE WHEN status_code = 200 AND COALESCE(is_retry_attempt, false) = false THEN NULLIF(duration_ms, 0) ELSE NULL END), 0) AS avg_duration_ms,
+		COALESCE(SUM(CASE WHEN status_code = 200 AND COALESCE(is_retry_attempt, false) = false THEN 1 ELSE 0 END), 0) AS today_cache_rate_requests,
+		COALESCE(SUM(CASE WHEN status_code = 200 AND cached_tokens > 0 AND COALESCE(is_retry_attempt, false) = false THEN 1 ELSE 0 END), 0) AS today_cache_hit_requests,
+		COALESCE(SUM(CASE WHEN status_code >= 400 AND COALESCE(is_retry_attempt, false) = false THEN 1 ELSE 0 END), 0) AS today_errors
 	FROM usage_logs
 	WHERE created_at >= $1` + endClause + `
 	  AND status_code <> 499
@@ -2491,49 +2494,54 @@ func (db *DB) GetUsageStats(ctx context.Context, rangeStart, rangeEnd time.Time)
 		return nil, err
 	}
 
-	// 统计当前可见请求总数和计费总额（排除 499，保证与使用统计列表口径一致）
+	// 业务量只计终态；账号成本保留全部非 499 attempt。
 	var visibleTotal int64
 	var visibleCacheRateRequests int64
 	var visibleCacheHitRequests int64
 	var currentTokens, currentPrompt, currentCompletion, currentCached int64
 	var currentAccountBilled, currentUserBilled float64
-	_ = db.conn.QueryRowContext(ctx, `
+	if err := db.conn.QueryRowContext(ctx, `
 			SELECT
-				COUNT(*),
-				COALESCE(SUM(total_tokens), 0),
-				COALESCE(SUM(prompt_tokens), 0),
-				COALESCE(SUM(completion_tokens), 0),
-				COALESCE(SUM(cached_tokens), 0),
-				COALESCE(SUM(CASE WHEN status_code = 200 THEN 1 ELSE 0 END), 0),
-				COALESCE(SUM(CASE WHEN status_code = 200 AND cached_tokens > 0 THEN 1 ELSE 0 END), 0),
+				COALESCE(SUM(CASE WHEN COALESCE(is_retry_attempt, false) = false THEN 1 ELSE 0 END), 0),
+				COALESCE(SUM(CASE WHEN COALESCE(is_retry_attempt, false) = false THEN total_tokens ELSE 0 END), 0),
+				COALESCE(SUM(CASE WHEN COALESCE(is_retry_attempt, false) = false THEN prompt_tokens ELSE 0 END), 0),
+				COALESCE(SUM(CASE WHEN COALESCE(is_retry_attempt, false) = false THEN completion_tokens ELSE 0 END), 0),
+				COALESCE(SUM(CASE WHEN COALESCE(is_retry_attempt, false) = false THEN cached_tokens ELSE 0 END), 0),
+				COALESCE(SUM(CASE WHEN status_code = 200 AND COALESCE(is_retry_attempt, false) = false THEN 1 ELSE 0 END), 0),
+				COALESCE(SUM(CASE WHEN status_code = 200 AND cached_tokens > 0 AND COALESCE(is_retry_attempt, false) = false THEN 1 ELSE 0 END), 0),
 				COALESCE(SUM(account_billed), 0),
-				COALESCE(SUM(user_billed), 0)
+				COALESCE(SUM(CASE WHEN COALESCE(is_retry_attempt, false) = false THEN user_billed ELSE 0 END), 0)
 			FROM usage_logs
 			WHERE status_code <> 499
-		`).Scan(&visibleTotal, &currentTokens, &currentPrompt, &currentCompletion, &currentCached, &visibleCacheRateRequests, &visibleCacheHitRequests, &currentAccountBilled, &currentUserBilled)
+		`).Scan(&visibleTotal, &currentTokens, &currentPrompt, &currentCompletion, &currentCached, &visibleCacheRateRequests, &visibleCacheHitRequests, &currentAccountBilled, &currentUserBilled); err != nil {
+		return nil, err
+	}
 
-	// 加上基线值（清空日志前保存的累计值）
-	var bReq, bTok, bPrompt, bComp, bCached, bCacheHitRequests, bCacheRateRequests int64
-	var bAccountBilled, bUserBilled float64
-	_ = db.conn.QueryRowContext(ctx, `
-			SELECT total_requests, total_tokens, prompt_tokens, completion_tokens, cached_tokens, cache_hit_requests, cache_rate_requests, account_billed, user_billed
-			FROM usage_stats_baseline WHERE id = 1
-		`).Scan(&bReq, &bTok, &bPrompt, &bComp, &bCached, &bCacheHitRequests, &bCacheRateRequests, &bAccountBilled, &bUserBilled)
+	baseline, err := db.readUsageStatsBaselineV2(ctx)
+	if err != nil {
+		return nil, err
+	}
+	stats.StatsVersion = usageStatsVersion
+	stats.AccurateSince = baseline.accurateSince
+	stats.LegacyBaselineAvailable, err = db.legacyUsageStatsBaselineAvailable(ctx)
+	if err != nil {
+		return nil, err
+	}
 
-	stats.TotalRequests = visibleTotal + bReq
-	stats.TotalTokens = currentTokens + bTok
-	stats.TotalPrompt = currentPrompt + bPrompt
-	stats.TotalCompletion = currentCompletion + bComp
-	stats.TotalCachedTokens = currentCached + bCached
+	stats.TotalRequests = visibleTotal + baseline.totalRequests
+	stats.TotalTokens = currentTokens + baseline.totalTokens
+	stats.TotalPrompt = currentPrompt + baseline.promptTokens
+	stats.TotalCompletion = currentCompletion + baseline.completionTokens
+	stats.TotalCachedTokens = currentCached + baseline.cachedTokens
 	stats.TodayCachedTokens = todayCached
-	stats.TotalAccountBilled = currentAccountBilled + bAccountBilled
-	stats.TotalUserBilled = currentUserBilled + bUserBilled
+	stats.TotalAccountBilled = currentAccountBilled + baseline.accountBilled
+	stats.TotalUserBilled = currentUserBilled + baseline.userBilled
 	if todayCacheRateRequests > 0 {
 		stats.TodayCacheRate = float64(todayCacheHitRequests) / float64(todayCacheRateRequests) * 100
 	}
-	totalCacheRateRequests := visibleCacheRateRequests + bCacheRateRequests
+	totalCacheRateRequests := visibleCacheRateRequests + baseline.cacheRateRequests
 	if totalCacheRateRequests > 0 {
-		stats.TotalCacheRate = float64(visibleCacheHitRequests+bCacheHitRequests) / float64(totalCacheRateRequests) * 100
+		stats.TotalCacheRate = float64(visibleCacheHitRequests+baseline.cacheHitRequests) / float64(totalCacheRateRequests) * 100
 	}
 	if stats.TotalRequests > 0 {
 		stats.AvgAccountBilled = stats.TotalAccountBilled / float64(stats.TotalRequests)
@@ -2561,14 +2569,14 @@ func (db *DB) getUsageModelStats(ctx context.Context, limit int) ([]UsageModelSt
 	rows, err := db.conn.QueryContext(ctx, `
 		SELECT
 			COALESCE(NULLIF(effective_model, ''), NULLIF(model, ''), 'unknown') AS model_name,
-			COUNT(*) AS requests,
-			COALESCE(SUM(total_tokens), 0) AS tokens,
-			COALESCE(SUM(input_tokens), 0) AS input_tokens,
-			COALESCE(SUM(output_tokens), 0) AS output_tokens,
-			COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
+			COALESCE(SUM(CASE WHEN COALESCE(is_retry_attempt, false) = false THEN 1 ELSE 0 END), 0) AS requests,
+			COALESCE(SUM(CASE WHEN COALESCE(is_retry_attempt, false) = false THEN total_tokens ELSE 0 END), 0) AS tokens,
+			COALESCE(SUM(CASE WHEN COALESCE(is_retry_attempt, false) = false THEN input_tokens ELSE 0 END), 0) AS input_tokens,
+			COALESCE(SUM(CASE WHEN COALESCE(is_retry_attempt, false) = false THEN output_tokens ELSE 0 END), 0) AS output_tokens,
+			COALESCE(SUM(CASE WHEN COALESCE(is_retry_attempt, false) = false THEN cached_tokens ELSE 0 END), 0) AS cached_tokens,
 			COALESCE(SUM(account_billed), 0) AS account_billed,
-			COALESCE(SUM(user_billed), 0) AS user_billed,
-			COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_count
+			COALESCE(SUM(CASE WHEN COALESCE(is_retry_attempt, false) = false THEN user_billed ELSE 0 END), 0) AS user_billed,
+			COALESCE(SUM(CASE WHEN status_code >= 400 AND COALESCE(is_retry_attempt, false) = false THEN 1 ELSE 0 END), 0) AS error_count
 		FROM usage_logs
 		WHERE status_code <> 499
 		GROUP BY 1
@@ -2611,19 +2619,21 @@ func (db *DB) populateUsageBreakdownStats(ctx context.Context, stats *UsageStats
 	if stats == nil {
 		return nil
 	}
-	if err := db.conn.QueryRowContext(ctx, `
+	attempts := usageAttemptSQLPredicates("")
+	query := `
 		SELECT
-			COALESCE(SUM(CASE WHEN stream THEN 1 ELSE 0 END), 0) AS stream_requests,
-			COALESCE(SUM(CASE WHEN NOT stream THEN 1 ELSE 0 END), 0) AS sync_requests,
-			COALESCE(SUM(CASE WHEN LOWER(COALESCE(service_tier, '')) IN ('fast', 'priority') THEN 1 ELSE 0 END), 0) AS fast_requests,
-			COALESCE(SUM(CASE WHEN cached_tokens > 0 THEN 1 ELSE 0 END), 0) AS cache_hit_requests,
-			COALESCE(SUM(CASE WHEN reasoning_tokens > 0 OR NULLIF(reasoning_effort, '') IS NOT NULL THEN 1 ELSE 0 END), 0) AS reasoning_requests,
-			COALESCE(SUM(CASE WHEN LOWER(COALESCE(NULLIF(inbound_endpoint, ''), endpoint, '')) LIKE '%/images/%' OR LOWER(COALESCE(model, '')) LIKE 'gpt-image-%' OR image_count > 0 THEN 1 ELSE 0 END), 0) AS image_requests,
-			COALESCE(SUM(CASE WHEN is_retry_attempt OR attempt_index > 0 THEN 1 ELSE 0 END), 0) AS retry_requests,
-			COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_requests
+			COALESCE(SUM(CASE WHEN stream AND (` + attempts.Terminal + `) THEN 1 ELSE 0 END), 0) AS stream_requests,
+			COALESCE(SUM(CASE WHEN NOT stream AND (` + attempts.Terminal + `) THEN 1 ELSE 0 END), 0) AS sync_requests,
+			COALESCE(SUM(CASE WHEN LOWER(COALESCE(service_tier, '')) IN ('fast', 'priority') AND (` + attempts.Terminal + `) THEN 1 ELSE 0 END), 0) AS fast_requests,
+			COALESCE(SUM(CASE WHEN cached_tokens > 0 AND (` + attempts.Terminal + `) THEN 1 ELSE 0 END), 0) AS cache_hit_requests,
+			COALESCE(SUM(CASE WHEN (reasoning_tokens > 0 OR NULLIF(reasoning_effort, '') IS NOT NULL) AND (` + attempts.Terminal + `) THEN 1 ELSE 0 END), 0) AS reasoning_requests,
+			COALESCE(SUM(CASE WHEN (LOWER(COALESCE(NULLIF(inbound_endpoint, ''), endpoint, '')) LIKE '%/images/%' OR LOWER(COALESCE(model, '')) LIKE 'gpt-image-%' OR image_count > 0) AND (` + attempts.Terminal + `) THEN 1 ELSE 0 END), 0) AS image_requests,
+			COALESCE(SUM(CASE WHEN ` + attempts.Retry + ` THEN 1 ELSE 0 END), 0) AS retry_requests,
+			COALESCE(SUM(CASE WHEN status_code >= 400 AND (` + attempts.Terminal + `) THEN 1 ELSE 0 END), 0) AS error_requests
 		FROM usage_logs
 		WHERE status_code <> 499
-	`).Scan(
+	`
+	if err := db.conn.QueryRowContext(ctx, query).Scan(
 		&stats.FeatureStats.StreamRequests,
 		&stats.FeatureStats.SyncRequests,
 		&stats.FeatureStats.FastRequests,
@@ -2661,7 +2671,7 @@ func (db *DB) getUsageEndpointStats(ctx context.Context, limit int) ([]UsageEndp
 			COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_count,
 			COALESCE(SUM(user_billed), 0) AS user_billed
 		FROM usage_logs
-		WHERE status_code <> 499
+		WHERE status_code <> 499 AND COALESCE(is_retry_attempt, false) = false
 		GROUP BY 1
 		ORDER BY requests DESC, endpoint_name ASC
 		LIMIT $1
@@ -2701,7 +2711,7 @@ func (db *DB) getUsageAPIKeyStats(ctx context.Context, limit int) ([]UsageAPIKey
 			COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_count,
 			COALESCE(SUM(user_billed), 0) AS user_billed
 		FROM usage_logs
-		WHERE status_code <> 499
+		WHERE status_code <> 499 AND COALESCE(is_retry_attempt, false) = false
 		GROUP BY 1, 2
 		ORDER BY requests DESC, api_key_label ASC
 		LIMIT $1
@@ -2743,6 +2753,8 @@ func (db *DB) GetTrafficSnapshot(ctx context.Context) (*TrafficSnapshot, error) 
 			COALESCE(SUM(total_tokens), 0)::float8 AS token_count
 		FROM usage_logs
 		WHERE created_at >= NOW() - INTERVAL '5 minutes'
+		  AND status_code <> 499
+		  AND COALESCE(is_retry_attempt, false) = false
 		GROUP BY 1
 	),
 	current_window AS (
@@ -2908,6 +2920,7 @@ func (db *DB) GetChartAggregation(ctx context.Context, start, end time.Time, buc
 	FROM usage_logs
 	WHERE created_at >= $1 AND created_at <= $2
 	  AND status_code <> 499
+	  AND COALESCE(is_retry_attempt, false) = false
 	GROUP BY 1
 	ORDER BY 1`
 
@@ -2956,6 +2969,7 @@ func (db *DB) GetChartAggregation(ctx context.Context, start, end time.Time, buc
 	FROM usage_logs
 	WHERE created_at >= $1 AND created_at <= $2
 	  AND status_code <> 499
+	  AND COALESCE(is_retry_attempt, false) = false
 	GROUP BY 1
 	ORDER BY 2 DESC
 	LIMIT 10`
@@ -2994,7 +3008,9 @@ func (db *DB) GetAccountUsageStats(ctx context.Context, accountID int64) (*Accou
 		COALESCE(SUM(reasoning_tokens), 0),
 		COALESCE(SUM(cached_tokens), 0)
 	FROM usage_logs
-	WHERE account_id = $1 AND status_code <> 499`
+	WHERE account_id = $1
+	  AND status_code <> 499
+	  AND COALESCE(is_retry_attempt, false) = false`
 
 	if err := db.conn.QueryRowContext(ctx, summaryQuery, accountID).Scan(
 		&result.TotalRequests, &result.TotalTokens,
@@ -3008,7 +3024,9 @@ func (db *DB) GetAccountUsageStats(ctx context.Context, accountID int64) (*Accou
 	modelQuery := `
 	SELECT COALESCE(model, 'unknown'), COUNT(*) AS requests, COALESCE(SUM(total_tokens), 0) AS tokens
 	FROM usage_logs
-	WHERE account_id = $1 AND status_code <> 499
+	WHERE account_id = $1
+	  AND status_code <> 499
+	  AND COALESCE(is_retry_attempt, false) = false
 	GROUP BY 1
 	ORDER BY 2 DESC`
 
@@ -3189,21 +3207,24 @@ func (db *DB) buildUsageLogWhere(f UsageLogFilter) (string, []interface{}) {
 }
 
 type UsageErrorSummary struct {
-	TotalErrors   int64   `json:"total_errors"`
-	Status4xx     int64   `json:"status_4xx"`
-	Status5xx     int64   `json:"status_5xx"`
-	Unauthorized  int64   `json:"unauthorized"`
-	RateLimited   int64   `json:"rate_limited"`
-	Canceled      int64   `json:"canceled"`
-	Timeouts      int64   `json:"timeouts"`
-	RetryAttempts int64   `json:"retry_attempts"`
-	AvgDurationMs float64 `json:"avg_duration_ms"`
+	TotalErrors    int64   `json:"total_errors"`
+	Status4xx      int64   `json:"status_4xx"`
+	Status5xx      int64   `json:"status_5xx"`
+	Unauthorized   int64   `json:"unauthorized"`
+	RateLimited    int64   `json:"rate_limited"`
+	Canceled       int64   `json:"canceled"`
+	Timeouts       int64   `json:"timeouts"`
+	RetryAttempts  int64   `json:"retry_attempts"`
+	TerminalErrors int64   `json:"terminal_errors"`
+	RetryErrors    int64   `json:"retry_errors"`
+	AvgDurationMs  float64 `json:"avg_duration_ms"`
 }
 
 func (db *DB) GetUsageErrorSummary(ctx context.Context, f UsageLogFilter) (*UsageErrorSummary, error) {
 	f.ErrorOnly = true
 	f.IncludeCanceled = true
 	where, args := db.buildUsageLogWhere(f)
+	attempts := usageAttemptSQLPredicates("u")
 	query := `SELECT
 		COUNT(*),
 		COALESCE(SUM(CASE WHEN u.status_code >= 400 AND u.status_code < 500 THEN 1 ELSE 0 END), 0),
@@ -3217,6 +3238,8 @@ func (db *DB) GetUsageErrorSummary(ctx context.Context, f UsageLogFilter) (*Usag
 			OR LOWER(COALESCE(u.error_message, '')) LIKE '%deadline%'
 		THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN COALESCE(u.is_retry_attempt, false) THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN ` + attempts.Terminal + ` THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN ` + attempts.Retry + ` THEN 1 ELSE 0 END), 0),
 		COALESCE(AVG(u.duration_ms), 0)
 		FROM usage_logs u
 		LEFT JOIN accounts a ON u.account_id = a.id
@@ -3232,6 +3255,8 @@ func (db *DB) GetUsageErrorSummary(ctx context.Context, f UsageLogFilter) (*Usag
 		&result.Canceled,
 		&result.Timeouts,
 		&result.RetryAttempts,
+		&result.TerminalErrors,
+		&result.RetryErrors,
 		&result.AvgDurationMs,
 	); err != nil {
 		return nil, err
@@ -3350,10 +3375,9 @@ func (db *DB) ListUsageLogsByFilter(ctx context.Context, f UsageLogFilter) ([]*U
 	return logs, rows.Err()
 }
 
-// ClearUsageLogs 清空所有使用日志（原子快照累计值到基线表）
+// ClearUsageLogs 清空所有使用日志并重置 v2 统计基线。
 func (db *DB) ClearUsageLogs(ctx context.Context) error {
-	_, err := db.pruneUsageLogs(ctx, usageLogPruneScope{})
-	return err
+	return db.clearUsageLogs(ctx)
 }
 
 // Ping 检查 PostgreSQL 连通性
@@ -3400,7 +3424,7 @@ func (db *DB) GetAccountRequestCounts(ctx context.Context) (map[int64]*AccountRe
 		COALESCE(SUM(CASE WHEN status_code >= 400 AND %s THEN 1 ELSE 0 END), 0) AS retry_error_count,
 		COALESCE(SUM(CASE WHEN status_code = 429 THEN 1 ELSE 0 END), 0) AS rate_limit_attempt_count
 	FROM usage_logs
-	WHERE created_at >= $1
+	WHERE created_at >= $1 AND status_code <> 499
 	GROUP BY account_id
 	`, retryFalse, retryFalse, retryTrue)
 	rows, err := db.conn.QueryContext(ctx, query, db.timeArg(since))
@@ -3424,10 +3448,10 @@ func (db *DB) GetAccountRequestCounts(ctx context.Context) (map[int64]*AccountRe
 func (db *DB) GetAccountTimeRangeUsage(ctx context.Context, since time.Time) (map[int64]*AccountTimeRangeUsage, error) {
 	query := `
 	SELECT account_id,
-		COUNT(*) AS requests,
-		COALESCE(SUM(total_tokens), 0) AS tokens,
+		COALESCE(SUM(CASE WHEN COALESCE(is_retry_attempt, false) = false THEN 1 ELSE 0 END), 0) AS requests,
+		COALESCE(SUM(CASE WHEN COALESCE(is_retry_attempt, false) = false THEN total_tokens ELSE 0 END), 0) AS tokens,
 		COALESCE(SUM(account_billed), 0) AS account_billed,
-		COALESCE(SUM(user_billed), 0) AS user_billed
+		COALESCE(SUM(CASE WHEN COALESCE(is_retry_attempt, false) = false THEN user_billed ELSE 0 END), 0) AS user_billed
 	FROM usage_logs
 	WHERE created_at >= $1 AND status_code <> 499
 	GROUP BY account_id
