@@ -57,6 +57,24 @@ func TestFastSchedulerSkipsDispatchPausedAccount(t *testing.T) {
 	}
 }
 
+func TestFastSchedulerSkipsDisabledAccount(t *testing.T) {
+	disabled := newFastSchedulerTestAccount(1, HealthTierHealthy, 120, 2)
+	atomic.StoreInt32(&disabled.Disabled, 1)
+	fallback := newFastSchedulerTestAccount(2, HealthTierHealthy, 80, 2)
+
+	scheduler := NewFastScheduler(2, "round_robin")
+	scheduler.Rebuild([]*Account{disabled, fallback})
+
+	got := scheduler.Acquire()
+	if got == nil {
+		t.Fatal("Acquire() returned nil")
+	}
+	defer scheduler.Release(got)
+	if got.DBID != fallback.DBID {
+		t.Fatalf("Acquire() picked disabled dbID=%d, want fallback %d", got.DBID, fallback.DBID)
+	}
+}
+
 func TestFastSchedulerSkipsErrorAccount(t *testing.T) {
 	errored := newFastSchedulerTestAccount(1, HealthTierHealthy, 120, 2)
 	errored.Status = StatusError
@@ -225,6 +243,10 @@ func TestDispatchPausedDoesNotBlockRecoveryProbe(t *testing.T) {
 	}
 	var probed int32
 	store.SetUsageProbeFunc(func(_ context.Context, account *Account) error {
+		t.Fatal("recovery probe used the usage-only callback")
+		return nil
+	})
+	store.SetRecoveryProbeFunc(func(_ context.Context, account *Account) error {
 		if account.DBID != paused.DBID {
 			t.Fatalf("recovery probe account dbID=%d, want %d", account.DBID, paused.DBID)
 		}
@@ -794,32 +816,32 @@ func TestFastSchedulerRelease(t *testing.T) {
 
 func TestFastSchedulerRemainingQuotaPicksLowestUsage(t *testing.T) {
 	highUsage := &Account{
-		DBID:                1,
-		AccessToken:         "token",
-		Status:              StatusReady,
-		HealthTier:          HealthTierHealthy,
-		UsagePercent7d:      90,
-		UsagePercent7dValid: true,
+		DBID:                     1,
+		AccessToken:              "token",
+		Status:                   StatusReady,
+		HealthTier:               HealthTierHealthy,
+		UsagePercent7d:           90,
+		UsagePercent7dValid:      true,
 		BaseConcurrencyEffective: 4,
 		DynamicConcurrencyLimit:  4,
 	}
 	lowUsage := &Account{
-		DBID:                2,
-		AccessToken:         "token",
-		Status:              StatusReady,
-		HealthTier:          HealthTierHealthy,
-		UsagePercent7d:      10,
-		UsagePercent7dValid: true,
+		DBID:                     2,
+		AccessToken:              "token",
+		Status:                   StatusReady,
+		HealthTier:               HealthTierHealthy,
+		UsagePercent7d:           10,
+		UsagePercent7dValid:      true,
 		BaseConcurrencyEffective: 4,
 		DynamicConcurrencyLimit:  4,
 	}
 	midUsage := &Account{
-		DBID:                3,
-		AccessToken:         "token",
-		Status:              StatusReady,
-		HealthTier:          HealthTierHealthy,
-		UsagePercent7d:      50,
-		UsagePercent7dValid: true,
+		DBID:                     3,
+		AccessToken:              "token",
+		Status:                   StatusReady,
+		HealthTier:               HealthTierHealthy,
+		UsagePercent7d:           50,
+		UsagePercent7dValid:      true,
 		BaseConcurrencyEffective: 4,
 		DynamicConcurrencyLimit:  4,
 	}
@@ -840,32 +862,32 @@ func TestFastSchedulerRemainingQuotaPicksLowestUsage(t *testing.T) {
 
 func TestFastSchedulerRemainingQuotaSortOrder(t *testing.T) {
 	a1 := &Account{
-		DBID:                1,
-		AccessToken:         "token",
-		Status:              StatusReady,
-		HealthTier:          HealthTierHealthy,
-		UsagePercent7d:      70,
-		UsagePercent7dValid: true,
+		DBID:                     1,
+		AccessToken:              "token",
+		Status:                   StatusReady,
+		HealthTier:               HealthTierHealthy,
+		UsagePercent7d:           70,
+		UsagePercent7dValid:      true,
 		BaseConcurrencyEffective: 1,
 		DynamicConcurrencyLimit:  1,
 	}
 	a2 := &Account{
-		DBID:                2,
-		AccessToken:         "token",
-		Status:              StatusReady,
-		HealthTier:          HealthTierHealthy,
-		UsagePercent7d:      30,
-		UsagePercent7dValid: true,
+		DBID:                     2,
+		AccessToken:              "token",
+		Status:                   StatusReady,
+		HealthTier:               HealthTierHealthy,
+		UsagePercent7d:           30,
+		UsagePercent7dValid:      true,
 		BaseConcurrencyEffective: 1,
 		DynamicConcurrencyLimit:  1,
 	}
 	a3 := &Account{
-		DBID:                3,
-		AccessToken:         "token",
-		Status:              StatusReady,
-		HealthTier:          HealthTierHealthy,
-		UsagePercent7d:      90,
-		UsagePercent7dValid: true,
+		DBID:                     3,
+		AccessToken:              "token",
+		Status:                   StatusReady,
+		HealthTier:               HealthTierHealthy,
+		UsagePercent7d:           90,
+		UsagePercent7dValid:      true,
 		BaseConcurrencyEffective: 1,
 		DynamicConcurrencyLimit:  1,
 	}
@@ -895,24 +917,24 @@ func TestFastSchedulerRemainingQuotaSortOrder(t *testing.T) {
 
 func TestFastSchedulerRemainingQuotaTieBreakProvenThenDBID(t *testing.T) {
 	unproven := &Account{
-		DBID:                1,
-		AccessToken:         "token",
-		Status:              StatusReady,
-		HealthTier:          HealthTierHealthy,
-		UsagePercent7d:      50,
-		UsagePercent7dValid: true,
+		DBID:                     1,
+		AccessToken:              "token",
+		Status:                   StatusReady,
+		HealthTier:               HealthTierHealthy,
+		UsagePercent7d:           50,
+		UsagePercent7dValid:      true,
 		BaseConcurrencyEffective: 2,
 		DynamicConcurrencyLimit:  2,
 	}
 	unproven.TotalRequests = 0 // not proven
 
 	proven := &Account{
-		DBID:                2,
-		AccessToken:         "token",
-		Status:              StatusReady,
-		HealthTier:          HealthTierHealthy,
-		UsagePercent7d:      50,
-		UsagePercent7dValid: true,
+		DBID:                     2,
+		AccessToken:              "token",
+		Status:                   StatusReady,
+		HealthTier:               HealthTierHealthy,
+		UsagePercent7d:           50,
+		UsagePercent7dValid:      true,
 		BaseConcurrencyEffective: 2,
 		DynamicConcurrencyLimit:  2,
 	}

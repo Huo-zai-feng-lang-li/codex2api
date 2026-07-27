@@ -38,34 +38,28 @@ func TestPremium5hRateLimitedAccountIsFencedFromScheduling(t *testing.T) {
 	}
 }
 
-func TestPremium5hRateLimitExpiryResumesSchedulingButKeepsClassification(t *testing.T) {
+func TestPremium5hRateLimitExpiryWaitsForVerification(t *testing.T) {
 	acc := newPremium5hTestAccount("team", time.Now().Add(-time.Minute))
 	acc.Status = StatusCooldown
 	acc.CooldownReason = "rate_limited"
 	acc.CooldownUtil = time.Now().Add(-time.Minute)
 
-	snapshot := acc.GetSchedulerDebugSnapshot(4)
+	_ = acc.GetSchedulerDebugSnapshot(4)
 	if got := acc.RuntimeStatus(); got != "rate_limited" {
 		t.Fatalf("RuntimeStatus() = %q, want rate_limited until a successful connection test", got)
 	}
-	if !acc.IsAvailable() {
-		t.Fatal("IsAvailable() = false, want true after reset expires")
+	if acc.IsAvailable() {
+		t.Fatal("IsAvailable() = true, want false until recovery verification succeeds")
 	}
 	store := &Store{accounts: []*Account{acc}, maxConcurrency: 4}
 	store.SetFastSchedulerEnabled(true)
 	selected := store.Next()
-	if selected == nil {
-		t.Fatal("Next() returned nil, want expired cooldown account to re-enter scheduling")
+	if selected != nil {
+		store.Release(selected)
+		t.Fatal("Next() selected expired sticky cooldown account before verification")
 	}
-	store.Release(selected)
-	if snapshot.HealthTier != string(HealthTierHealthy) {
-		t.Fatalf("HealthTier = %q, want %q", snapshot.HealthTier, HealthTierHealthy)
-	}
-	if snapshot.DynamicConcurrencyLimit != 4 {
-		t.Fatalf("DynamicConcurrencyLimit = %d, want 4", snapshot.DynamicConcurrencyLimit)
-	}
-	if !acc.NeedsUsageProbe(10 * time.Minute) {
-		t.Fatal("NeedsUsageProbe() = false, want true after reset expires and snapshot becomes stale")
+	if !acc.NeedsRecoveryProbe(10 * time.Minute) {
+		t.Fatal("NeedsRecoveryProbe() = false, want true after reset expires")
 	}
 }
 

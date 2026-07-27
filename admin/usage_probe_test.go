@@ -55,6 +55,60 @@ func TestShouldFallbackUsageProbeAfterWhamFailure(t *testing.T) {
 	}
 }
 
+func TestOnlyResponsesCapabilityProbeMayClearCooldown(t *testing.T) {
+	tests := []struct {
+		name       string
+		responses  bool
+		limited5h  bool
+		hasUsage7d bool
+		usage7d    float64
+		want       bool
+	}{
+		{name: "wham 200 is usage only", want: false},
+		{name: "responses success", responses: true, want: true},
+		{name: "responses still 5h limited", responses: true, limited5h: true, want: false},
+		{name: "responses still 7d exhausted", responses: true, hasUsage7d: true, usage7d: 100, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := shouldClearCooldownAfterProbe(test.responses, test.limited5h, test.hasUsage7d, test.usage7d); got != test.want {
+				t.Fatalf("shouldClearCooldownAfterProbe() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestProbeResponsesCapabilityUsesResponsesForRecovery(t *testing.T) {
+	var responsesCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			t.Fatalf("path = %q, want /v1/responses", r.URL.Path)
+		}
+		responsesCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_test","status":"completed","output":[]}`))
+	}))
+	defer server.Close()
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{TestModel: "gpt-5.4-mini", MaxConcurrency: 1})
+	handler := &Handler{store: store}
+	account := &auth.Account{
+		DBID:         3,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      server.URL,
+		APIKey:       "sk-test",
+		Models:       []string{"gpt-5.4-mini"},
+		Status:       auth.StatusError,
+	}
+
+	if err := handler.ProbeResponsesCapability(context.Background(), account); err != nil {
+		t.Fatalf("ProbeResponsesCapability() error = %v", err)
+	}
+	if responsesCalls != 1 {
+		t.Fatalf("responses calls = %d, want 1", responsesCalls)
+	}
+}
+
 func TestProbeUsageSnapshotUsesOpenAIResponsesAPIRequest(t *testing.T) {
 	var called bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
