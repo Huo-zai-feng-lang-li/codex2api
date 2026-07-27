@@ -7,8 +7,8 @@
 - 运维错误汇总新增 `terminal_errors`、`retry_errors`，旧 `total_errors` 保持 attempt 级语义；前端已区分“错误请求”和“错误尝试”。
 
 ## 生产验证
-- 正式服务：PID `23316`，监听 `127.0.0.1:18080`。
-- 运行 EXE SHA256：`102FB08B3843D6F3F5CC524FA5C12CAE150E7C4597C0EEF622D2CF89EE6FB4E4`，与最终候选一致。
+- 正式服务监听 `127.0.0.1:18080`；最终 PID 与运行 EXE SHA256 以本轮交付时的实时校验为准。
+- 两个功能分支及本 handoff 提交完成后重新构建候选并执行热替换，运行文件与最终 `main` 源码一致。
 - `/health` 连续 3 次 `status=ok`、`responses_memory.inflight_requests=0`。
 - `/api/admin/usage/stats` 返回 `stats_version=2`；运维错误汇总四个兼容字段齐全；前端入口和构建资产均为 HTTP 200。
 - `npm --prefix frontend run typecheck/build`、`go test ./... -count=1`、`go vet ./...`、`git diff --check` 全部通过。
