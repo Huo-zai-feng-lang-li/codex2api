@@ -2,11 +2,12 @@ package database
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
 // APIKeyWindowUsage 表示一个 API Key 在某时间窗口内的累计使用量。
-// 仅排除 499 客户端取消请求,保持与 GetUsageStats 一致的语义。
+// 仅累计非 499、非 retry 的业务终态,保持与 GetUsageStats 一致的语义。
 type APIKeyWindowUsage struct {
 	Requests   int64   `json:"requests"`
 	Tokens     int64   `json:"tokens"`
@@ -22,7 +23,7 @@ func (db *DB) GetAPIKeyWindowUsage(ctx context.Context, apiKeyID int64, window t
 	}
 	since := time.Now().Add(-window)
 	usage := &APIKeyWindowUsage{}
-	query := `
+	query := fmt.Sprintf(`
 		SELECT
 			COUNT(*),
 			COALESCE(SUM(total_tokens), 0),
@@ -30,8 +31,8 @@ func (db *DB) GetAPIKeyWindowUsage(ctx context.Context, apiKeyID int64, window t
 		FROM usage_logs
 		WHERE api_key_id = $1
 		  AND created_at >= $2
-		  AND status_code <> 499
-	`
+		  AND %s
+	`, usageAttemptSQLPredicates("").Terminal)
 	err := db.conn.QueryRowContext(ctx, query, apiKeyID, db.timeArg(since)).Scan(
 		&usage.Requests, &usage.Tokens, &usage.UserBilled,
 	)
@@ -66,7 +67,7 @@ func (db *DB) ListAPIKeyTokenStats(ctx context.Context, rangeStart, rangeEnd tim
 		rangeStart = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	}
 
-	query := `
+	query := fmt.Sprintf(`
 		SELECT
 			COALESCE(api_key_id, 0) AS api_key_id,
 			COALESCE(api_key_name, '') AS api_key_name,
@@ -79,9 +80,9 @@ func (db *DB) ListAPIKeyTokenStats(ctx context.Context, rangeStart, rangeEnd tim
 			COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_count,
 			COALESCE(SUM(user_billed), 0) AS user_billed
 		FROM usage_logs
-		WHERE status_code <> 499
+		WHERE %s
 		  AND created_at >= $1
-	`
+	`, usageAttemptSQLPredicates("").Terminal)
 	args := []interface{}{db.timeArg(rangeStart)}
 	if !rangeEnd.IsZero() {
 		query += " AND created_at < $2"
