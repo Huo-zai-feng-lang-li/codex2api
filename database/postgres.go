@@ -949,6 +949,7 @@ func (db *DB) migrate(ctx context.Context) error {
 			CREATE TABLE IF NOT EXISTS responses_continuity (
 				response_id VARCHAR(255) PRIMARY KEY,
 				parent_id VARCHAR(255) DEFAULT '',
+				session_id VARCHAR(255) DEFAULT '',
 				account_id BIGINT DEFAULT 0,
 				base_url TEXT DEFAULT '',
 				input_json BYTEA NOT NULL DEFAULT '\\x',
@@ -958,8 +959,10 @@ func (db *DB) migrate(ctx context.Context) error {
 				accessed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 				size_bytes INT NOT NULL DEFAULT 0
 			);
+			ALTER TABLE responses_continuity ADD COLUMN IF NOT EXISTS session_id VARCHAR(255) DEFAULT '';
 			CREATE INDEX IF NOT EXISTS idx_responses_continuity_accessed_at ON responses_continuity(accessed_at);
 			CREATE INDEX IF NOT EXISTS idx_responses_continuity_parent_id ON responses_continuity(parent_id);
+			CREATE INDEX IF NOT EXISTS idx_responses_continuity_session_id ON responses_continuity(session_id);
 			CREATE INDEX IF NOT EXISTS idx_security_captures_expires_at ON security_captures(expires_at);
 
 			CREATE TABLE IF NOT EXISTS model_registry (

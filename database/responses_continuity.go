@@ -14,6 +14,7 @@ const responsesContinuityMaxTouchBatch = 200
 type ResponsesContinuationRow struct {
 	ResponseID string
 	ParentID   string
+	SessionID  string
 	AccountID  int64
 	BaseURL    string
 	InputJSON  []byte
@@ -30,30 +31,30 @@ func (db *DB) UpsertResponsesContinuation(ctx context.Context, row *ResponsesCon
 	}
 	query := `
 		INSERT INTO responses_continuity (
-			response_id, parent_id, account_id, base_url, input_json, output_json,
+			response_id, parent_id, session_id, account_id, base_url, input_json, output_json,
 			replayable, created_at, accessed_at, size_bytes
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		ON CONFLICT(response_id) DO UPDATE SET
-			parent_id = EXCLUDED.parent_id, account_id = EXCLUDED.account_id,
-			base_url = EXCLUDED.base_url, input_json = EXCLUDED.input_json,
-			output_json = EXCLUDED.output_json, replayable = EXCLUDED.replayable,
-			created_at = EXCLUDED.created_at, accessed_at = EXCLUDED.accessed_at,
-			size_bytes = EXCLUDED.size_bytes`
+			parent_id = EXCLUDED.parent_id, session_id = EXCLUDED.session_id,
+			account_id = EXCLUDED.account_id, base_url = EXCLUDED.base_url,
+			input_json = EXCLUDED.input_json, output_json = EXCLUDED.output_json,
+			replayable = EXCLUDED.replayable, created_at = EXCLUDED.created_at,
+			accessed_at = EXCLUDED.accessed_at, size_bytes = EXCLUDED.size_bytes`
 	if db.isSQLite() {
 		query = `
 			INSERT INTO responses_continuity (
-				response_id, parent_id, account_id, base_url, input_json, output_json,
+				response_id, parent_id, session_id, account_id, base_url, input_json, output_json,
 				replayable, created_at, accessed_at, size_bytes
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(response_id) DO UPDATE SET
-				parent_id = excluded.parent_id, account_id = excluded.account_id,
-				base_url = excluded.base_url, input_json = excluded.input_json,
-				output_json = excluded.output_json, replayable = excluded.replayable,
-				created_at = excluded.created_at, accessed_at = excluded.accessed_at,
-				size_bytes = excluded.size_bytes`
+				parent_id = excluded.parent_id, session_id = excluded.session_id,
+				account_id = excluded.account_id, base_url = excluded.base_url,
+				input_json = excluded.input_json, output_json = excluded.output_json,
+				replayable = excluded.replayable, created_at = excluded.created_at,
+				accessed_at = excluded.accessed_at, size_bytes = excluded.size_bytes`
 	}
 	_, err := db.conn.ExecContext(ctx, query,
-		row.ResponseID, row.ParentID, row.AccountID, row.BaseURL, row.InputJSON, row.OutputJSON,
+		row.ResponseID, row.ParentID, row.SessionID, row.AccountID, row.BaseURL, row.InputJSON, row.OutputJSON,
 		row.Replayable, row.CreatedAt.UTC(), row.AccessedAt.UTC(), row.SizeBytes,
 	)
 	return err
@@ -64,18 +65,49 @@ func (db *DB) GetResponsesContinuation(ctx context.Context, responseID string) (
 		return ResponsesContinuationRow{}, false, nil
 	}
 	query := `
-		SELECT response_id, parent_id, account_id, base_url, input_json, output_json,
+		SELECT response_id, parent_id, session_id, account_id, base_url, input_json, output_json,
 			replayable, created_at, accessed_at, size_bytes
 		FROM responses_continuity WHERE response_id = $1`
 	if db.isSQLite() {
 		query = `
-			SELECT response_id, parent_id, account_id, base_url, input_json, output_json,
+			SELECT response_id, parent_id, session_id, account_id, base_url, input_json, output_json,
 				replayable, created_at, accessed_at, size_bytes
 			FROM responses_continuity WHERE response_id = ?`
 	}
 	var row ResponsesContinuationRow
 	err := db.conn.QueryRowContext(ctx, query, responseID).Scan(
-		&row.ResponseID, &row.ParentID, &row.AccountID, &row.BaseURL, &row.InputJSON,
+		&row.ResponseID, &row.ParentID, &row.SessionID, &row.AccountID, &row.BaseURL, &row.InputJSON,
+		&row.OutputJSON, &row.Replayable, &row.CreatedAt, &row.AccessedAt, &row.SizeBytes,
+	)
+	if err == sql.ErrNoRows {
+		return ResponsesContinuationRow{}, false, nil
+	}
+	return row, err == nil, err
+}
+
+func (db *DB) GetLatestResponseBySessionID(ctx context.Context, sessionID string) (ResponsesContinuationRow, bool, error) {
+	if db == nil || db.conn == nil || strings.TrimSpace(sessionID) == "" {
+		return ResponsesContinuationRow{}, false, nil
+	}
+	query := `
+		SELECT response_id, parent_id, session_id, account_id, base_url, input_json, output_json,
+			replayable, created_at, accessed_at, size_bytes
+		FROM responses_continuity
+		WHERE session_id = $1
+		ORDER BY accessed_at DESC, created_at DESC
+		LIMIT 1`
+	if db.isSQLite() {
+		query = `
+			SELECT response_id, parent_id, session_id, account_id, base_url, input_json, output_json,
+				replayable, created_at, accessed_at, size_bytes
+			FROM responses_continuity
+			WHERE session_id = ?
+			ORDER BY accessed_at DESC, created_at DESC
+			LIMIT 1`
+	}
+	var row ResponsesContinuationRow
+	err := db.conn.QueryRowContext(ctx, query, sessionID).Scan(
+		&row.ResponseID, &row.ParentID, &row.SessionID, &row.AccountID, &row.BaseURL, &row.InputJSON,
 		&row.OutputJSON, &row.Replayable, &row.CreatedAt, &row.AccessedAt, &row.SizeBytes,
 	)
 	if err == sql.ErrNoRows {

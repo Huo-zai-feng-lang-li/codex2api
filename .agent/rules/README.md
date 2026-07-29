@@ -108,3 +108,72 @@
 - 临时脚本只能放在项目明确的临时位置，使用后立即删除。
 - 不覆盖、不回滚用户无关改动；提交前检查暂存区，只提交本任务文件。
 - `.agent/handoff.md` 始终覆盖更新，不创建按日期散落的接力文件。
+
+## 6. 双通道对称性（HTTP / WebSocket）
+
+本项目的 `/v1/responses` 端点同时支持 HTTP POST（`handler.go`）和 WebSocket（`responses_ws.go`）两条独立处理路径。两条路径各自拥有完整的账号选择、重试、上游转发和流式读取逻辑。
+
+### 6.1 强制对称检查
+
+任何涉及以下功能的修改，必须同时检查并同步到两条路径，否则视为未完成：
+
+| 功能类别 | HTTP 路径 (`handler.go`) | WebSocket 路径 (`responses_ws.go`) |
+|---------|-------------------------|-----------------------------------|
+| 续链历史展发 | `buildOpenAIResponsesContinuationFallback` | 同左 |
+| 续链账号亲和 | `bindOpenAIResponsesContinuationOwner` | 同左 |
+| Pending 注册 | `RegisterPendingOpenAIResponsesContinuation` | 同左 |
+| 完成缓存 | `cacheOpenAIResponsesContinuation` | 同左 |
+| 上游错误分类与重试 | `shouldRetryHTTPStatus` / `shouldRetryRequestError` | 同左 |
+| 加密内容剥离 | `stripInvalidEncryptedContentFromResponsesBody` | 同左 |
+| 安全审计 | `upstreamGuardAudit` | 同左 |
+| 用量日志记录 | `logUsageForRequest` | 同左 |
+
+### 6.2 Responses 续链系统架构与上下文丢失修复全记录
+
+#### 问题现象
+
+用户在 Codex 桌面端进行多轮对话时，模型从第二轮开始丢失所有历史上下文。例如：第一轮告诉模型"每次给数字加5"，模型正确回答；第二轮发送数字，模型不知道要加5，只是回声。Agent 场景下（如"修复Bug"→"测试一下"），第二轮指令中 Agent 完全不记得之前做了什么。
+
+#### 续链系统工作原理
+
+本项目作为反代，上游账号是无状态的第三方 API（不支持 `previous_response_id`）。续链系统的职责是：
+
+1. **缓存**：每轮 `response.completed` 时，将本轮的 request input + response output 存入内存+SQLite（由 `cacheOpenAIResponsesContinuation` 完成）。
+2. **注册**：流式开始 `response.created` 时，立即注册 Pending 锁（由 `RegisterPendingOpenAIResponsesContinuation` 完成），防止并发请求在响应未完成时就查询到不完整的历史。
+3. **展发**：下一轮请求到来时，如果携带 `previous_response_id` 或同一 `session_id`，从缓存中按 parent chain 拼接出完整历史，注入到 `input` 字段中发给上游（由 `buildOpenAIResponsesContinuationFallback` 完成）。
+4. **亲和**：尽量将续问路由到同一个上游账号（由 `bindOpenAIResponsesContinuationOwner` 完成）。
+
+#### 根因链（共 4 层）
+
+| 层级 | 根因 | 影响 | 修复 |
+|------|------|------|------|
+| **L1 通道缺失** | 续链系统全部 4 个函数仅注入了 HTTP POST 路径（`handler.go`），WebSocket 路径（`responses_ws.go`）中完全没有调用 | Codex 桌面端走 WebSocket（`GET /responses`），历史从未缓存、从未展发，模型每轮只看到当前一句话 | 在 `responses_ws.go` 的 `forwardResponsesWebSocketTurn` 和 `streamResponsesWSUpstream` 中注入完整续链生命周期 |
+| **L2 Header 大小写** | `ResolveSessionID` 只匹配精确的 `session_id` Header key，不兼容 `Session_id`、`session-id`、`x-session-id` 等变体 | 不同客户端实现使用不同 Header 拼写，导致每轮请求生成随机 UUID 作为 sessionID，会话被拆散 | 在 `executor.go` 中实现大小写不敏感、分隔符不敏感的 Header 匹配 |
+| **L3 function_call 参数缺失** | 长对话历史中 `function_call` 类型 item 缺少必填的 `arguments` 字段 | 上游返回 HTTP 400：`Missing required parameter: 'input[141].arguments'`，整个续链回放失败 | 在 `replayableOpenAIResponsesItem` 中检测并自动补齐 `"arguments": "{}"` |
+| **L4 SQLite 迁移顺序** | `session_id` 列通过 `ensureSQLiteColumn` 动态添加，但对应 index 的 CREATE 语句放在了列添加之前 | 已有数据库启动时报 `no such column: session_id` 崩溃 | 将 index 创建移至 `indexStatements` 阶段（在列补齐之后执行） |
+
+#### 排查过程教训
+
+1. **先看日志，再看代码**：日志显示 `GET /responses`（WebSocket）而非 `POST /v1/responses`（HTTP），但排查时只盯着 HTTP handler 改了 4 轮。如果第一时间检查运行日志中请求走的实际路径，一轮就能定位。
+2. **单元测试通过 ≠ 线上正确**：HTTP 路径的续链单元测试 100% 通过，但 WebSocket 路径没有对应测试，且线上流量走的恰恰是 WebSocket。
+3. **不要只修表象**：前几轮修了 Header 大小写、function_call 补齐等细节，这些确实是真实 Bug，但不是"模型不记得上下文"的主因。主因是 WebSocket 通道从未接入续链系统。
+
+#### 涉及文件
+
+| 文件 | 修改内容 |
+|------|---------|
+| `proxy/responses_ws.go` | 注入续链 4 个生命周期函数，扩展 `streamResponsesWSUpstream` 签名 |
+| `proxy/handler.go` | 续链 fallback 触发、`continuationOwnerBound` 逻辑 |
+| `proxy/responses_continuity.go` | session_id fallback 查找、function_call arguments 补齐、非破坏性历史提取 |
+| `proxy/executor.go` | Header 大小写不敏感匹配 |
+| `database/sqlite.go` | 迁移顺序修正 |
+
+### 6.3 验证清单
+
+修改涉及 Responses API 处理逻辑时，交付前必须逐项确认：
+
+- [ ] `handler.go` 中的改动是否在 `responses_ws.go` 中有对应实现？
+- [ ] `responses_ws.go` 中的改动是否在 `handler.go` 中有对应实现？
+- [ ] `streamResponsesWSUpstream` 的参数签名是否需要扩展？
+- [ ] 运行日志中同时覆盖了 `POST /v1/responses` 和 `GET /responses` 两种请求？
+- [ ] 修改续链相关逻辑后，是否在真实客户端（而非仅单元测试）验证了多轮对话上下文保持？

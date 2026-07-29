@@ -44,6 +44,10 @@ func (blockingResponsesContinuityPersistence) GetResponsesContinuation(context.C
 	return database.ResponsesContinuationRow{}, false, nil
 }
 
+func (blockingResponsesContinuityPersistence) GetLatestResponseBySessionID(context.Context, string) (database.ResponsesContinuationRow, bool, error) {
+	return database.ResponsesContinuationRow{}, false, nil
+}
+
 func (blockingResponsesContinuityPersistence) TouchResponsesContinuations(context.Context, []string, time.Time) error {
 	return nil
 }
@@ -61,6 +65,10 @@ func (*controlledCleanupResponsesContinuityPersistence) UpsertResponsesContinuat
 }
 
 func (*controlledCleanupResponsesContinuityPersistence) GetResponsesContinuation(context.Context, string) (database.ResponsesContinuationRow, bool, error) {
+	return database.ResponsesContinuationRow{}, false, nil
+}
+
+func (*controlledCleanupResponsesContinuityPersistence) GetLatestResponseBySessionID(context.Context, string) (database.ResponsesContinuationRow, bool, error) {
 	return database.ResponsesContinuationRow{}, false, nil
 }
 
@@ -106,7 +114,7 @@ func TestOpenAIResponsesContinuityRestoresFromPersistence(t *testing.T) {
 	if err := first.setPersistence(ctx, db); err != nil {
 		t.Fatalf("setPersistence(first): %v", err)
 	}
-	first.store("resp_root", "", openAIResponsesContinuation{
+	first.store("resp_root", "", "", openAIResponsesContinuation{
 		accountID: 7,
 		baseURL:   "https://relay.example.com",
 		input: []json.RawMessage{
@@ -171,7 +179,7 @@ func TestOpenAIResponsesContinuityPersistenceTimeoutFailsOpen(t *testing.T) {
 		t.Fatalf("setPersistence: %v", err)
 	}
 	started := time.Now()
-	registry.store("resp_timeout", "", openAIResponsesContinuation{
+	registry.store("resp_timeout", "", "", openAIResponsesContinuation{
 		input: []json.RawMessage{json.RawMessage(`{"type":"message","role":"user","content":"hello"}`)},
 	})
 	if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
@@ -203,7 +211,7 @@ func TestOpenAIResponsesContinuityRunsDiskCleanupOffRequestPath(t *testing.T) {
 	forceOpenAIResponsesContinuityCleanup(registry)
 
 	started := time.Now()
-	registry.store("resp_limit", "", openAIResponsesContinuation{
+	registry.store("resp_limit", "", "", openAIResponsesContinuation{
 		input: []json.RawMessage{json.RawMessage(`{"type":"message","role":"user","content":"hello"}`)},
 	})
 	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
@@ -235,7 +243,7 @@ func TestOpenAIResponsesContinuityCoalescesBurstDiskCleanup(t *testing.T) {
 	persistence.blockNext.Store(true)
 	forceOpenAIResponsesContinuityCleanup(registry)
 
-	registry.store("resp_0", "", openAIResponsesContinuation{
+	registry.store("resp_0", "", "", openAIResponsesContinuation{
 		input: []json.RawMessage{json.RawMessage(`{"type":"message","role":"user","content":"hello"}`)},
 	})
 	select {
@@ -244,7 +252,7 @@ func TestOpenAIResponsesContinuityCoalescesBurstDiskCleanup(t *testing.T) {
 		t.Fatal("background disk cleanup did not start")
 	}
 	for i := 1; i <= 32; i++ {
-		registry.store("resp_"+strconv.Itoa(i), "", openAIResponsesContinuation{
+		registry.store("resp_"+strconv.Itoa(i), "", "", openAIResponsesContinuation{
 			input: []json.RawMessage{json.RawMessage(`{"type":"message","role":"user","content":"hello"}`)},
 		})
 	}
@@ -269,7 +277,7 @@ func TestOpenAIResponsesContinuitySkipsDiskCleanupBeforeInterval(t *testing.T) {
 	}
 	persistence.trimCalls.Store(0)
 
-	registry.store("resp_limit", "", openAIResponsesContinuation{
+	registry.store("resp_limit", "", "", openAIResponsesContinuation{
 		input: []json.RawMessage{json.RawMessage(`{"type":"message","role":"user","content":"hello"}`)},
 	})
 	time.Sleep(20 * time.Millisecond)
@@ -294,7 +302,7 @@ func TestOpenAIResponsesContinuityRetriesDiskCleanupNextInterval(t *testing.T) {
 	persistence.failNext.Store(true)
 
 	current = base.Add(2 * openAIResponsesContinuityCleanupInterval)
-	registry.store("resp_fail", "", openAIResponsesContinuation{
+	registry.store("resp_fail", "", "", openAIResponsesContinuation{
 		input: []json.RawMessage{json.RawMessage(`{"type":"message","role":"user","content":"hello"}`)},
 	})
 	waitForOpenAIResponsesContinuityCondition(t, func() bool {
@@ -302,7 +310,7 @@ func TestOpenAIResponsesContinuityRetriesDiskCleanupNextInterval(t *testing.T) {
 	})
 
 	current = base.Add(4 * openAIResponsesContinuityCleanupInterval)
-	registry.store("resp_retry", "", openAIResponsesContinuation{
+	registry.store("resp_retry", "", "", openAIResponsesContinuation{
 		input: []json.RawMessage{json.RawMessage(`{"type":"message","role":"user","content":"hello again"}`)},
 	})
 	waitForOpenAIResponsesContinuityCondition(t, func() bool {
@@ -350,13 +358,13 @@ func TestOpenAIResponsesContinuityPersistsAncestorAccessAcrossRestart(t *testing
 	if err := first.setPersistence(ctx, db); err != nil {
 		t.Fatalf("setPersistence(first): %v", err)
 	}
-	first.store("resp_root", "", openAIResponsesContinuation{
+	first.store("resp_root", "", "", openAIResponsesContinuation{
 		input:  []json.RawMessage{json.RawMessage(`{"type":"message","role":"user","content":"remember"}`)},
 		output: []json.RawMessage{json.RawMessage(`{"type":"message","role":"assistant","content":"ALPHA"}`)},
 	})
 
 	current = base.Add(59 * time.Minute)
-	first.store("resp_child", "resp_root", openAIResponsesContinuation{
+	first.store("resp_child", "resp_root", "", openAIResponsesContinuation{
 		input: []json.RawMessage{json.RawMessage(`{"type":"message","role":"user","content":"repeat"}`)},
 	})
 
@@ -388,7 +396,7 @@ func BenchmarkOpenAIResponsesContinuityStoreMemory(b *testing.B) {
 	}
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		registry.store("resp_bench", "", entry)
+		registry.store("resp_bench", "", "", entry)
 	}
 }
 
@@ -412,6 +420,6 @@ func BenchmarkOpenAIResponsesContinuityStoreSQLite(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		registry.store("resp_bench", "", entry)
+		registry.store("resp_bench", "", "", entry)
 	}
 }

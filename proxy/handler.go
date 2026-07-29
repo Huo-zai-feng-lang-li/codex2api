@@ -1350,7 +1350,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	effectiveModel := effectiveRequestModel(codexBody, model)
 	baseAccountFilter := accountFilterForResponsesModel(effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
 	baseAccountFilter = h.withModelCooldownFilter(effectiveModel, baseAccountFilter)
-	accountFilter, continuationOwnerBound := bindOpenAIResponsesContinuationOwner(rawBody, baseAccountFilter)
+	accountFilter, continuationOwnerBound := bindOpenAIResponsesContinuationOwner(rawBody, sessionID, baseAccountFilter)
 
 	// 3. 带重试的上游请求
 	maxRetries := h.getMaxRetries()
@@ -1368,7 +1368,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			return continuationFallbackUnavailable
 		}
 		previousID := gjson.GetBytes(rawBody, "previous_response_id").String()
-		if !canBuildOpenAIResponsesContinuationFallback(rawBody) {
+		if !canBuildOpenAIResponsesContinuationFallback(rawBody, sessionID) {
 			return continuationFallbackUnavailable
 		}
 		lease, ok := defaultResponsesMemoryGovernor.tryAcquireFallback()
@@ -1376,14 +1376,16 @@ func (h *Handler) Responses(c *gin.Context) {
 			writeResponsesMemoryError(c, "local_continuation_busy", "本地上下文回放已达并发上限，请稍后重试")
 			return continuationFallbackRejected
 		}
-		fallbackBody, ok := buildOpenAIResponsesContinuationFallback(rawBody)
+		fallbackBody, ok := buildOpenAIResponsesContinuationFallback(rawBody, sessionID)
 		if !ok {
 			lease.release()
 			return continuationFallbackUnavailable
 		}
 		continuationFallbackLease = lease
 		continuationFallbackRetried = true
-		continuationOwnerBound = false
+		if reason != "third_party_stateless_continuation" {
+			continuationOwnerBound = false
+		}
 		rawBody = fallbackBody
 		codexBody, expandedInputRaw = PrepareResponsesBody(rawBody)
 		openAIResponsesBody.Reset(rawBody)
@@ -1451,12 +1453,10 @@ func (h *Handler) Responses(c *gin.Context) {
 		guardFirstTokenTimeout := shouldGuardFirstTokenTimeout(pick.poolSnapshot) &&
 			retryExclusions.FirstTokenTimeoutAttempts() == 0
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
-		if continuationOwnerBound && shouldReplayOpenAIResponsesContinuationBeforeUpstream(rawBody, account) {
+		if shouldReplayOpenAIResponsesContinuationBeforeUpstream(rawBody, account, sessionID) {
 			switch activateContinuationFallback("third_party_stateless_continuation") {
 			case continuationFallbackActivated:
-				h.store.Release(account)
-				h.store.UnbindSessionAffinity(affinityKey, account.ID())
-				continue
+				// 历史回放成功，直接使用当前账号发送
 			case continuationFallbackRejected:
 				h.store.Release(account)
 				h.store.UnbindSessionAffinity(affinityKey, account.ID())
@@ -1721,6 +1721,15 @@ func (h *Handler) Responses(c *gin.Context) {
 					}
 					parsed := gjson.ParseBytes(data)
 					eventType := parsed.Get("type").String()
+					if eventType == "response.created" {
+						createdID := parsed.Get("response.id").String()
+						if createdID == "" {
+							createdID = parsed.Get("response").Get("id").String()
+						}
+						if createdID != "" {
+							RegisterPendingOpenAIResponsesContinuation(createdID, gjson.GetBytes(continuationCacheBody, "previous_response_id").String(), sessionID, account)
+						}
+					}
 					isFirstToken := isFirstTokenEvent(eventType)
 					if !ttftRecorded && isFirstToken {
 						firstTokenMs = int(time.Since(start).Milliseconds())
@@ -1731,7 +1740,7 @@ func (h *Handler) Responses(c *gin.Context) {
 						deltaCharCount += len(parsed.Get("delta").String())
 					}
 					if eventType == "response.completed" {
-						cacheOpenAIResponsesContinuation(continuationCacheBody, data, account)
+						cacheOpenAIResponsesContinuation(continuationCacheBody, data, account, sessionID)
 						usage = extractUsageFromResult(parsed.Get("response.usage"))
 						if tier := parsed.Get("response.service_tier").String(); tier != "" {
 							actualServiceTier = tier
@@ -1790,7 +1799,7 @@ func (h *Handler) Responses(c *gin.Context) {
 						h.store.Release(account)
 						return
 					}
-					cacheOpenAIResponsesContinuation(continuationCacheBody, respBody, account)
+					cacheOpenAIResponsesContinuation(continuationCacheBody, respBody, account, sessionID)
 					respBody = h.rewriteResponsesBodyForDownstream(respBody)
 					c.Data(http.StatusOK, contentType, respBody)
 				}
@@ -2137,6 +2146,16 @@ func (h *Handler) Responses(c *gin.Context) {
 					ttftGuard.MarkEvent(eventType)
 				}
 
+				if eventType == "response.created" {
+					createdID := parsed.Get("response.id").String()
+					if createdID == "" {
+						createdID = parsed.Get("response").Get("id").String()
+					}
+					if createdID != "" {
+						RegisterPendingOpenAIResponsesContinuation(createdID, gjson.GetBytes(continuationCacheBody, "previous_response_id").String(), sessionID, account)
+					}
+				}
+
 				// 累计 delta 字符数
 				if eventType == "response.output_text.delta" {
 					deltaCharCount += len(parsed.Get("delta").String())
@@ -2153,7 +2172,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					}
 					// 缓存响应上下文，供后续 previous_response_id 展开使用
 					cacheCompletedResponse([]byte(expandedInputRaw), data)
-					cacheOpenAIResponsesContinuation(continuationCacheBody, data, account)
+					cacheOpenAIResponsesContinuation(continuationCacheBody, data, account, sessionID)
 					gotTerminal = true
 				}
 				if eventType == "response.failed" {
@@ -2228,7 +2247,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					}
 					// 缓存响应上下文，供后续 previous_response_id 展开使用
 					cacheCompletedResponse([]byte(expandedInputRaw), data)
-					cacheOpenAIResponsesContinuation(continuationCacheBody, data, account)
+					cacheOpenAIResponsesContinuation(continuationCacheBody, data, account, sessionID)
 					gotTerminal = true
 					lastResponseData = data
 					return false

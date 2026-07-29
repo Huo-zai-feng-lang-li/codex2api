@@ -200,6 +200,15 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		c.Set("x-service-tier", serviceTier)
 	}
 
+	// --- 续链历史展发（WebSocket 通道） ---
+	continuationCacheBody := rawBody
+	if canBuildOpenAIResponsesContinuationFallback(rawBody, sessionID) {
+		if fallbackBody, ok := buildOpenAIResponsesContinuationFallback(rawBody, sessionID); ok {
+			rawBody = fallbackBody
+			log.Printf("Responses WebSocket 续链已展发本地历史 (session=%s)", sessionID)
+		}
+	}
+
 	codexBody, expandedInputRaw := PrepareResponsesWebSocketBody(rawBody)
 	if err := validateResponsesImageGenerationSizes(codexBody); err != nil {
 		apiErr = api.NewAPIError(api.ErrCodeInvalidParameter, err.Error(), api.ErrorTypeInvalidRequest)
@@ -221,8 +230,9 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		return newResponsesWSCloseError(closeCode, apiErr.Message, apiErr)
 	}
 
-	accountFilter := accountFilterForResponsesModel(effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
-	accountFilter = h.withModelCooldownFilter(effectiveModel, accountFilter)
+	baseAccountFilter := accountFilterForResponsesModel(effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
+	baseAccountFilter = h.withModelCooldownFilter(effectiveModel, baseAccountFilter)
+	accountFilter, _ := bindOpenAIResponsesContinuationOwner(continuationCacheBody, sessionID, baseAccountFilter)
 
 	maxRetries := h.getMaxRetries()
 	maxRateLimitRetries := h.getMaxRateLimitRetries()
@@ -448,6 +458,7 @@ accountAttempts:
 					model, effectiveModel, reasoningEffort, serviceTier, expandedInputRaw,
 					audit, transportStart, attempt+1,
 					transport.useWebSocket && websocketFallbackHTTPEnabled(),
+					continuationCacheBody, sessionID,
 				)
 				if err == nil {
 					if completed && transport.fallbackTTL > 0 {
@@ -618,7 +629,7 @@ accountAttempts:
 			return nil
 		}
 
-		if _, err := h.streamResponsesWSUpstream(c, conn, resp, account, proxyURL, affinityKey, upstreamEndpoint, model, effectiveModel, reasoningEffort, serviceTier, expandedInputRaw, audit, start, attempt+1, false); err != nil {
+		if _, err := h.streamResponsesWSUpstream(c, conn, resp, account, proxyURL, affinityKey, upstreamEndpoint, model, effectiveModel, reasoningEffort, serviceTier, expandedInputRaw, audit, start, attempt+1, false, continuationCacheBody, sessionID); err != nil {
 			if errors.Is(err, errResponsesWSClientGone) {
 				return err
 			}
@@ -674,6 +685,8 @@ func (h *Handler) streamResponsesWSUpstream(
 	start time.Time,
 	attemptIndex int,
 	preserveAccountOnMissingTerminal bool,
+	continuationCacheBody []byte,
+	sessionID string,
 ) (bool, error) {
 	account.Mu().RLock()
 	c.Set("x-account-email", account.Email)
@@ -727,7 +740,17 @@ func (h *Handler) streamResponsesWSUpstream(
 		if image, ok := extractImageFromOutputItemDone(data, model); ok {
 			imageLogInfo = mergeImageUsageLogInfo(imageLogInfo, imageUsageLogInfoFromImage(image))
 		}
+		if eventType == "response.created" {
+			createdID := parsed.Get("response.id").String()
+			if createdID == "" {
+				createdID = parsed.Get("response").Get("id").String()
+			}
+			if createdID != "" {
+				RegisterPendingOpenAIResponsesContinuation(createdID, gjson.GetBytes(continuationCacheBody, "previous_response_id").String(), sessionID, account)
+			}
+		}
 		if eventType == "response.completed" {
+			cacheOpenAIResponsesContinuation(continuationCacheBody, data, account, sessionID)
 			usage = extractUsageFromResult(parsed.Get("response.usage"))
 			if tier := parsed.Get("response.service_tier").String(); tier != "" {
 				actualServiceTier = tier

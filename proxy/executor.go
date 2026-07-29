@@ -719,10 +719,7 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 // 将它当作会话标识会拆散同一线程的账号亲和性。
 func ResolveSessionID(headers http.Header, body []byte) string {
 	if headers != nil {
-		if v := strings.TrimSpace(headers.Get("Session_id")); v != "" {
-			return v
-		}
-		if v := strings.TrimSpace(headers.Get("Conversation_id")); v != "" {
+		if v := getHeaderCaseInsensitive(headers, "session_id", "session-id", "x-session-id", "conversation_id", "conversation-id", "x-conversation-id"); v != "" {
 			return v
 		}
 	}
@@ -734,7 +731,7 @@ func ResolveSessionID(headers http.Header, body []byte) string {
 	// 基于下游用户的 API Key 生成确定性 cache key（参考 CLIProxyAPI codex_executor.go:621）
 	authHeader := ""
 	if headers != nil {
-		authHeader = headers.Get("Authorization")
+		authHeader = getHeaderCaseInsensitive(headers, "authorization")
 	}
 	apiKey := strings.TrimPrefix(authHeader, "Bearer ")
 	apiKey = strings.TrimSpace(apiKey)
@@ -744,6 +741,27 @@ func ResolveSessionID(headers http.Header, body []byte) string {
 
 	// 最后兜底：生成随机 UUID
 	return uuid.New().String()
+}
+
+func getHeaderCaseInsensitive(headers http.Header, keys ...string) string {
+	if headers == nil {
+		return ""
+	}
+	for _, key := range keys {
+		if v := headers.Get(key); strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+		target := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "-", ""), "_", ""))
+		for hKey, vals := range headers {
+			normKey := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(hKey, "-", ""), "_", ""))
+			if normKey == target && len(vals) > 0 {
+				if v := strings.TrimSpace(vals[0]); v != "" {
+					return v
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // ReadSSEStream 从上游 SSE 响应读取事件流

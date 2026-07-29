@@ -164,9 +164,9 @@ func TestContinuationRegistryStoresParentChainIncrementally(t *testing.T) {
 	grandInput := rawMessages(`{"type":"message","role":"user","content":"grand"}`)
 	grandOutput := rawMessages(`{"type":"message","role":"assistant","content":"GRAND"}`)
 
-	registry.store("resp_root", "", continuationDelta(rootInput, rootOutput))
-	registry.store("resp_child", "resp_root", continuationDelta(childInput, childOutput))
-	registry.store("resp_grand", "resp_child", continuationDelta(grandInput, grandOutput))
+	registry.store("resp_root", "", "", continuationDelta(rootInput, rootOutput))
+	registry.store("resp_child", "resp_root", "", continuationDelta(childInput, childOutput))
+	registry.store("resp_grand", "resp_child", "", continuationDelta(grandInput, grandOutput))
 
 	wantBytes := rawMessagesSize(rootInput) + rawMessagesSize(rootOutput) +
 		rawMessagesSize(childInput) + rawMessagesSize(childOutput) +
@@ -195,12 +195,12 @@ func TestContinuationRegistryBranchesShareParentWithoutCrossTalk(t *testing.T) {
 	})
 	rootInput := rawMessages(`{"type":"message","role":"user","content":"root"}`)
 	rootOutput := rawMessages(`{"type":"message","role":"assistant","content":"ROOT"}`)
-	registry.store("root", "", continuationDelta(rootInput, rootOutput))
-	registry.store("branch_a", "root", continuationDelta(
+	registry.store("root", "", "", continuationDelta(rootInput, rootOutput))
+	registry.store("branch_a", "root", "", continuationDelta(
 		rawMessages(`{"type":"message","role":"user","content":"A"}`),
 		rawMessages(`{"type":"message","role":"assistant","content":"A1"}`),
 	))
-	registry.store("branch_b", "root", continuationDelta(
+	registry.store("branch_b", "root", "", continuationDelta(
 		rawMessages(`{"type":"message","role":"user","content":"B"}`),
 		rawMessages(`{"type":"message","role":"assistant","content":"B1"}`),
 	))
@@ -229,9 +229,9 @@ func TestContinuationRegistryNeverReplaysAfterParentEviction(t *testing.T) {
 		maxItemBytes: 1 << 20,
 		maxBytes:     1 << 20,
 	})
-	registry.store("root", "", continuationDelta(rawMessages(`{"content":"root"}`), rawMessages(`{"content":"ROOT"}`)))
-	registry.store("child", "root", continuationDelta(rawMessages(`{"content":"child"}`), rawMessages(`{"content":"CHILD"}`)))
-	registry.store("other", "", continuationDelta(rawMessages(`{"content":"other"}`), rawMessages(`{"content":"OTHER"}`)))
+	registry.store("root", "", "", continuationDelta(rawMessages(`{"content":"root"}`), rawMessages(`{"content":"ROOT"}`)))
+	registry.store("child", "root", "", continuationDelta(rawMessages(`{"content":"child"}`), rawMessages(`{"content":"CHILD"}`)))
+	registry.store("other", "", "", continuationDelta(rawMessages(`{"content":"other"}`), rawMessages(`{"content":"OTHER"}`)))
 
 	if _, ok := registry.materialize("child"); ok {
 		t.Fatal("child replayed partial history after its parent chain was evicted")
@@ -258,7 +258,7 @@ func TestContinuationRegistryConcurrentStoresStayWithinLimits(t *testing.T) {
 			defer workers.Done()
 			<-start
 			responseID := "response_" + strconv.Itoa(index)
-			registry.store(responseID, "", continuationDelta(
+			registry.store(responseID, "", "", continuationDelta(
 				rawMessages(`{"content":"request"}`),
 				rawMessages(`{"content":"response"}`),
 			))
@@ -339,7 +339,7 @@ func BenchmarkContinuationRegistryMaterializeTwentyTurns(b *testing.B) {
 	parentID := ""
 	for index := 0; index < 20; index++ {
 		responseID := "response_" + strconv.Itoa(index)
-		registry.store(responseID, parentID, continuationDelta(
+		registry.store(responseID, parentID, "", continuationDelta(
 			rawMessages(`{"content":"request"}`),
 			rawMessages(`{"content":"response"}`),
 		))

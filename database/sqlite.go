@@ -307,6 +307,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS responses_continuity (
 			response_id TEXT PRIMARY KEY,
 			parent_id TEXT DEFAULT '',
+			session_id TEXT DEFAULT '',
 			account_id INTEGER DEFAULT 0,
 			base_url TEXT DEFAULT '',
 			input_json BLOB NOT NULL DEFAULT '[]',
@@ -442,6 +443,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"proxies", "test_ip", "TEXT DEFAULT ''"},
 		{"proxies", "test_location", "TEXT DEFAULT ''"},
 		{"proxies", "test_latency_ms", "INTEGER DEFAULT 0"},
+		{"responses_continuity", "session_id", "TEXT DEFAULT ''"},
 	}
 	for _, column := range columns {
 		if err := db.ensureSQLiteColumn(ctx, column.table, column.name, column.def); err != nil {
@@ -450,6 +452,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 	}
 
 	indexStatements := []string{
+		`CREATE INDEX IF NOT EXISTS idx_responses_continuity_session_id ON responses_continuity(session_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status);`,
 		`CREATE INDEX IF NOT EXISTS idx_accounts_platform ON accounts(platform);`,
 		`CREATE INDEX IF NOT EXISTS idx_accounts_cooldown_until ON accounts(cooldown_until);`,

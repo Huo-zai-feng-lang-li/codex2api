@@ -20,6 +20,9 @@ func TestOpenAIResponsesHTTPContinuationFallsBackToLocalHistory(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	resetResponseCacheForTest()
 	resetOpenAIResponsesContinuityForTest()
+	previousMode := openAIResponsesContinuityMode
+	openAIResponsesContinuityMode = openAIResponsesContinuityModeUpstream
+	t.Cleanup(func() { openAIResponsesContinuityMode = previousMode })
 
 	var mu sync.Mutex
 	requests := make([][]byte, 0, 5)
@@ -189,23 +192,25 @@ func TestOpenAIResponsesContinuationUsesResponseOwnerWhenAffinityIsOff(t *testin
 }
 
 func TestOpenAIResponsesCodexOwnerCanReplayLocalHistory(t *testing.T) {
+	resetResponseCacheForTest()
 	resetOpenAIResponsesContinuityForTest()
 	owner := &auth.Account{DBID: 41, Name: "codex-owner"}
 	cacheOpenAIResponsesContinuation(
 		[]byte(`{"model":"gpt-5.4","input":"remember FOXTROT","store":false}`),
 		[]byte(`{"id":"resp_codex_owner","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"FOXTROT"}]}]}`),
 		owner,
+		"session-codex-test",
 	)
 
 	request := []byte(`{"model":"gpt-5.4","previous_response_id":"resp_codex_owner","input":"what token?","store":false}`)
-	filter, bound := bindOpenAIResponsesContinuationOwner(request, nil)
+	filter, bound := bindOpenAIResponsesContinuationOwner(request, "session-codex-test", nil)
 	if !bound || !filter(owner) {
 		t.Fatal("Codex response owner was not bound")
 	}
 	if filter(&auth.Account{DBID: 42, Name: "other"}) {
 		t.Fatal("non-owner Codex account passed continuation filter")
 	}
-	fallback, ok := buildOpenAIResponsesContinuationFallback(request)
+	fallback, ok := buildOpenAIResponsesContinuationFallback(request, "session-codex-test")
 	if !ok {
 		t.Fatal("Codex continuation history was not replayable")
 	}
@@ -218,6 +223,9 @@ func TestOpenAIResponsesStreamingContinuationFallsBackToLocalHistory(t *testing.
 	gin.SetMode(gin.TestMode)
 	resetResponseCacheForTest()
 	resetOpenAIResponsesContinuityForTest()
+	previousMode := openAIResponsesContinuityMode
+	openAIResponsesContinuityMode = openAIResponsesContinuityModeUpstream
+	t.Cleanup(func() { openAIResponsesContinuityMode = previousMode })
 
 	var mu sync.Mutex
 	requests := make([][]byte, 0, 3)
@@ -391,7 +399,11 @@ func TestOpenAIResponsesContinuationWithoutLocalHistoryDoesNotGuess(t *testing.T
 
 func TestOpenAIResponsesContinuationFailsExplicitlyWhenFallbackIsSaturated(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	resetResponseCacheForTest()
 	resetOpenAIResponsesContinuityForTest()
+	previousMode := openAIResponsesContinuityMode
+	openAIResponsesContinuityMode = openAIResponsesContinuityModeUpstream
+	t.Cleanup(func() { openAIResponsesContinuityMode = previousMode })
 
 	previousGovernor := defaultResponsesMemoryGovernor
 	defaultResponsesMemoryGovernor = newResponsesMemoryGovernor(responsesMemoryLimits{
@@ -446,6 +458,7 @@ func TestOpenAIResponsesContinuationFailsExplicitlyWhenFallbackIsSaturated(t *te
 
 func TestOpenAIResponsesThirdPartyContinuationReplaysLocallyBeforeUpstream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	resetResponseCacheForTest()
 	resetOpenAIResponsesContinuityForTest()
 	previousMode := openAIResponsesContinuityMode
 	openAIResponsesContinuityMode = openAIResponsesContinuityModeAuto
@@ -517,4 +530,85 @@ func performResponsesRequest(t *testing.T, handler *Handler, body []byte, header
 	ctx.Request = req
 	handler.Responses(ctx)
 	return recorder
+}
+
+func TestOpenAIResponsesSessionContinuationWithoutPreviousResponseID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetResponseCacheForTest()
+	resetOpenAIResponsesContinuityForTest()
+
+	var mu sync.Mutex
+	requests := make([][]byte, 0, 2)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read upstream body: %v", err)
+			return
+		}
+		mu.Lock()
+		requests = append(requests, append([]byte(nil), body...))
+		attempt := len(requests)
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		if attempt == 1 {
+			_, _ = w.Write([]byte(`{"id":"resp_sess_root","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"SESSION_SECRET"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"resp_sess_next","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"SESSION_SECRET"}]}],"usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	handler := newFutureInputOpenAIResponsesHandler(upstream.URL)
+	headers := http.Header{"Session_id": []string{"sess_123456"}}
+
+	// 1st request: First turn with session_id
+	first := performResponsesRequest(t, handler, []byte(`{"model":"gpt-5.4","input":"my secret is SESSION_SECRET","store":false}`), headers)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want 200; body=%s", first.Code, first.Body.String())
+	}
+
+	// 2nd request: Second turn with SAME session_id but MISSING previous_response_id
+	second := performResponsesRequest(t, handler, []byte(`{"model":"gpt-5.4","input":"what was my secret?","store":false}`), headers)
+	if second.Code != http.StatusOK {
+		t.Fatalf("second status = %d, want 200; body=%s", second.Code, second.Body.String())
+	}
+
+	mu.Lock()
+	got := append([][]byte(nil), requests...)
+	mu.Unlock()
+
+	if len(got) != 2 {
+		t.Fatalf("upstream requests count = %d, want 2", len(got))
+	}
+
+	// Verify that the second request payload expanded input from session continuity
+	secondInput := gjson.GetBytes(got[1], "input").Array()
+	if len(secondInput) != 3 {
+		t.Fatalf("second request input count = %d, want 3 (replayed history + new input)", len(secondInput))
+	}
+	if text := secondInput[0].Get("content").String(); text != "my secret is SESSION_SECRET" {
+		t.Fatalf("session replayed root text = %q, want my secret is SESSION_SECRET", text)
+	}
+}
+
+func TestOpenAIResponsesPendingContinuationBindsOwnerDuringStream(t *testing.T) {
+	resetResponseCacheForTest()
+	resetOpenAIResponsesContinuityForTest()
+	owner := &auth.Account{DBID: 99, Name: "stream-pending-owner"}
+
+	// Register pending response during stream before response.completed arrives
+	RegisterPendingOpenAIResponsesContinuation("resp_pending_123", "", "sess_pending_stream", owner)
+
+	request := []byte(`{"model":"gpt-5.4","previous_response_id":"resp_pending_123","input":"followup","store":false}`)
+	filter, bound := bindOpenAIResponsesContinuationOwner(request, "sess_pending_stream", nil)
+	if !bound {
+		t.Fatal("Pending continuation owner was not bound")
+	}
+	if !filter(owner) {
+		t.Fatal("Pending owner account did not pass filter")
+	}
+	if filter(&auth.Account{DBID: 100, Name: "other"}) {
+		t.Fatal("Other account passed pending continuation filter")
+	}
 }
