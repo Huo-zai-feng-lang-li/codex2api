@@ -526,7 +526,22 @@ func TestResolveSessionIDPrefersContinuityHeaders(t *testing.T) {
 
 	headers.Del("Conversation_id")
 	headers.Set("Idempotency-Key", "idempotency-key-1")
-	if got := ResolveSessionID(headers, []byte(`{"prompt_cache_key":"body-key"}`)); got != "idempotency-key-1" {
-		t.Fatalf("ResolveSessionID() = %q, want %q", got, "idempotency-key-1")
+	if got := ResolveSessionID(headers, []byte(`{"prompt_cache_key":"body-key"}`)); got != "body-key" {
+		t.Fatalf("ResolveSessionID() = %q, want %q", got, "body-key")
+	}
+}
+
+func TestResolveSessionIDDoesNotTreatIdempotencyKeyAsConversation(t *testing.T) {
+	first := http.Header{
+		"Authorization":   []string{"Bearer sk-test-123"},
+		"Idempotency-Key": []string{"request-1"},
+	}
+	second := first.Clone()
+	second.Set("Idempotency-Key", "request-2")
+
+	firstSession := ResolveSessionID(first, []byte(`{"model":"gpt-5.4"}`))
+	secondSession := ResolveSessionID(second, []byte(`{"model":"gpt-5.4"}`))
+	if firstSession != secondSession {
+		t.Fatalf("request-scoped idempotency keys split one API-key session: first=%q second=%q", firstSession, secondSession)
 	}
 }

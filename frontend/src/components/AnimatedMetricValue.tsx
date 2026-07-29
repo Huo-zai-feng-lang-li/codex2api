@@ -56,8 +56,7 @@ export default function AnimatedMetricValue({
       displayValueRef.current ?? metricDisplayCache.get(id),
       resetToZero,
     )
-    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
-    if (startValue === targetValue || reduceMotion) {
+    if (startValue === targetValue) {
       updateDisplay(targetValue)
       return
     }

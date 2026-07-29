@@ -712,18 +712,17 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 // 优先级：
 //  1. Header: Session_id
 //  2. Header: Conversation_id
-//  3. Header: Idempotency-Key
-//  4. Body:   prompt_cache_key
-//  5. 基于 Bearer API Key 的确定性 UUID
+//  3. Body:   prompt_cache_key
+//  4. 基于 Bearer API Key 的确定性 UUID
+//
+// Idempotency-Key 是单次请求的去重键，客户端通常每次请求都会生成新值。
+// 将它当作会话标识会拆散同一线程的账号亲和性。
 func ResolveSessionID(headers http.Header, body []byte) string {
 	if headers != nil {
 		if v := strings.TrimSpace(headers.Get("Session_id")); v != "" {
 			return v
 		}
 		if v := strings.TrimSpace(headers.Get("Conversation_id")); v != "" {
-			return v
-		}
-		if v := strings.TrimSpace(headers.Get("Idempotency-Key")); v != "" {
 			return v
 		}
 	}

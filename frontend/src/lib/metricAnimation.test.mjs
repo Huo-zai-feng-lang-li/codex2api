@@ -18,6 +18,15 @@ async function loadModule(name) {
 
 const metricAnimation = await loadModule('./metricAnimation.ts')
 
+test('keeps metric rolling independent of the system reduced-motion preference', () => {
+  const componentSource = fs.readFileSync(
+    new URL('../components/AnimatedMetricValue.tsx', import.meta.url),
+    'utf8',
+  )
+
+  assert.doesNotMatch(componentSource, /prefers-reduced-motion|matchMedia/)
+})
+
 test('updates through timer-driven intermediate values before the exact target', () => {
   let now = 0
   let tick = () => {}

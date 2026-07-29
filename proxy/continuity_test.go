@@ -16,12 +16,12 @@ func TestResolveContinuity(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	tests := []struct {
-		name        string
-		ctx         context.Context
-		account     *auth.Account
-		req         Request
-		opts        Options
-		wantSource  string
+		name         string
+		ctx          context.Context
+		account      *auth.Account
+		req          Request
+		opts         Options
+		wantSource   string
 		wantNonEmpty bool
 	}{
 		{
@@ -56,34 +56,6 @@ func TestResolveContinuity(t *testing.T) {
 				},
 			},
 			wantSource:   "execution_session",
-			wantNonEmpty: true,
-		},
-		{
-			name: "idempotency_key in header",
-			req: Request{
-				Payload: []byte(`{}`),
-				Headers: func() http.Header {
-					h := http.Header{}
-					h.Set("Idempotency-Key", "idem-key-abc")
-					return h
-				}(),
-			},
-			opts:         Options{},
-			wantSource:   "idempotency_key",
-			wantNonEmpty: true,
-		},
-		{
-			name: "idempotency_key with whitespace",
-			req: Request{
-				Payload: []byte(`{}`),
-				Headers: func() http.Header {
-					h := http.Header{}
-					h.Set("Idempotency-Key", "  idem-key-def  ")
-					return h
-				}(),
-			},
-			opts:         Options{},
-			wantSource:   "idempotency_key",
 			wantNonEmpty: true,
 		},
 		{
@@ -285,7 +257,7 @@ func TestApplyContinuityHeaders(t *testing.T) {
 			wantValue:  "",
 		},
 		{
-			name: "nil headers",
+			name:       "nil headers",
 			headers:    nil,
 			continuity: Continuity{Key: "session-456", Source: "test"},
 			wantValue:  "",

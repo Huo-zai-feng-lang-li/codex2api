@@ -85,9 +85,8 @@ func getGinContext(ctx context.Context) *gin.Context {
 // 优先级（从高到低）：
 // 1. prompt_cache_key (请求体)
 // 2. execution_session (元数据)
-// 3. idempotency-key (请求头)
-// 4. client_principal (gin context 中的 apiKey)
-// 5. auth_id (账号 ID)
+// 3. client_principal (gin context 中的 apiKey)
+// 4. auth_id (账号 ID)
 func ResolveContinuity(ctx context.Context, account *auth.Account, req Request, opts Options) Continuity {
 	// 1. 最高优先级：请求体中的 prompt_cache_key
 	if promptCacheKey := strings.TrimSpace(gjson.GetBytes(req.Payload, "prompt_cache_key").String()); promptCacheKey != "" {
@@ -99,14 +98,7 @@ func ResolveContinuity(ctx context.Context, account *auth.Account, req Request, 
 		return Continuity{Key: executionSession, Source: "execution_session"}
 	}
 
-	// 3. 请求头中的 Idempotency-Key
-	if req.Headers != nil {
-		if v := strings.TrimSpace(req.Headers.Get("Idempotency-Key")); v != "" {
-			return Continuity{Key: v, Source: "idempotency_key"}
-		}
-	}
-
-	// 4. gin context 中的 apiKey（client_principal）
+	// 3. gin context 中的 apiKey（client_principal）
 	// 优先从 Authorization header 读取
 	apiKey := ""
 	if ginCtx := getGinContext(ctx); ginCtx != nil {
@@ -130,7 +122,7 @@ func ResolveContinuity(ctx context.Context, account *auth.Account, req Request, 
 		}
 	}
 
-	// 5. 最低优先级：基于 auth.ID 生成确定性 UUID
+	// 4. 最低优先级：基于 auth.ID 生成确定性 UUID
 	if account != nil {
 		account.Mu().RLock()
 		authID := strings.TrimSpace(account.Email)
