@@ -113,3 +113,40 @@ func TestTrimResponsesContinuationsBoundsDiskRowsAndBytes(t *testing.T) {
 		t.Fatalf("retained resp_c: ok=%v err=%v", ok, err)
 	}
 }
+
+func TestGetLatestReplayableResponseBySessionIDSkipsNewestPending(t *testing.T) {
+	ctx := context.Background()
+	db, err := New("sqlite", filepath.Join(t.TempDir(), "codex2api.db"))
+	if err != nil {
+		t.Fatalf("New(sqlite): %v", err)
+	}
+	defer db.Close()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	rows := []ResponsesContinuationRow{
+		{
+			ResponseID: "resp_replayable", SessionID: "session-1",
+			InputJSON:  []byte(`[{"type":"message","role":"user","content":"keep"}]`),
+			OutputJSON: []byte(`[]`), Replayable: true,
+			CreatedAt: now, AccessedAt: now, SizeBytes: 55,
+		},
+		{
+			ResponseID: "resp_pending", SessionID: "session-1",
+			InputJSON: []byte(`null`), OutputJSON: []byte(`null`), Replayable: false,
+			CreatedAt: now.Add(time.Second), AccessedAt: now.Add(time.Second),
+		},
+	}
+	for i := range rows {
+		if err := db.UpsertResponsesContinuation(ctx, &rows[i]); err != nil {
+			t.Fatalf("UpsertResponsesContinuation(%s): %v", rows[i].ResponseID, err)
+		}
+	}
+
+	row, ok, err := db.GetLatestReplayableResponseBySessionID(ctx, "session-1")
+	if err != nil || !ok {
+		t.Fatalf("GetLatestReplayableResponseBySessionID: ok=%v err=%v", ok, err)
+	}
+	if row.ResponseID != "resp_replayable" {
+		t.Fatalf("response_id = %q, want resp_replayable", row.ResponseID)
+	}
+}

@@ -10,6 +10,7 @@ interface AnimatedMetricValueProps {
   value?: number
   format: (value?: number) => string
   durationMs?: number
+  animationStep?: number
   animationKey?: string
   className?: string
 }
@@ -21,6 +22,7 @@ export default function AnimatedMetricValue({
   value,
   format,
   durationMs = 3_000,
+  animationStep,
   animationKey,
   className,
 }: AnimatedMetricValueProps) {
@@ -28,7 +30,6 @@ export default function AnimatedMetricValue({
   const displayValueRef = useRef<number | undefined>(
     targetValue === undefined ? undefined : metricDisplayCache.get(id) ?? 0,
   )
-  const animationKeyRef = useRef(animationKey)
   const valueNodeRef = useRef<HTMLSpanElement>(null)
   const formatRef = useRef(format)
   formatRef.current = format
@@ -50,11 +51,9 @@ export default function AnimatedMetricValue({
       return
     }
 
-    const resetToZero = animationKey !== undefined && animationKeyRef.current !== animationKey
-    animationKeyRef.current = animationKey
     const startValue = resolveMetricAnimationStart(
       displayValueRef.current ?? metricDisplayCache.get(id),
-      resetToZero,
+      false,
     )
     if (startValue === targetValue) {
       updateDisplay(targetValue)
@@ -66,13 +65,13 @@ export default function AnimatedMetricValue({
       from: startValue,
       to: targetValue,
       durationMs,
+      step: animationStep,
       onUpdate: updateDisplay,
     })
-  }, [animationKey, durationMs, id, targetValue])
+  }, [animationKey, animationStep, durationMs, id, targetValue])
 
-  const resetForSizing = animationKey !== undefined && animationKeyRef.current !== animationKey
   const sizingValue = resolveMetricSizingValue(
-    resetForSizing ? 0 : displayValueRef.current,
+    displayValueRef.current,
     targetValue,
     format,
   )

@@ -200,15 +200,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		c.Set("x-service-tier", serviceTier)
 	}
 
-	// --- 续链历史展发（WebSocket 通道） ---
 	continuationCacheBody := rawBody
-	if canBuildOpenAIResponsesContinuationFallback(rawBody, sessionID) {
-		if fallbackBody, ok := buildOpenAIResponsesContinuationFallback(rawBody, sessionID); ok {
-			rawBody = fallbackBody
-			log.Printf("Responses WebSocket 续链已展发本地历史 (session=%s)", sessionID)
-		}
-	}
-
 	codexBody, expandedInputRaw := PrepareResponsesWebSocketBody(rawBody)
 	if err := validateResponsesImageGenerationSizes(codexBody); err != nil {
 		apiErr = api.NewAPIError(api.ErrCodeInvalidParameter, err.Error(), api.ErrorTypeInvalidRequest)
@@ -232,7 +224,11 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 
 	baseAccountFilter := accountFilterForResponsesModel(effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
 	baseAccountFilter = h.withModelCooldownFilter(effectiveModel, baseAccountFilter)
-	accountFilter, _ := bindOpenAIResponsesContinuationOwner(continuationCacheBody, sessionID, baseAccountFilter)
+	rawBody, accountFilter, continuationReplayed, continuationOwnerBound := prepareOpenAIResponsesWebSocketContinuation(continuationCacheBody, sessionID, baseAccountFilter)
+	if continuationReplayed {
+		codexBody, expandedInputRaw = PrepareResponsesWebSocketBody(rawBody)
+		log.Printf("Responses WebSocket 续链已展发本地历史并解除 owner 绑定 (session=%s)", sessionID)
+	}
 
 	maxRetries := h.getMaxRetries()
 	maxRateLimitRetries := h.getMaxRateLimitRetries()
@@ -264,6 +260,10 @@ accountAttempts:
 		pick := h.nextRetryAccountPickForSession(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter)
 		account, stickyProxyURL := pick.account, pick.proxyURL
 		if account == nil {
+			if continuationOwnerBound {
+				_ = writeResponsesWSMessage(conn, buildContinuationContextIncompleteEvent())
+				return nil
+			}
 			if attemptedUpstream && c.Request.Context().Err() != nil {
 				return errResponsesWSClientGone
 			}
@@ -272,12 +272,8 @@ accountAttempts:
 				_ = writeResponsesWSMessage(conn, buildResponseFailedEvent(http.StatusTooManyRequests, apiErr.Message))
 				return nil
 			}
-			if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
-				apiErr = responsesWSUpstreamAPIError(lastStatusCode, lastBody)
-			} else {
-				apiErr = api.NewAPIError(api.ErrCodeServiceUnavailable, noAvailableAccountMessage(effectiveModel), api.ErrorTypeServer)
-			}
-			_ = writeResponsesWSMessage(conn, buildResponseFailedEvent(http.StatusServiceUnavailable, apiErr.Message))
+			statusCode, finalErr := responsesWSFinalAccountError(lastStatusCode, lastBody, effectiveModel)
+			_ = writeResponsesWSMessage(conn, buildResponseFailedEvent(statusCode, finalErr.Message))
 			return nil
 		}
 
@@ -710,6 +706,7 @@ func (h *Handler) streamResponsesWSUpstream(
 	var pendingFirstTokenEvents [][]byte
 	wroteAnyMessage := false
 	withheldRetryableFailure := false
+	pendingResponseID := ""
 
 	defer audit.Finish()
 	readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
@@ -729,6 +726,7 @@ func (h *Handler) streamResponsesWSUpstream(
 		}
 		parsed := gjson.ParseBytes(data)
 		eventType := parsed.Get("type").String()
+		pendingResponseID = trackOpenAIResponsesContinuationSSEEvent(parsed, continuationCacheBody, sessionID, account, pendingResponseID)
 		isFirstToken := isFirstTokenEvent(eventType)
 		if !ttftRecorded && isFirstToken {
 			firstTokenMs = int(time.Since(start).Milliseconds())
@@ -739,15 +737,6 @@ func (h *Handler) streamResponsesWSUpstream(
 		}
 		if image, ok := extractImageFromOutputItemDone(data, model); ok {
 			imageLogInfo = mergeImageUsageLogInfo(imageLogInfo, imageUsageLogInfoFromImage(image))
-		}
-		if eventType == "response.created" {
-			createdID := parsed.Get("response.id").String()
-			if createdID == "" {
-				createdID = parsed.Get("response").Get("id").String()
-			}
-			if createdID != "" {
-				RegisterPendingOpenAIResponsesContinuation(createdID, gjson.GetBytes(continuationCacheBody, "previous_response_id").String(), sessionID, account)
-			}
 		}
 		if eventType == "response.completed" {
 			cacheOpenAIResponsesContinuation(continuationCacheBody, data, account, sessionID)
@@ -1122,4 +1111,15 @@ func responsesWSUpstreamAPIError(statusCode int, body []byte) *api.APIError {
 		errType = api.ErrorTypeInvalidRequest
 	}
 	return api.NewAPIError(errCode, message, errType)
+}
+
+func responsesWSFinalAccountError(lastStatusCode int, lastBody []byte, effectiveModel string) (int, *api.APIError) {
+	if lastStatusCode > 0 && len(lastBody) > 0 {
+		return lastStatusCode, responsesWSUpstreamAPIError(lastStatusCode, lastBody)
+	}
+	return http.StatusServiceUnavailable, api.NewAPIError(
+		api.ErrCodeServiceUnavailable,
+		noAvailableAccountMessage(effectiveModel),
+		api.ErrorTypeServer,
+	)
 }

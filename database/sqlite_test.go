@@ -411,13 +411,14 @@ func TestUsageErrorSummaryAndFilters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetChartAggregation 返回错误: %v", err)
 	}
-	var chart4xx, chart5xx int64
+	var chart4xx, chart5xx, chartRetry5xx int64
 	for _, point := range charts.Timeline {
 		chart4xx += point.Errors4xx
 		chart5xx += point.Errors5xx
+		chartRetry5xx += point.RetryErrors5xx
 	}
-	if chart4xx != 1 || chart5xx != 0 {
-		t.Fatalf("chart errors = 4xx:%d 5xx:%d, want terminal-only 1/0", chart4xx, chart5xx)
+	if chart4xx != 1 || chart5xx != 0 || chartRetry5xx != 1 {
+		t.Fatalf("chart errors = terminal 4xx:%d 5xx:%d retry 5xx:%d, want 1/0/1", chart4xx, chart5xx, chartRetry5xx)
 	}
 
 	filter.StatusFamily = "5xx"

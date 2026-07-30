@@ -116,6 +116,37 @@ func (db *DB) GetLatestResponseBySessionID(ctx context.Context, sessionID string
 	return row, err == nil, err
 }
 
+func (db *DB) GetLatestReplayableResponseBySessionID(ctx context.Context, sessionID string) (ResponsesContinuationRow, bool, error) {
+	if db == nil || db.conn == nil || strings.TrimSpace(sessionID) == "" {
+		return ResponsesContinuationRow{}, false, nil
+	}
+	query := `
+		SELECT response_id, parent_id, session_id, account_id, base_url, input_json, output_json,
+			replayable, created_at, accessed_at, size_bytes
+		FROM responses_continuity
+		WHERE session_id = $1 AND replayable = TRUE
+		ORDER BY accessed_at DESC, created_at DESC
+		LIMIT 1`
+	if db.isSQLite() {
+		query = `
+			SELECT response_id, parent_id, session_id, account_id, base_url, input_json, output_json,
+				replayable, created_at, accessed_at, size_bytes
+			FROM responses_continuity
+			WHERE session_id = ? AND replayable = 1
+			ORDER BY accessed_at DESC, created_at DESC
+			LIMIT 1`
+	}
+	var row ResponsesContinuationRow
+	err := db.conn.QueryRowContext(ctx, query, sessionID).Scan(
+		&row.ResponseID, &row.ParentID, &row.SessionID, &row.AccountID, &row.BaseURL, &row.InputJSON,
+		&row.OutputJSON, &row.Replayable, &row.CreatedAt, &row.AccessedAt, &row.SizeBytes,
+	)
+	if err == sql.ErrNoRows {
+		return ResponsesContinuationRow{}, false, nil
+	}
+	return row, err == nil, err
+}
+
 func (db *DB) TouchResponsesContinuations(ctx context.Context, responseIDs []string, accessedAt time.Time) error {
 	if db == nil || db.conn == nil || len(responseIDs) == 0 {
 		return nil

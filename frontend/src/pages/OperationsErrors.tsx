@@ -20,11 +20,14 @@ import OpsTabs from '../components/OpsTabs'
 import PageHeader from '../components/PageHeader'
 import Pagination from '../components/Pagination'
 import StateShell from '../components/StateShell'
+import ColumnSettingsDropdown from '../components/ColumnSettingsDropdown'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useVisiblePolling } from '../hooks/useVisiblePolling'
 import { useToast } from '../hooks/useToast'
 import { DEFAULT_PAGE_SIZE_OPTIONS, usePersistedPageSize } from '../hooks/usePersistedPageSize'
+import { usePersistedTableColumns } from '../hooks/usePersistedTableColumns'
 import { getTimeRangeISO, type TimeRangeKey } from '../lib/timeRange'
+import type { TableColumnDefinition } from '../lib/tableColumns'
 import { formatAccountIdentity } from '../lib/utils'
 import { formatBeijingTime } from '../utils/time'
 import type { APIKeyRow, OpsErrorSummary, UsageLog } from '../types'
@@ -56,6 +59,21 @@ import {
 const ERROR_TIME_RANGES: TimeRangeKey[] = ['1h', '6h', '24h', '7d', '30d']
 const pageSizeOptions = DEFAULT_PAGE_SIZE_OPTIONS
 
+type OpsErrorTableColumn = 'time' | 'status' | 'errorKind' | 'model' | 'endpoint' | 'account' | 'apiKey' | 'duration' | 'errorSummary' | 'actions'
+
+const OPS_ERROR_COLUMN_DEFINITIONS: readonly TableColumnDefinition<OpsErrorTableColumn>[] = [
+  { key: 'time', labelKey: 'usage.tableTime' },
+  { key: 'status', labelKey: 'usage.tableStatus' },
+  { key: 'errorKind', labelKey: 'opsErrors.errorKind' },
+  { key: 'model', labelKey: 'usage.tableModel' },
+  { key: 'endpoint', labelKey: 'usage.tableEndpoint' },
+  { key: 'account', labelKey: 'usage.tableAccount' },
+  { key: 'apiKey', labelKey: 'usage.tableApiKey' },
+  { key: 'duration', labelKey: 'usage.tableDuration' },
+  { key: 'errorSummary', labelKey: 'opsErrors.errorSummary' },
+  { key: 'actions', labelKey: 'common.actions', hideable: false },
+]
+
 const errorTableHeadClass = 'text-[12px] font-semibold'
 const errorTableTextClass = 'text-[14px]'
 const errorTableMonoClass = 'font-geist-mono text-[13px] tabular-nums'
@@ -84,6 +102,11 @@ export default function OperationsErrors() {
   const [exporting, setExporting] = useState(false)
   const [selectedLog, setSelectedLog] = useState<UsageLog | null>(null)
   const searchTimer = useRef<ReturnType<typeof setTimeout>>(null)
+  const {
+    preferences: columnPreferences,
+    setPreferences: setColumnPreferences,
+    visibleColumns,
+  } = usePersistedTableColumns('codex2api:ops-errors:columns', OPS_ERROR_COLUMN_DEFINITIONS)
 
   const handleSearchChange = useCallback((value: string) => {
     setSearchInput(value)
@@ -241,6 +264,27 @@ export default function OperationsErrors() {
       showToast(t('opsErrors.copyFailed'), 'error')
     }
   }
+
+  const errorCellRenderers: Record<OpsErrorTableColumn, (log: UsageLog) => ReactNode> = {
+    time: (log) => <TableCell key="time" className={`${errorTableMonoClass} text-muted-foreground`}>{formatBeijingTime(log.created_at)}</TableCell>,
+    status: (log) => <TableCell key="status"><Badge variant="outline" className={`text-[13px] ${getStatusBadgeClassName(log.status_code)}`}>{log.status_code}</Badge></TableCell>,
+    errorKind: (log) => <TableCell key="errorKind"><Badge variant="outline" className="border-transparent bg-slate-500/10 text-slate-600 dark:bg-slate-500/20 dark:text-slate-300">{log.upstream_error_kind || classifyStatus(log.status_code)}</Badge></TableCell>,
+    model: (log) => (
+      <TableCell key="model">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Badge variant="outline" className="text-[13px]">{log.model || '-'}</Badge>
+          {log.effective_model && log.effective_model !== log.model && <Badge variant="outline" className="border-transparent bg-blue-500/10 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400">{log.effective_model}</Badge>}
+        </div>
+      </TableCell>
+    ),
+    endpoint: (log) => <TableCell key="endpoint"><div className={`${errorTableMonoClass} max-w-[240px] truncate text-muted-foreground`} title={formatEndpoint(log)}>{formatEndpoint(log)}</div></TableCell>,
+    account: (log) => <TableCell key="account" className={`${errorTableTextClass} text-muted-foreground`}>{formatAccountLabel(log)}</TableCell>,
+    apiKey: (log) => <TableCell key="apiKey" className={`${errorTableTextClass} text-muted-foreground`}><span className="block max-w-[160px] truncate" title={formatAPIKeyLabel(log)}>{formatAPIKeyLabel(log) || t('usage.unknownApiKey')}</span></TableCell>,
+    duration: (log) => <TableCell key="duration"><span className={`${errorTableMonoClass} ${log.duration_ms > 30000 ? 'text-red-500' : log.duration_ms > 10000 ? 'text-amber-500' : 'text-muted-foreground'}`}>{formatDuration(log.duration_ms)}</span></TableCell>,
+    errorSummary: (log) => <TableCell key="errorSummary" className="max-w-[360px] whitespace-normal"><div className="line-clamp-2 text-[13px] leading-relaxed text-muted-foreground" title={log.error_message || ''}>{log.error_message || t('opsErrors.noErrorMessage')}</div></TableCell>,
+    actions: (log) => <TableCell key="actions"><Button variant="outline" size="xs" onClick={() => setSelectedLog(log)}>{t('opsErrors.details')}</Button></TableCell>,
+  }
+  const renderErrorCell = (column: OpsErrorTableColumn, log: UsageLog) => errorCellRenderers[column](log)
 
   return (
     <StateShell
@@ -437,9 +481,14 @@ export default function OperationsErrors() {
                   {t('usage.clearFilters')}
                 </button>
               )}
-              <span className="ml-auto text-xs text-muted-foreground max-sm:ml-0">
-                {t('usage.recordsCount', { count: data.total })}
-              </span>
+              <div className="ml-auto flex shrink-0 items-center gap-3 max-sm:ml-0">
+                <span className="text-xs text-muted-foreground">{t('usage.recordsCount', { count: data.total })}</span>
+                <ColumnSettingsDropdown
+                  definitions={OPS_ERROR_COLUMN_DEFINITIONS}
+                  preferences={columnPreferences}
+                  onChange={setColumnPreferences}
+                />
+              </div>
             </div>
 
             <StateShell
@@ -452,70 +501,15 @@ export default function OperationsErrors() {
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead className={errorTableHeadClass}>{t('usage.tableTime')}</TableHead>
-                      <TableHead className={errorTableHeadClass}>{t('usage.tableStatus')}</TableHead>
-                      <TableHead className={errorTableHeadClass}>{t('opsErrors.errorKind')}</TableHead>
-                      <TableHead className={errorTableHeadClass}>{t('usage.tableModel')}</TableHead>
-                      <TableHead className={errorTableHeadClass}>{t('usage.tableEndpoint')}</TableHead>
-                      <TableHead className={errorTableHeadClass}>{t('usage.tableAccount')}</TableHead>
-                      <TableHead className={errorTableHeadClass}>{t('usage.tableApiKey')}</TableHead>
-                      <TableHead className={errorTableHeadClass}>{t('usage.tableDuration')}</TableHead>
-                      <TableHead className={errorTableHeadClass}>{t('opsErrors.errorSummary')}</TableHead>
-                      <TableHead className={errorTableHeadClass}>{t('common.actions')}</TableHead>
+                      {visibleColumns.map((column) => (
+                        <TableHead key={column.key} className={errorTableHeadClass}>{t(column.labelKey)}</TableHead>
+                      ))}
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {data.logs.map((log) => (
                       <TableRow key={log.id}>
-                        <TableCell className={`${errorTableMonoClass} text-muted-foreground`}>{formatBeijingTime(log.created_at)}</TableCell>
-                        <TableCell>
-                          <Badge variant="outline" className={`text-[13px] ${getStatusBadgeClassName(log.status_code)}`}>
-                            {log.status_code}
-                          </Badge>
-                        </TableCell>
-                        <TableCell>
-                          <Badge variant="outline" className="border-transparent bg-slate-500/10 text-slate-600 dark:bg-slate-500/20 dark:text-slate-300">
-                            {log.upstream_error_kind || classifyStatus(log.status_code)}
-                          </Badge>
-                        </TableCell>
-                        <TableCell>
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <Badge variant="outline" className="text-[13px]">{log.model || '-'}</Badge>
-                            {log.effective_model && log.effective_model !== log.model && (
-                              <Badge variant="outline" className="border-transparent bg-blue-500/10 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400">
-                                {log.effective_model}
-                              </Badge>
-                            )}
-                          </div>
-                        </TableCell>
-                        <TableCell>
-                          <div className={`${errorTableMonoClass} max-w-[240px] truncate text-muted-foreground`} title={formatEndpoint(log)}>
-                            {formatEndpoint(log)}
-                          </div>
-                        </TableCell>
-                        <TableCell className={`${errorTableTextClass} text-muted-foreground`}>
-                          {formatAccountLabel(log)}
-                        </TableCell>
-                        <TableCell className={`${errorTableTextClass} text-muted-foreground`}>
-                          <span className="block max-w-[160px] truncate" title={formatAPIKeyLabel(log)}>
-                            {formatAPIKeyLabel(log) || t('usage.unknownApiKey')}
-                          </span>
-                        </TableCell>
-                        <TableCell>
-                          <span className={`${errorTableMonoClass} ${log.duration_ms > 30000 ? 'text-red-500' : log.duration_ms > 10000 ? 'text-amber-500' : 'text-muted-foreground'}`}>
-                            {formatDuration(log.duration_ms)}
-                          </span>
-                        </TableCell>
-                        <TableCell className="max-w-[360px] whitespace-normal">
-                          <div className="line-clamp-2 text-[13px] leading-relaxed text-muted-foreground" title={log.error_message || ''}>
-                            {log.error_message || t('opsErrors.noErrorMessage')}
-                          </div>
-                        </TableCell>
-                        <TableCell>
-                          <Button variant="outline" size="xs" onClick={() => setSelectedLog(log)}>
-                            {t('opsErrors.details')}
-                          </Button>
-                        </TableCell>
+                        {visibleColumns.map((column) => renderErrorCell(column.key, log))}
                       </TableRow>
                     ))}
                   </TableBody>

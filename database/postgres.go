@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -963,6 +964,7 @@ func (db *DB) migrate(ctx context.Context) error {
 			CREATE INDEX IF NOT EXISTS idx_responses_continuity_accessed_at ON responses_continuity(accessed_at);
 			CREATE INDEX IF NOT EXISTS idx_responses_continuity_parent_id ON responses_continuity(parent_id);
 			CREATE INDEX IF NOT EXISTS idx_responses_continuity_session_id ON responses_continuity(session_id);
+			CREATE INDEX IF NOT EXISTS idx_responses_continuity_session_replayable_accessed ON responses_continuity(session_id, replayable, accessed_at DESC, created_at DESC);
 			CREATE INDEX IF NOT EXISTS idx_security_captures_expires_at ON security_captures(expires_at);
 
 			CREATE TABLE IF NOT EXISTS model_registry (
@@ -2848,6 +2850,7 @@ type ChartTimelinePoint struct {
 	CachedTokens    int64   `json:"cached_tokens"`
 	Errors4xx       int64   `json:"errors_4xx"`
 	Errors5xx       int64   `json:"errors_5xx"`
+	RetryErrors5xx  int64   `json:"retry_errors_5xx"`
 }
 
 // ChartModelPoint 模型排行聚合点
@@ -2916,6 +2919,7 @@ func (db *DB) GetChartAggregation(ctx context.Context, start, end time.Time, buc
 		COALESCE(SUM(cached_tokens), 0)       AS cached_tokens,
 		COALESCE(SUM(CASE WHEN status_code >= 400 AND status_code < 500 THEN 1 ELSE 0 END), 0) AS errors_4xx,
 		COALESCE(SUM(CASE WHEN status_code >= 500 AND status_code < 600 THEN 1 ELSE 0 END), 0) AS errors_5xx,
+		0::BIGINT AS retry_errors_5xx,
 		COALESCE(SUM(CASE WHEN status_code = 200 AND first_token_ms > 0 THEN first_token_ms ELSE 0 END), 0) AS first_token_ms_sum,
 		COALESCE(SUM(CASE WHEN status_code = 200 AND first_token_ms > 0 THEN 1 ELSE 0 END), 0) AS first_token_samples,
 		COALESCE(SUM(CASE WHEN status_code = 200 AND duration_ms > 0 THEN duration_ms ELSE 0 END), 0) AS duration_ms_sum,
@@ -2941,7 +2945,7 @@ func (db *DB) GetChartAggregation(ctx context.Context, start, end time.Time, buc
 		var bucketDurationMsSum, bucketDurationSamples int64
 		if err := rows.Scan(
 			&p.Bucket, &p.Requests, &p.AvgLatency, &p.InputTokens, &p.OutputTokens,
-			&p.ReasoningTokens, &p.CachedTokens, &p.Errors4xx, &p.Errors5xx,
+			&p.ReasoningTokens, &p.CachedTokens, &p.Errors4xx, &p.Errors5xx, &p.RetryErrors5xx,
 			&bucketFirstTokenMsSum, &bucketFirstTokenSamples,
 			&bucketDurationMsSum, &bucketDurationSamples,
 		); err != nil {
@@ -2956,9 +2960,55 @@ func (db *DB) GetChartAggregation(ctx context.Context, start, end time.Time, buc
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+
+	retryQuery := `
+	SELECT
+		TO_CHAR(
+			date_trunc('minute', created_at)
+			- (EXTRACT(MINUTE FROM created_at)::int % $3) * INTERVAL '1 minute',
+			'YYYY-MM-DD"T"HH24:MI:SS'
+		) AS bucket,
+		COUNT(*) AS retry_errors_5xx
+	FROM usage_logs
+	WHERE created_at >= $1 AND created_at <= $2
+	  AND status_code >= 500 AND status_code < 600
+	  AND COALESCE(is_retry_attempt, false) = true
+	GROUP BY 1`
+	retryRows, err := db.conn.QueryContext(ctx, retryQuery, start, end, bucketMinutes)
+	if err != nil {
+		return nil, err
+	}
+	defer retryRows.Close()
+
+	retryCounts := make(map[string]int64)
+	for retryRows.Next() {
+		var bucket string
+		var count int64
+		if err := retryRows.Scan(&bucket, &count); err != nil {
+			return nil, err
+		}
+		retryCounts[bucket] = count
+	}
+	if err := retryRows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range result.Timeline {
+		result.Timeline[i].RetryErrors5xx = retryCounts[result.Timeline[i].Bucket]
+		delete(retryCounts, result.Timeline[i].Bucket)
+	}
+	for bucket, count := range retryCounts {
+		result.Timeline = append(result.Timeline, ChartTimelinePoint{
+			Bucket:         bucket,
+			RetryErrors5xx: count,
+		})
+	}
+	sort.Slice(result.Timeline, func(i, j int) bool {
+		return result.Timeline[i].Bucket < result.Timeline[j].Bucket
+	})
 	if result.Timeline == nil {
 		result.Timeline = []ChartTimelinePoint{}
 	}
+
 	if firstTokenSamples > 0 {
 		result.AvgFirstTokenMs = float64(firstTokenMsSum) / float64(firstTokenSamples)
 	}

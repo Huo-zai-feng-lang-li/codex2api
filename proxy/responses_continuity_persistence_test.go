@@ -48,6 +48,10 @@ func (blockingResponsesContinuityPersistence) GetLatestResponseBySessionID(conte
 	return database.ResponsesContinuationRow{}, false, nil
 }
 
+func (blockingResponsesContinuityPersistence) GetLatestReplayableResponseBySessionID(context.Context, string) (database.ResponsesContinuationRow, bool, error) {
+	return database.ResponsesContinuationRow{}, false, nil
+}
+
 func (blockingResponsesContinuityPersistence) TouchResponsesContinuations(context.Context, []string, time.Time) error {
 	return nil
 }
@@ -69,6 +73,10 @@ func (*controlledCleanupResponsesContinuityPersistence) GetResponsesContinuation
 }
 
 func (*controlledCleanupResponsesContinuityPersistence) GetLatestResponseBySessionID(context.Context, string) (database.ResponsesContinuationRow, bool, error) {
+	return database.ResponsesContinuationRow{}, false, nil
+}
+
+func (*controlledCleanupResponsesContinuityPersistence) GetLatestReplayableResponseBySessionID(context.Context, string) (database.ResponsesContinuationRow, bool, error) {
 	return database.ResponsesContinuationRow{}, false, nil
 }
 
@@ -136,6 +144,46 @@ func TestOpenAIResponsesContinuityRestoresFromPersistence(t *testing.T) {
 	entry, ok := second.get("resp_root")
 	if !ok || entry.accountID != 7 || entry.baseURL != "https://relay.example.com" {
 		t.Fatalf("restored owner = %+v, ok=%v", entry, ok)
+	}
+}
+
+func TestOpenAIResponsesContinuityRestoresReplayableHeadBehindPendingRows(t *testing.T) {
+	ctx := context.Background()
+	db, err := database.New("sqlite", filepath.Join(t.TempDir(), "codex2api.db"))
+	if err != nil {
+		t.Fatalf("database.New: %v", err)
+	}
+	defer db.Close()
+
+	limits := openAIResponsesContinuityLimits{
+		ttl: time.Hour, maxEntries: 20, maxItems: 20,
+		maxItemBytes: 1 << 20, maxBytes: 2 << 20,
+	}
+	first := newOpenAIResponsesContinuityRegistry(limits)
+	if err := first.setPersistence(ctx, db); err != nil {
+		t.Fatalf("setPersistence(first): %v", err)
+	}
+	first.store("resp_replayable", "", "session-replayable", openAIResponsesContinuation{
+		accountID: 7,
+		input: []json.RawMessage{
+			json.RawMessage(`{"type":"message","role":"user","content":"remember"}`),
+		},
+		output: []json.RawMessage{
+			json.RawMessage(`{"type":"function_call","call_id":"call_restore","name":"lookup","arguments":"{}"}`),
+		},
+	})
+	first.registerPending("resp_empty_pending", "", "session-replayable", 7, "https://relay.example.com")
+
+	second := newOpenAIResponsesContinuityRegistry(limits)
+	if err := second.setPersistence(ctx, db); err != nil {
+		t.Fatalf("setPersistence(second): %v", err)
+	}
+	if got := second.getLatestReplayableResponseID("session-replayable"); got != "resp_replayable" {
+		t.Fatalf("replayable response id = %q, want resp_replayable", got)
+	}
+	history, ok := second.materialize("resp_replayable")
+	if !ok || len(history) != 2 {
+		t.Fatalf("restored replayable history = %s, ok=%v", mustMarshalRawMessages(history), ok)
 	}
 }
 

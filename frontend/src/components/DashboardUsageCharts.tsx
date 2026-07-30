@@ -41,6 +41,7 @@ interface TimelinePoint {
   cachedTokens: number
   errors4xx: number
   errors5xx: number
+  retryErrors5xx: number
 }
 
 interface ModelRankingPoint {
@@ -99,6 +100,7 @@ export default function DashboardUsageCharts({
         cachedTokens: point.cached_tokens,
         errors4xx: point.errors_4xx,
         errors5xx: point.errors_5xx,
+        retryErrors5xx: point.retry_errors_5xx,
       }
     })
 
@@ -231,6 +233,16 @@ export default function DashboardUsageCharts({
                   name={t('dashboard.series4xxErrors')}
                   stroke="var(--color-destructive)"
                   strokeWidth={2}
+                  dot={false}
+                  activeDot={{ r: 4 }}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="retryErrors5xx"
+                  name={t('dashboard.seriesRetry5xxErrors')}
+                  stroke="hsl(12 85% 62%)"
+                  strokeWidth={2}
+                  strokeDasharray="5 4"
                   dot={false}
                   activeDot={{ r: 4 }}
                 />

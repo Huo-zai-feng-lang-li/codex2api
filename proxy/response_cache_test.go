@@ -63,6 +63,27 @@ func TestExpandPreviousResponseUsesCachedCodexNativeToolContext(t *testing.T) {
 	}
 }
 
+func TestExpandPreviousResponseNormalizesOutputToCachedCallType(t *testing.T) {
+	resetResponseCacheForTest()
+	cacheCompletedResponse(
+		[]byte(`[{"type":"message","role":"user","content":"run tool"}]`),
+		[]byte(`{"type":"response.completed","response":{"id":"resp_normalize","output":[{"type":"function_call","call_id":"call_exec","name":"exec","arguments":"{}"}]}}`),
+	)
+	body := []byte(`{"model":"gpt-5.4","previous_response_id":"resp_normalize","input":[{"type":"custom_tool_call_output","call_id":"call_exec","output":"ok"}]}`)
+
+	got, prevID := expandPreviousResponse(body)
+	if prevID != "resp_normalize" {
+		t.Fatalf("prevID = %q, want resp_normalize", prevID)
+	}
+	input := gjson.GetBytes(got, "input").Array()
+	if len(input) != 3 {
+		t.Fatalf("expanded input count = %d, want 3; body=%s", len(input), got)
+	}
+	if typ := input[2].Get("type").String(); typ != "function_call_output" {
+		t.Fatalf("normalized output type = %q, want function_call_output; body=%s", typ, got)
+	}
+}
+
 func TestExpandPreviousResponseUsesRuntimeCacheAfterLocalMiss(t *testing.T) {
 	resetResponseCacheForTest()
 	tc := cache.NewMemory(10)

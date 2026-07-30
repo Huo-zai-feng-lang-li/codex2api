@@ -229,6 +229,11 @@ func TestContinuationRegistryNeverReplaysAfterParentEviction(t *testing.T) {
 		maxItemBytes: 1 << 20,
 		maxBytes:     1 << 20,
 	})
+	now := time.Unix(0, 0)
+	registry.now = func() time.Time {
+		now = now.Add(time.Nanosecond)
+		return now
+	}
 	registry.store("root", "", "", continuationDelta(rawMessages(`{"content":"root"}`), rawMessages(`{"content":"ROOT"}`)))
 	registry.store("child", "root", "", continuationDelta(rawMessages(`{"content":"child"}`), rawMessages(`{"content":"CHILD"}`)))
 	registry.store("other", "", "", continuationDelta(rawMessages(`{"content":"other"}`), rawMessages(`{"content":"OTHER"}`)))

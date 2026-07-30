@@ -200,6 +200,11 @@ func expandPreviousResponse(codexBody []byte) ([]byte, string) {
 			return true
 		})
 	}
+	merged, ok := normalizeMatchedOpenAIResponsesToolOutputs(merged)
+	if !ok {
+		log.Printf("展开 previous_response_id=%s 失败：工具调用上下文不完整", prevID)
+		return codexBody, prevID
+	}
 
 	mergedJSON, err := json.Marshal(merged)
 	if err != nil {

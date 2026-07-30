@@ -5,6 +5,10 @@ import type { UsageStats } from '../types'
 import { Card, CardContent } from '@/components/ui/card'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import AnimatedMetricValue from './AnimatedMetricValue'
+import {
+  resolveMoneyAnimationStep,
+  resolveTokenAnimationStep,
+} from '../lib/metricAnimation'
 
 interface UsageStatsSummaryProps {
   stats: UsageStats
@@ -89,6 +93,7 @@ export default function UsageStatsSummary({
                     id="dashboard-usage:tpm"
                     value={stats.tpm}
                     format={(value) => formatTokenCount(value ?? 0, locale, tokenCountUnit)}
+                    animationStep={resolveTokenAnimationStep(stats.tpm, locale)}
                   />
                 </>
               )}
@@ -117,6 +122,7 @@ export default function UsageStatsSummary({
                   id="dashboard-usage:total-tokens"
                   value={stats.total_tokens}
                   format={(value) => formatTokenCount(value ?? 0, locale, tokenCountUnit)}
+                  animationStep={resolveTokenAnimationStep(stats.total_tokens, locale)}
                 />
               }
               title={formatInteger(stats.total_tokens, locale)}
@@ -130,6 +136,7 @@ export default function UsageStatsSummary({
                     id="dashboard-usage:today-user-billed"
                     value={stats.today_user_billed}
                     format={(value) => formatMoney(value ?? 0)}
+                    animationStep={resolveMoneyAnimationStep(stats.today_user_billed)}
                   />
                   {' / '}
                   {t('dashboard.totalCostShort')}: {' '}
@@ -137,6 +144,7 @@ export default function UsageStatsSummary({
                     id="dashboard-usage:total-user-billed"
                     value={stats.total_user_billed}
                     format={(value) => formatMoney(value ?? 0)}
+                    animationStep={resolveMoneyAnimationStep(stats.total_user_billed)}
                   />
                 </>
               )}

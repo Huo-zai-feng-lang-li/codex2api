@@ -173,6 +173,87 @@ func TestNormalizeResponsesWebSocketClientPayload(t *testing.T) {
 	})
 }
 
+func TestResponsesWSFinalAccountErrorPreservesLastUpstreamFailure(t *testing.T) {
+	status, apiErr := responsesWSFinalAccountError(
+		http.StatusBadGateway,
+		[]byte(`{"error":{"type":"server_error","message":"origin unavailable"}}`),
+		"gpt-5.4",
+	)
+	if status != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", status)
+	}
+	if apiErr == nil || !strings.Contains(apiErr.Message, "origin unavailable") {
+		t.Fatalf("last upstream error was lost: %#v", apiErr)
+	}
+}
+
+func TestResponsesWSFinalAccountErrorUsesNoAvailableBeforeAnyAttempt(t *testing.T) {
+	status, apiErr := responsesWSFinalAccountError(0, nil, "gpt-5.4")
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", status)
+	}
+	if apiErr == nil || !strings.Contains(apiErr.Message, "无可用账号") {
+		t.Fatalf("missing no-available error: %#v", apiErr)
+	}
+}
+
+func TestBuildContinuationContextIncompleteEvent(t *testing.T) {
+	event := buildContinuationContextIncompleteEvent()
+	if eventType := gjson.GetBytes(event, "type").String(); eventType != "response.failed" {
+		t.Fatalf("event type = %q, want response.failed; body=%s", eventType, event)
+	}
+	if status := gjson.GetBytes(event, "response.status_code").Int(); status != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", status, event)
+	}
+	if code := gjson.GetBytes(event, "response.error.code").String(); code != "continuation_context_incomplete" {
+		t.Fatalf("error code = %q, want continuation_context_incomplete; body=%s", code, event)
+	}
+	if strings.Contains(string(event), "no_available_account") || strings.Contains(string(event), "无可用账号") {
+		t.Fatalf("incomplete continuation was misreported as account exhaustion: %s", event)
+	}
+}
+
+func TestResponsesWebSocketOwnerUnavailableReportsIncompleteContinuation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetOpenAIResponsesContinuityForTest()
+
+	owner := &auth.Account{DBID: 81, UpstreamType: auth.UpstreamOpenAIResponses, BaseURL: "https://owner.example", APIKey: "owner", Models: []string{"gpt-5.4"}}
+	RegisterPendingOpenAIResponsesContinuation("resp_ws_owner_missing", "", "", owner)
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1, TestModel: "gpt-5.4", MaxRetries: 0, AffinityMode: auth.AffinityModeOff})
+	store.AddAccount(&auth.Account{DBID: 82, UpstreamType: auth.UpstreamOpenAIResponses, BaseURL: "https://fallback.example", APIKey: "fallback", Models: []string{"gpt-5.4"}})
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+	router := gin.New()
+	handler.RegisterRoutes(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		if resp != nil {
+			t.Fatalf("dial websocket failed: %v status=%d", err, resp.StatusCode)
+		}
+		t.Fatalf("dial websocket failed: %v", err)
+	}
+	defer conn.Close()
+
+	request := []byte(`{"model":"gpt-5.4","previous_response_id":"resp_ws_owner_missing","input":[{"type":"custom_tool_call_output","call_id":"call_missing","output":"x"}]}`)
+	if err := conn.WriteMessage(websocket.TextMessage, request); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, event, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read failure event: %v", err)
+	}
+	if status := gjson.GetBytes(event, "response.status_code").Int(); status != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", status, event)
+	}
+	if code := gjson.GetBytes(event, "response.error.code").String(); code != "continuation_context_incomplete" {
+		t.Fatalf("error code = %q, want continuation_context_incomplete; body=%s", code, event)
+	}
+}
+
 func TestResponsesWebSocketForwardsResponsesEvents(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

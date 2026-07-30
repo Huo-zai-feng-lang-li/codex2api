@@ -84,6 +84,7 @@ func (h *Handler) TestConnection(c *gin.Context) {
 		resp, reqErr = proxy.ExecuteRequest(c.Request.Context(), account, payload, "", h.store.ResolveProxyForAccount(account), "", nil, nil)
 	}
 	if reqErr != nil {
+		h.store.MarkCooldownWithError(account, 5*time.Minute, "cooldown", "请求失败: "+reqErr.Error())
 		sendTestEvent(c, testEvent{Type: "error", Error: fmt.Sprintf("请求失败: %s", reqErr.Error())})
 		return
 	}
@@ -101,6 +102,8 @@ func (h *Handler) TestConnection(c *gin.Context) {
 				errMsg = account.ErrorMsg
 			}
 			account.Mu().RUnlock()
+		} else {
+			h.store.MarkCooldownWithError(account, 5*time.Minute, "cooldown", "测试失败: "+errMsg)
 		}
 		sendTestEvent(c, testEvent{Type: "error", Error: errMsg})
 		return
@@ -715,6 +718,7 @@ func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (st
 		if msg, ok := batchTestContextFailure(testCtx, err); ok {
 			if errors.Is(testCtx.Err(), context.DeadlineExceeded) {
 				h.store.ReportRequestFailure(acc, "timeout", batchTestAccountTimeout)
+				h.store.MarkCooldownWithError(acc, 5*time.Minute, "cooldown", "测试超时: "+msg)
 			}
 			return "failed", msg
 		}
@@ -727,6 +731,7 @@ func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (st
 		if msg, ok := batchTestContextFailure(testCtx, readErr); ok {
 			if errors.Is(testCtx.Err(), context.DeadlineExceeded) {
 				h.store.ReportRequestFailure(acc, "timeout", batchTestAccountTimeout)
+				h.store.MarkCooldownWithError(acc, 5*time.Minute, "cooldown", "测试超时: "+msg)
 			}
 			return "failed", msg
 		}
@@ -777,6 +782,8 @@ func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (st
 		}
 		if shouldMarkBatchTestAccountError(resp.StatusCode, body) {
 			h.store.MarkError(acc, "批量测试"+msg)
+		} else {
+			h.store.MarkCooldownWithError(acc, 5*time.Minute, "cooldown", "测试失败: "+msg)
 		}
 		return "failed", msg
 	}

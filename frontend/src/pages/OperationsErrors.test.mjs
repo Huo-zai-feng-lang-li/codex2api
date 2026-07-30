@@ -75,3 +75,11 @@ test('keeps every error attempt returned by the detailed-list API', () => {
   assert.match(source, /logs:\s*pageResult\.logs\s*\?\?\s*\[\]/)
   assert.match(source, /data\.logs\.map\(\(log\)\s*=>/)
 })
+
+test('drives error table headers and cells from persisted ordered columns', () => {
+  assert.match(source, /usePersistedTableColumns\('codex2api:ops-errors:columns'/)
+  assert.match(source, /<ColumnSettingsDropdown/)
+  assert.match(source, /visibleColumns\.map\(\(column\)\s*=>\s*\(/)
+  assert.match(source, /visibleColumns\.map\(\(column\)\s*=>\s*renderErrorCell\(column\.key, log\)\)/)
+  assert.match(source, /key:\s*'actions'.*hideable:\s*false/s)
+})

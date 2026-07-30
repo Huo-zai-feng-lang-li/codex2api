@@ -804,6 +804,19 @@ func shouldRetryResponseFailedBeforeFirstMessage(payload []byte) bool {
 }
 
 func buildResponseFailedEvent(statusCode int, message string) []byte {
+	return buildResponseFailedErrorEvent(statusCode, message, ErrorCodeUpstreamStreamBreak, ErrorTypeUpstreamError)
+}
+
+func buildContinuationContextIncompleteEvent() []byte {
+	return buildResponseFailedErrorEvent(
+		http.StatusConflict,
+		continuationContextIncompleteMessage,
+		"continuation_context_incomplete",
+		"invalid_request_error",
+	)
+}
+
+func buildResponseFailedErrorEvent(statusCode int, message, code, errorType string) []byte {
 	if statusCode < 400 || statusCode > 599 {
 		statusCode = http.StatusBadGateway
 	}
@@ -817,9 +830,9 @@ func buildResponseFailedEvent(statusCode int, message string) []byte {
 			"status":      "failed",
 			"status_code": statusCode,
 			"error": map[string]any{
-				"code":    ErrorCodeUpstreamStreamBreak,
+				"code":    code,
 				"message": message,
-				"type":    ErrorTypeUpstreamError,
+				"type":    errorType,
 			},
 		},
 	}
@@ -1274,6 +1287,18 @@ func parseUsageLimitDetails(body []byte) (usageLimitDetails, bool) {
 }
 
 // Responses 处理 /v1/responses 请求（原生透传，增强输入验证）
+const continuationContextIncompleteMessage = "续链所需的工具调用上下文不完整，无法安全切换账号"
+
+func writeContinuationContextIncomplete(c *gin.Context) {
+	c.JSON(http.StatusConflict, gin.H{
+		"error": gin.H{
+			"message": continuationContextIncompleteMessage,
+			"type":    "invalid_request_error",
+			"code":    "continuation_context_incomplete",
+		},
+	})
+}
+
 func (h *Handler) Responses(c *gin.Context) {
 	// 1. 读取请求体
 	rawBody, err := api.ReadRawBody(c)
@@ -1359,6 +1384,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	rateLimitRetries := 0
 	var lastStatusCode int
 	var lastBody []byte
+	var lastRequestErr error
 	retryExclusions := newRetryAccountExclusions()
 	invalidEncryptedContentRetried := false
 	continuationFallbackRetried := false
@@ -1383,9 +1409,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		}
 		continuationFallbackLease = lease
 		continuationFallbackRetried = true
-		if reason != "third_party_stateless_continuation" {
-			continuationOwnerBound = false
-		}
+		continuationOwnerBound = false
 		rawBody = fallbackBody
 		codexBody, expandedInputRaw = PrepareResponsesBody(rawBody)
 		openAIResponsesBody.Reset(rawBody)
@@ -1424,6 +1448,9 @@ func (h *Handler) Responses(c *gin.Context) {
 					continue
 				case continuationFallbackRejected:
 					return
+				case continuationFallbackUnavailable:
+					writeContinuationContextIncomplete(c)
+					return
 				}
 			}
 			if attemptedUpstream && c.Request.Context().Err() != nil {
@@ -1440,8 +1467,12 @@ func (h *Handler) Responses(c *gin.Context) {
 				})
 				return
 			}
-			if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
+			if lastStatusCode > 0 && len(lastBody) > 0 {
 				h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
+				return
+			}
+			if lastRequestErr != nil {
+				ErrorToGinResponse(c, lastRequestErr)
 				return
 			}
 			c.JSON(http.StatusServiceUnavailable, noAvailableAccountError(effectiveModel))
@@ -1536,12 +1567,19 @@ func (h *Handler) Responses(c *gin.Context) {
 				if continuationOwnerBound {
 					switch activateContinuationFallback("response_owner_transport_failure") {
 					case continuationFallbackActivated:
+						lastRequestErr = reqErr
+						retryExclusions.MarkHard(account.ID())
 						h.store.Release(account)
 						h.store.UnbindSessionAffinity(affinityKey, account.ID())
 						continue
 					case continuationFallbackRejected:
 						h.store.Release(account)
 						h.store.UnbindSessionAffinity(affinityKey, account.ID())
+						return
+					case continuationFallbackUnavailable:
+						h.store.Release(account)
+						h.store.UnbindSessionAffinity(affinityKey, account.ID())
+						writeContinuationContextIncomplete(c)
 						return
 					}
 				}
@@ -1582,6 +1620,7 @@ func (h *Handler) Responses(c *gin.Context) {
 
 				log.Printf("OpenAI Responses 上游请求失败 (attempt %d): %v", attempt+1, reqErr)
 				if shouldRetry {
+					lastRequestErr = reqErr
 					continue
 				}
 				ErrorToGinResponse(c, reqErr)
@@ -1595,15 +1634,43 @@ func (h *Handler) Responses(c *gin.Context) {
 				ttftGuard.Stop()
 				errBody, _ := readUpstreamErrorBody(resp)
 				resp.Body.Close()
-				if shouldReplayOpenAIResponsesContinuationAfterHTTPFailure(resp.StatusCode, preparedOpenAIResponsesBody, errBody) {
-					switch activateContinuationFallback("response_owner_http_failure") {
+				if isMissingOpenAIResponsesToolOutputError(resp.StatusCode, errBody) {
+					switch activateContinuationFallback("missing_tool_output") {
 					case continuationFallbackActivated:
 						h.store.Release(account)
 						h.store.UnbindSessionAffinity(affinityKey, account.ID())
 						continue
 					case continuationFallbackRejected:
 						h.store.Release(account)
+						return
+					case continuationFallbackUnavailable:
+						h.store.Release(account)
+						h.sendFinalUpstreamError(c, resp.StatusCode, errBody)
+						return
+					}
+				}
+				if shouldReplayOpenAIResponsesContinuationAfterHTTPFailure(resp.StatusCode, preparedOpenAIResponsesBody, errBody) {
+					switch activateContinuationFallback("response_owner_http_failure") {
+					case continuationFallbackActivated:
+						lastStatusCode = resp.StatusCode
+						lastBody = errBody
+						if !shouldFallbackOpenAIResponsesContinuation(resp.StatusCode, preparedOpenAIResponsesBody, errBody) {
+							retryExclusions.MarkHard(account.ID())
+						}
+						h.store.Release(account)
 						h.store.UnbindSessionAffinity(affinityKey, account.ID())
+						continue
+					case continuationFallbackRejected:
+						h.store.Release(account)
+						h.store.UnbindSessionAffinity(affinityKey, account.ID())
+						return
+					case continuationFallbackUnavailable:
+						if shouldFallbackOpenAIResponsesContinuation(resp.StatusCode, preparedOpenAIResponsesBody, errBody) {
+							break
+						}
+						h.store.Release(account)
+						h.store.UnbindSessionAffinity(affinityKey, account.ID())
+						writeContinuationContextIncomplete(c)
 						return
 					}
 				}
@@ -1704,6 +1771,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				streamWriter = newStreamFlushWriter(c.Writer, flusher)
 				clientGone := false
 				var pendingFirstTokenEvents bytes.Buffer
+				pendingResponseID := ""
 				readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
 					if verdict := audit.InspectResponseSSE(data); shouldBlockUpstreamGuard(verdict) {
 						blockEvent := buildUpstreamGuardBlockedEvent(verdict)
@@ -1721,15 +1789,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					}
 					parsed := gjson.ParseBytes(data)
 					eventType := parsed.Get("type").String()
-					if eventType == "response.created" {
-						createdID := parsed.Get("response.id").String()
-						if createdID == "" {
-							createdID = parsed.Get("response").Get("id").String()
-						}
-						if createdID != "" {
-							RegisterPendingOpenAIResponsesContinuation(createdID, gjson.GetBytes(continuationCacheBody, "previous_response_id").String(), sessionID, account)
-						}
-					}
+					pendingResponseID = trackOpenAIResponsesContinuationSSEEvent(parsed, continuationCacheBody, sessionID, account, pendingResponseID)
 					isFirstToken := isFirstTokenEvent(eventType)
 					if !ttftRecorded && isFirstToken {
 						firstTokenMs = int(time.Since(start).Milliseconds())
@@ -1833,6 +1893,12 @@ func (h *Handler) Responses(c *gin.Context) {
 						resp.Body.Close()
 						h.store.Release(account)
 						h.store.UnbindSessionAffinity(affinityKey, account.ID())
+						return
+					case continuationFallbackUnavailable:
+						resp.Body.Close()
+						h.store.Release(account)
+						h.store.UnbindSessionAffinity(affinityKey, account.ID())
+						writeContinuationContextIncomplete(c)
 						return
 					}
 				}
@@ -2120,6 +2186,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			// 但继续读上游直到 response.completed/failed，以拿到准确 usage。
 			clientGone := false
 			var pendingFirstTokenEvents bytes.Buffer
+			pendingResponseID := ""
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
 				if verdict := audit.InspectResponseSSE(data); shouldBlockUpstreamGuard(verdict) {
 					blockEvent := buildUpstreamGuardBlockedEvent(verdict)
@@ -2137,6 +2204,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				}
 				parsed := gjson.ParseBytes(data)
 				eventType := parsed.Get("type").String()
+				pendingResponseID = trackOpenAIResponsesContinuationSSEEvent(parsed, continuationCacheBody, sessionID, account, pendingResponseID)
 
 				// TTFT: 记录第一个 output_text.delta 事件的时间
 				isFirstToken := isFirstTokenEvent(eventType)
@@ -2144,16 +2212,6 @@ func (h *Handler) Responses(c *gin.Context) {
 					firstTokenMs = int(time.Since(start).Milliseconds())
 					ttftRecorded = true
 					ttftGuard.MarkEvent(eventType)
-				}
-
-				if eventType == "response.created" {
-					createdID := parsed.Get("response.id").String()
-					if createdID == "" {
-						createdID = parsed.Get("response").Get("id").String()
-					}
-					if createdID != "" {
-						RegisterPendingOpenAIResponsesContinuation(createdID, gjson.GetBytes(continuationCacheBody, "previous_response_id").String(), sessionID, account)
-					}
 				}
 
 				// 累计 delta 字符数
@@ -2503,7 +2561,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		if account == nil {
 			account, stickyProxyURL = h.store.WaitForSessionAvailableWithFilter(c.Request.Context(), affinityKey, 30*time.Second, apiKeyID, excludeAccounts, accountFilter)
 			if account == nil {
-				if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
+				if lastStatusCode > 0 && len(lastBody) > 0 {
 					h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
 					return
 				}
@@ -2924,7 +2982,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		}
 		account, stickyProxyURL := h.nextRetryAccountForSession(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter)
 		if account == nil {
-			if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
+			if lastStatusCode > 0 && len(lastBody) > 0 {
 				h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
 				return
 			}

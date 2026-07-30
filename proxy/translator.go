@@ -1360,6 +1360,7 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 	if _, ok := body["include"]; !ok {
 		body["include"] = []string{"reasoning.encrypted_content"}
 	}
+	normalizeStatelessReasoningReplay(body)
 
 	normalizeResponsesImageOnlyModel(body)
 	normalizeResponsesPromptCompat(body)
@@ -1508,6 +1509,7 @@ func PrepareOpenAIResponsesBody(rawBody []byte) []byte {
 	if err := json.Unmarshal(rawBody, &body); err != nil {
 		return rawBody
 	}
+	normalizeStatelessReasoningReplay(body)
 
 	if re, ok := body["reasoning_effort"].(string); ok {
 		if normalized := normalizeReasoningEffort(re); normalized != "" {
@@ -1546,6 +1548,44 @@ func PrepareOpenAIResponsesBody(rawBody []byte) []byte {
 		return rawBody
 	}
 	return result
+}
+
+func normalizeStatelessReasoningReplay(body map[string]any) {
+	store, explicit := body["store"].(bool)
+	if !explicit || store {
+		return
+	}
+
+	include, _ := body["include"].([]any)
+	hasEncryptedReasoning := false
+	for _, value := range include {
+		includeValue, ok := value.(string)
+		if ok && includeValue == "reasoning.encrypted_content" {
+			hasEncryptedReasoning = true
+			break
+		}
+	}
+	if !hasEncryptedReasoning {
+		body["include"] = append(include, "reasoning.encrypted_content")
+	}
+
+	input, ok := body["input"].([]any)
+	if !ok {
+		return
+	}
+	replayable := make([]any, 0, len(input))
+	for _, value := range input {
+		item, isItem := value.(map[string]any)
+		if !isItem || item["type"] != "reasoning" {
+			replayable = append(replayable, value)
+			continue
+		}
+		encrypted, valid := item["encrypted_content"].(string)
+		if valid && strings.TrimSpace(encrypted) != "" {
+			replayable = append(replayable, value)
+		}
+	}
+	body["input"] = replayable
 }
 
 type lazyOpenAIResponsesBody struct {

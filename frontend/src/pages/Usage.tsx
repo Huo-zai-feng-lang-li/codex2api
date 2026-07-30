@@ -8,11 +8,14 @@ import { chartInitialDimensions } from '../lib/chartDimensions'
 import PageHeader from '../components/PageHeader'
 import Pagination from '../components/Pagination'
 import StateShell from '../components/StateShell'
+import ColumnSettingsDropdown from '../components/ColumnSettingsDropdown'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useVisiblePolling } from '../hooks/useVisiblePolling'
 import { useConfirmDialog } from '../hooks/useConfirmDialog'
 import { useToast } from '../hooks/useToast'
 import { DEFAULT_PAGE_SIZE_OPTIONS, usePersistedPageSize } from '../hooks/usePersistedPageSize'
+import { usePersistedTableColumns } from '../hooks/usePersistedTableColumns'
+import type { TableColumnDefinition } from '../lib/tableColumns'
 import type { APIKeyRow, SystemSettings, UsageAPIKeyStat, UsageEndpointStat, UsageFeatureStats, UsageLog, UsageModelStat, UsageStats } from '../types'
 import { formatAccountIdentity } from '../lib/utils'
 import { formatBeijingTime } from '../utils/time'
@@ -28,7 +31,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { Activity, Box, Clock, Zap, AlertTriangle, Search, Brain, DatabaseZap, X, Image as ImageIcon, Info, CircleDollarSign, BarChart3, KeyRound, Route, SlidersHorizontal } from 'lucide-react'
+import { Activity, Box, Clock, Zap, AlertTriangle, Search, Brain, DatabaseZap, X, Image as ImageIcon, Info, CircleDollarSign, BarChart3, KeyRound, Route } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 
@@ -801,7 +804,7 @@ const modelPieShellClass = 'flex min-h-[196px] flex-col border-l border-border p
 
 type UsageTableColumn = 'status' | 'model' | 'account' | 'apiKey' | 'endpoint' | 'type' | 'token' | 'cost' | 'cached' | 'firstToken' | 'duration' | 'time'
 
-const USAGE_COLUMN_DEFINITIONS: Array<{ key: UsageTableColumn; labelKey: string }> = [
+const USAGE_COLUMN_DEFINITIONS: readonly TableColumnDefinition<UsageTableColumn>[] = [
   { key: 'status', labelKey: 'usage.tableStatus' },
   { key: 'model', labelKey: 'usage.tableModel' },
   { key: 'account', labelKey: 'usage.tableAccount' },
@@ -817,95 +820,6 @@ const USAGE_COLUMN_DEFINITIONS: Array<{ key: UsageTableColumn; labelKey: string 
 ]
 
 const USAGE_VISIBLE_COLUMNS_KEY = 'codex2api:usage:visible-columns'
-const DEFAULT_USAGE_VISIBLE_COLUMNS: Record<UsageTableColumn, boolean> = {
-  status: true,
-  model: true,
-  account: true,
-  apiKey: true,
-  endpoint: true,
-  type: true,
-  token: true,
-  cost: true,
-  cached: true,
-  firstToken: true,
-  duration: true,
-  time: true,
-}
-
-function getInitialUsageVisibleColumns(): Record<UsageTableColumn, boolean> {
-  try {
-    const stored = localStorage.getItem(USAGE_VISIBLE_COLUMNS_KEY)
-    if (stored) {
-      const parsed = JSON.parse(stored)
-      if (parsed && typeof parsed === 'object') {
-        const defaults: Record<UsageTableColumn, boolean> = { ...DEFAULT_USAGE_VISIBLE_COLUMNS }
-        for (const key of Object.keys(defaults) as UsageTableColumn[]) {
-          if (key in parsed) defaults[key] = Boolean(parsed[key])
-        }
-        return defaults
-      }
-    }
-  } catch { /* ignore */ }
-  return { ...DEFAULT_USAGE_VISIBLE_COLUMNS }
-}
-
-function persistUsageVisibleColumns(columns: Record<UsageTableColumn, boolean>) {
-  try { localStorage.setItem(USAGE_VISIBLE_COLUMNS_KEY, JSON.stringify(columns)) } catch { /* ignore */ }
-}
-
-function ColumnSettingsDropdown({
-  open,
-  columns,
-  onOpenChange,
-  onToggle,
-}: {
-  open: boolean
-  columns: Record<UsageTableColumn, boolean>
-  onOpenChange: (open: boolean) => void
-  onToggle: (key: UsageTableColumn) => void
-}) {
-  const { t } = useTranslation()
-
-  return (
-    <div className="relative">
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        onClick={() => onOpenChange(!open)}
-        aria-haspopup="menu"
-        aria-expanded={open}
-      >
-        <SlidersHorizontal className="size-3.5" />
-        {t('accounts.columnSettings', { defaultValue: 'Columns' })}
-      </Button>
-      {open ? (
-        <div
-          role="menu"
-          className="absolute right-0 z-20 mt-2 w-56 rounded-lg border border-border bg-popover p-2 text-popover-foreground shadow-lg"
-        >
-          <div className="mb-1 px-2 py-1 text-[11px] font-semibold uppercase text-muted-foreground">
-            {t('accounts.columnSettings', { defaultValue: 'Columns' })}
-          </div>
-          {USAGE_COLUMN_DEFINITIONS.map((column) => (
-            <label
-              key={column.key}
-              className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[13px] hover:bg-muted"
-            >
-              <input
-                type="checkbox"
-                className="size-3.5 rounded border-border"
-                checked={columns[column.key]}
-                onChange={() => onToggle(column.key)}
-              />
-              <span>{t(column.labelKey)}</span>
-            </label>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  )
-}
 
 export default function Usage() {
   const { t } = useTranslation()
@@ -934,8 +848,11 @@ export default function Usage() {
   const showFastFilter = true
   const pageSizeOptions = DEFAULT_PAGE_SIZE_OPTIONS
   const searchTimer = useRef<ReturnType<typeof setTimeout>>(null)
-  const [visibleColumns, setVisibleColumns] = useState<Record<UsageTableColumn, boolean>>(getInitialUsageVisibleColumns)
-  const [columnSettingsOpen, setColumnSettingsOpen] = useState(false)
+  const {
+    preferences: columnPreferences,
+    setPreferences: setColumnPreferences,
+    visibleColumns,
+  } = usePersistedTableColumns(USAGE_VISIBLE_COLUMNS_KEY, USAGE_COLUMN_DEFINITIONS)
   const [showAnalysis, setShowAnalysis] = useState(getInitialAnalysisVisibility)
 
   // 搜索防抖：输入停止 400ms 后触发查询
@@ -1039,10 +956,6 @@ export default function Usage() {
   }, 30000)
 
   useEffect(() => {
-    persistUsageVisibleColumns(visibleColumns)
-  }, [visibleColumns])
-
-  useEffect(() => {
     persistAnalysisVisibility(showAnalysis)
   }, [showAnalysis])
 
@@ -1087,6 +1000,57 @@ export default function Usage() {
     : t(`dashboard.timeRange${timeRange.toUpperCase()}`)
   const rangeRequestsLabel = t('usage.rangeRequests', { range: rangeLabel })
   const rangeCostLabel = t('usage.rangeCost', { range: rangeLabel })
+
+  const usageCellRenderers: Record<UsageTableColumn, (log: UsageLog) => ReactNode> = {
+    status: (log) => <TableCell key="status"><StatusCodeBadge log={log} /></TableCell>,
+    model: (log) => (
+          <TableCell key="model">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <Badge variant="outline" className={usageTableBadgeClass}>{log.model || '-'}</Badge>
+              {log.effective_model && log.effective_model !== log.model && (
+                <Badge variant="outline" className="border-transparent bg-blue-500/10 text-[11px] font-medium text-blue-600 dark:bg-blue-500/20 dark:text-blue-400">→ {log.effective_model}</Badge>
+              )}
+              {log.reasoning_effort && (
+                <Badge variant="outline" className={`border-transparent text-[11px] font-medium ${log.reasoning_effort === 'xhigh' || log.reasoning_effort === 'high' ? 'bg-red-500/12 text-red-600 dark:bg-red-500/20 dark:text-red-400' : log.reasoning_effort === 'medium' ? 'bg-amber-500/12 text-amber-600 dark:bg-amber-500/20 dark:text-amber-400' : 'bg-emerald-500/12 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-400'}`}>{log.reasoning_effort}</Badge>
+              )}
+              {isImageUsageLog(log) && <ImageUsageBadge log={log} />}
+              {(log.service_tier === 'fast' || log.service_tier === 'priority') && (
+                <Badge variant="outline" className="gap-0.5 border-transparent bg-blue-500/12 text-[11px] font-semibold text-blue-600 dark:bg-blue-500/20 dark:text-blue-400"><Zap className="size-3" />Fast</Badge>
+              )}
+            </div>
+          </TableCell>
+        ),
+    account: (log) => <TableCell key="account" className={`${usageTableTextClass} text-muted-foreground`}>{formatAccountIdentity(log)}</TableCell>,
+    apiKey: (log) => {
+        const label = formatUsageAPIKeyLabel(log.api_key_name, log.api_key_masked) || t('usage.unknownApiKey')
+        return <TableCell key="apiKey" className={`${usageTableTextClass} text-muted-foreground`}><span className="block max-w-[180px] truncate whitespace-nowrap font-mono text-[12px]" title={label}>{label}</span></TableCell>
+      },
+    endpoint: (log) => (
+          <TableCell key="endpoint">
+            <div className={`${usageTableMonoClass} leading-relaxed`}>
+              <span className="text-muted-foreground">{log.inbound_endpoint || log.endpoint || '-'}</span>
+              {log.upstream_endpoint && log.upstream_endpoint !== log.inbound_endpoint && <span className="text-muted-foreground"> → {log.upstream_endpoint}</span>}
+            </div>
+          </TableCell>
+        ),
+    type: (log) => <TableCell key="type"><Badge variant="outline" className={usageTableBadgeClass} style={{ background: log.stream ? 'rgba(99, 102, 241, 0.12)' : 'rgba(107, 114, 128, 0.12)', color: log.stream ? '#6366f1' : '#6b7280', borderColor: 'transparent' }}>{log.stream ? 'stream' : 'sync'}</Badge></TableCell>,
+    token: (log) => (
+          <TableCell key="token">
+            {log.status_code < 400 && (log.input_tokens > 0 || log.output_tokens > 0) ? (
+              <div className={`${usageTableMonoClass} leading-relaxed`}>
+                <span className="text-blue-500">↓{formatTokens(log.input_tokens, true)}</span><span className="mx-1 text-border">|</span><span className="text-emerald-500">↑{formatTokens(log.output_tokens, true)}</span>
+                {log.reasoning_tokens > 0 && <><span className="mx-1 text-border">|</span><span className="inline-flex items-center gap-0.5 text-amber-500"><Brain className="inline size-3.5" />{formatTokens(log.reasoning_tokens, true)}</span></>}
+              </div>
+            ) : <span className={`${usageTableMonoClass} text-muted-foreground`}>-</span>}
+          </TableCell>
+        ),
+    cost: (log) => <TableCell key="cost"><UsageCostCell log={log} /></TableCell>,
+    cached: (log) => <TableCell key="cached">{log.cached_tokens > 0 ? <Badge variant="outline" className={`${usageTableBadgeClass} gap-1 border-transparent bg-indigo-500/10 text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-400`}><DatabaseZap className="size-3.5" />{formatTokens(log.cached_tokens, true)}</Badge> : <span className={`${usageTableMonoClass} text-muted-foreground`}>-</span>}</TableCell>,
+    firstToken: (log) => <TableCell key="firstToken">{log.first_token_ms > 0 ? <span className={`${usageTableMonoClass} ${log.first_token_ms > 5000 ? 'text-red-500' : log.first_token_ms > 2000 ? 'text-amber-500' : 'text-emerald-500'}`}>{log.first_token_ms > 1000 ? `${(log.first_token_ms / 1000).toFixed(1)}s` : `${log.first_token_ms}ms`}</span> : <span className={`${usageTableMonoClass} text-muted-foreground`}>-</span>}</TableCell>,
+    duration: (log) => <TableCell key="duration"><span className={`${usageTableMonoClass} ${log.duration_ms > 30000 ? 'text-red-500' : log.duration_ms > 10000 ? 'text-amber-500' : 'text-muted-foreground'}`}>{log.duration_ms > 1000 ? `${(log.duration_ms / 1000).toFixed(1)}s` : `${log.duration_ms}ms`}</span></TableCell>,
+    time: (log) => <TableCell key="time" className={`${usageTableMonoClass} whitespace-nowrap text-muted-foreground`}>{formatBeijingTime(log.created_at)}</TableCell>,
+  }
+  const renderUsageCell = (column: UsageTableColumn, log: UsageLog) => usageCellRenderers[column](log)
 
   return (
     <StateShell
@@ -1423,10 +1387,9 @@ export default function Usage() {
 
               <div className="ml-auto shrink-0">
                 <ColumnSettingsDropdown
-                  open={columnSettingsOpen}
-                  columns={visibleColumns}
-                  onOpenChange={setColumnSettingsOpen}
-                  onToggle={(key) => setVisibleColumns((current) => ({ ...current, [key]: !current[key] }))}
+                  definitions={USAGE_COLUMN_DEFINITIONS}
+                  preferences={columnPreferences}
+                  onChange={setColumnPreferences}
                 />
               </div>
             </div>
@@ -1442,144 +1405,17 @@ export default function Usage() {
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      {visibleColumns.status && <TableHead className={usageTableHeadClass}>{t('usage.tableStatus')}</TableHead>}
-                      {visibleColumns.model && <TableHead className={usageTableHeadClass}>{t('usage.tableModel')}</TableHead>}
-                      {visibleColumns.account && <TableHead className={usageTableHeadClass}>{t('usage.tableAccount')}</TableHead>}
-                      {visibleColumns.apiKey && <TableHead className={usageTableHeadClass}>{t('usage.tableApiKey')}</TableHead>}
-                      {visibleColumns.endpoint && <TableHead className={usageTableHeadClass}>{t('usage.tableEndpoint')}</TableHead>}
-                      {visibleColumns.type && <TableHead className={usageTableHeadClass}>{t('usage.tableType')}</TableHead>}
-                      {visibleColumns.token && <TableHead className={usageTableHeadClass}>{t('usage.tableToken')}</TableHead>}
-                      {visibleColumns.cost && <TableHead className={usageTableHeadClass}>{t('usage.tableCost')}</TableHead>}
-                      {visibleColumns.cached && <TableHead className={usageTableHeadClass}>{t('usage.tableCached')}</TableHead>}
-                      {visibleColumns.firstToken && <TableHead className={usageTableHeadClass}>{t('usage.tableFirstToken')}</TableHead>}
-                      {visibleColumns.duration && <TableHead className={usageTableHeadClass}>{t('usage.tableDuration')}</TableHead>}
-                      {visibleColumns.time && <TableHead className={usageTableHeadClass}>{t('usage.tableTime')}</TableHead>}
+                      {visibleColumns.map((column) => (
+                        <TableHead key={column.key} className={usageTableHeadClass}>{t(column.labelKey)}</TableHead>
+                      ))}
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {logs.map((log: UsageLog) => {
-                      return (
+                    {logs.map((log: UsageLog) => (
                       <TableRow key={log.id}>
-                        {visibleColumns.status && <TableCell>
-                          <StatusCodeBadge log={log} />
-                        </TableCell>}
-                        {visibleColumns.model && <TableCell>
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            <Badge variant="outline" className={usageTableBadgeClass}>
-                              {log.model || '-'}
-                            </Badge>
-                            {log.effective_model && log.effective_model !== log.model && (
-                              <Badge variant="outline" className="text-[11px] font-medium border-transparent bg-blue-500/10 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400">
-                                → {log.effective_model}
-                              </Badge>
-                            )}
-                            {log.reasoning_effort && (
-                              <Badge
-                                variant="outline"
-                                className={`text-[11px] font-medium border-transparent ${
-                                  log.reasoning_effort === 'xhigh' || log.reasoning_effort === 'high'
-                                    ? 'bg-red-500/12 text-red-600 dark:bg-red-500/20 dark:text-red-400'
-                                    : log.reasoning_effort === 'medium'
-                                      ? 'bg-amber-500/12 text-amber-600 dark:bg-amber-500/20 dark:text-amber-400'
-                                      : 'bg-emerald-500/12 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-400'
-                                }`}
-                              >
-                                {log.reasoning_effort}
-                              </Badge>
-                            )}
-                            {isImageUsageLog(log) && (
-                              <ImageUsageBadge log={log} />
-                            )}
-                            {(log.service_tier === 'fast' || log.service_tier === 'priority') && (
-                              <Badge
-                                variant="outline"
-                                className="text-[11px] font-semibold gap-0.5 border-transparent bg-blue-500/12 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400"
-                              >
-                                <Zap className="size-3" />
-                                Fast
-                              </Badge>
-                            )}
-                          </div>
-                        </TableCell>}
-                        {visibleColumns.account && <TableCell className={`${usageTableTextClass} text-muted-foreground`}>
-                          {formatAccountIdentity(log)}
-                        </TableCell>}
-                        {visibleColumns.apiKey && <TableCell className={`${usageTableTextClass} text-muted-foreground`}>
-                          <span className="block max-w-[180px] truncate whitespace-nowrap font-mono text-[12px]" title={formatUsageAPIKeyLabel(log.api_key_name, log.api_key_masked) || t('usage.unknownApiKey')}>
-                            {formatUsageAPIKeyLabel(log.api_key_name, log.api_key_masked) || t('usage.unknownApiKey')}
-                          </span>
-                        </TableCell>}
-                        {visibleColumns.endpoint && <TableCell>
-                          <div className={`${usageTableMonoClass} leading-relaxed`}>
-                            <span className="text-muted-foreground">
-                              {log.inbound_endpoint || log.endpoint || '-'}
-                            </span>
-                            {log.upstream_endpoint && log.upstream_endpoint !== log.inbound_endpoint && (
-                              <span className="text-muted-foreground"> → {log.upstream_endpoint}</span>
-                            )}
-                          </div>
-                        </TableCell>}
-                        {visibleColumns.type && <TableCell>
-                          <Badge
-                            variant="outline"
-                            className={usageTableBadgeClass}
-                            style={{
-                              background: log.stream ? 'rgba(99, 102, 241, 0.12)' : 'rgba(107, 114, 128, 0.12)',
-                              color: log.stream ? '#6366f1' : '#6b7280',
-                              borderColor: 'transparent',
-                            }}
-                          >
-                            {log.stream ? 'stream' : 'sync'}
-                          </Badge>
-                        </TableCell>}
-                        {visibleColumns.token && <TableCell>
-                          {log.status_code < 400 && (log.input_tokens > 0 || log.output_tokens > 0) ? (
-                            <div className={`${usageTableMonoClass} leading-relaxed`}>
-                              <span className="text-blue-500">↓{formatTokens(log.input_tokens, true)}</span>
-                              <span className="mx-1 text-border">|</span>
-                              <span className="text-emerald-500">↑{formatTokens(log.output_tokens, true)}</span>
-                              {log.reasoning_tokens > 0 && (
-                                <>
-                                  <span className="mx-1 text-border">|</span>
-                                  <span className="text-amber-500 inline-flex items-center gap-0.5"><Brain className="size-3.5 inline" />{formatTokens(log.reasoning_tokens, true)}</span>
-                                </>
-                              )}
-                            </div>
-                          ) : (
-                            <span className={`${usageTableMonoClass} text-muted-foreground`}>-</span>
-                          )}
-                        </TableCell>}
-                        {visibleColumns.cost && <TableCell>
-                          <UsageCostCell log={log} />
-                        </TableCell>}
-                        {visibleColumns.cached && <TableCell>
-                          {log.cached_tokens > 0 ? (
-                            <Badge variant="outline" className={`${usageTableBadgeClass} gap-1 border-transparent bg-indigo-500/10 text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-400`}>
-                              <DatabaseZap className="size-3.5" />
-                              {formatTokens(log.cached_tokens, true)}
-                            </Badge>
-                          ) : (
-                            <span className={`${usageTableMonoClass} text-muted-foreground`}>-</span>
-                          )}
-                        </TableCell>}
-                        {visibleColumns.firstToken && <TableCell>
-                          {log.first_token_ms > 0 ? (
-                            <span className={`${usageTableMonoClass} ${log.first_token_ms > 5000 ? 'text-red-500' : log.first_token_ms > 2000 ? 'text-amber-500' : 'text-emerald-500'}`}>
-                              {log.first_token_ms > 1000 ? `${(log.first_token_ms / 1000).toFixed(1)}s` : `${log.first_token_ms}ms`}
-                            </span>
-                          ) : <span className={`${usageTableMonoClass} text-muted-foreground`}>-</span>}
-                        </TableCell>}
-                        {visibleColumns.duration && <TableCell>
-                          <span className={`${usageTableMonoClass} ${log.duration_ms > 30000 ? 'text-red-500' : log.duration_ms > 10000 ? 'text-amber-500' : 'text-muted-foreground'}`}>
-                            {log.duration_ms > 1000 ? `${(log.duration_ms / 1000).toFixed(1)}s` : `${log.duration_ms}ms`}
-                          </span>
-                        </TableCell>}
-                        {visibleColumns.time && <TableCell className={`${usageTableMonoClass} text-muted-foreground whitespace-nowrap`}>
-                          {formatBeijingTime(log.created_at)}
-                        </TableCell>}
+                        {visibleColumns.map((column) => renderUsageCell(column.key, log))}
                       </TableRow>
-                      )
-                    })}
+                    ))}
                   </TableBody>
                 </Table>
                 </TooltipProvider>

@@ -453,6 +453,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 
 	indexStatements := []string{
 		`CREATE INDEX IF NOT EXISTS idx_responses_continuity_session_id ON responses_continuity(session_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_responses_continuity_session_replayable_accessed ON responses_continuity(session_id, replayable, accessed_at DESC, created_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status);`,
 		`CREATE INDEX IF NOT EXISTS idx_accounts_platform ON accounts(platform);`,
 		`CREATE INDEX IF NOT EXISTS idx_accounts_cooldown_until ON accounts(cooldown_until);`,
@@ -603,7 +604,7 @@ func (db *DB) getTrafficSnapshotSQLite(ctx context.Context) (*TrafficSnapshot, e
 func (db *DB) getChartAggregationSQLite(ctx context.Context, start, end time.Time, bucketMinutes int) (*ChartAggregation, error) {
 	startArg, endArg := db.timeRangeArgs(start, end)
 	rows, err := db.conn.QueryContext(ctx, `
-			SELECT created_at, duration_ms, first_token_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, model, status_code
+		SELECT created_at, duration_ms, first_token_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, model, status_code
 		FROM usage_logs
 		WHERE created_at >= $1 AND created_at <= $2
 		  AND status_code <> 499
@@ -623,6 +624,7 @@ func (db *DB) getChartAggregationSQLite(ctx context.Context, start, end time.Tim
 		cachedTokens    int64
 		errors4xx       int64
 		errors5xx       int64
+		retryErrors5xx  int64
 	}
 
 	result := &ChartAggregation{}
@@ -687,6 +689,40 @@ func (db *DB) getChartAggregationSQLite(ctx context.Context, start, end time.Tim
 		return nil, err
 	}
 
+	retryRows, err := db.conn.QueryContext(ctx, `
+		SELECT created_at
+		FROM usage_logs
+		WHERE created_at >= $1 AND created_at <= $2
+		  AND status_code >= 500 AND status_code < 600
+		  AND COALESCE(is_retry_attempt, false) = true
+	`, startArg, endArg)
+	if err != nil {
+		return nil, err
+	}
+	defer retryRows.Close()
+
+	for retryRows.Next() {
+		var createdRaw interface{}
+		if err := retryRows.Scan(&createdRaw); err != nil {
+			return nil, err
+		}
+		createdAt, err := parseDBTimeValue(createdRaw)
+		if err != nil || createdAt.IsZero() {
+			continue
+		}
+
+		bucket := createdAt.Truncate(time.Duration(bucketMinutes) * time.Minute).Format("2006-01-02T15:04:05")
+		agg, ok := timelineMap[bucket]
+		if !ok {
+			agg = &bucketAgg{}
+			timelineMap[bucket] = agg
+		}
+		agg.retryErrors5xx++
+	}
+	if err := retryRows.Err(); err != nil {
+		return nil, err
+	}
+
 	keys := make([]string, 0, len(timelineMap))
 	for key := range timelineMap {
 		keys = append(keys, key)
@@ -708,6 +744,7 @@ func (db *DB) getChartAggregationSQLite(ctx context.Context, start, end time.Tim
 			CachedTokens:    agg.cachedTokens,
 			Errors4xx:       agg.errors4xx,
 			Errors5xx:       agg.errors5xx,
+			RetryErrors5xx:  agg.retryErrors5xx,
 		})
 	}
 	if result.Timeline == nil {

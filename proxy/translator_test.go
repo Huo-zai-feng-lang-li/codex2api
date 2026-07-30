@@ -1681,6 +1681,100 @@ func TestStripInvalidEncryptedContentFromResponsesBody(t *testing.T) {
 	}
 }
 
+func TestPrepareOpenAIResponsesBody_NormalizesStatelessReasoningReplay(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"store":false,
+		"include":["file_search_call.results"],
+		"input":[
+			{"id":"rs_missing","type":"reasoning","summary":[]},
+			{"id":"rs_empty","type":"reasoning","encrypted_content":"  ","summary":[]},
+			{"id":"rs_valid","type":"reasoning","encrypted_content":"opaque","summary":[]},
+			{"type":"message","role":"user","content":"continue"}
+		]
+	}`)
+
+	got := PrepareOpenAIResponsesBody(raw)
+	include := gjson.GetBytes(got, "include").Array()
+	if len(include) != 2 {
+		t.Fatalf("include count = %d, want 2; body=%s", len(include), got)
+	}
+	if include[0].String() != "file_search_call.results" || include[1].String() != "reasoning.encrypted_content" {
+		t.Fatalf("include = %s, want existing value plus reasoning.encrypted_content", gjson.GetBytes(got, "include").Raw)
+	}
+	input := gjson.GetBytes(got, "input").Array()
+	if len(input) != 2 {
+		t.Fatalf("input count = %d, want valid reasoning plus message; body=%s", len(input), got)
+	}
+	if id := input[0].Get("id").String(); id != "rs_valid" {
+		t.Fatalf("preserved reasoning id = %q, want rs_valid; body=%s", id, got)
+	}
+	if encrypted := input[0].Get("encrypted_content").String(); encrypted != "opaque" {
+		t.Fatalf("encrypted_content = %q, want opaque; body=%s", encrypted, got)
+	}
+}
+
+func TestPrepareOpenAIResponsesBody_PreservesStoredReasoningReplay(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"store":true,
+		"input":[{"id":"rs_stored","type":"reasoning","summary":[]}]
+	}`)
+
+	got := PrepareOpenAIResponsesBody(raw)
+	if gjson.GetBytes(got, "include").Exists() {
+		t.Fatalf("store=true request should not receive stateless include: %s", got)
+	}
+	if id := gjson.GetBytes(got, "input.0.id").String(); id != "rs_stored" {
+		t.Fatalf("stored reasoning id = %q, want rs_stored; body=%s", id, got)
+	}
+}
+
+func TestPrepareResponsesBody_NormalizesStatelessReasoningReplay(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"id":"rs_missing","type":"reasoning","summary":[]},
+			{"id":"rs_valid","type":"reasoning","encrypted_content":"opaque","summary":[]},
+			{"type":"message","role":"user","content":"continue"}
+		]
+	}`)
+
+	got, _ := PrepareResponsesBody(raw)
+	input := gjson.GetBytes(got, "input").Array()
+	if len(input) != 2 {
+		t.Fatalf("Codex input count = %d, want valid reasoning plus message; body=%s", len(input), got)
+	}
+	if encrypted := input[0].Get("encrypted_content").String(); encrypted != "opaque" {
+		t.Fatalf("Codex encrypted_content = %q, want opaque; body=%s", encrypted, got)
+	}
+	if include := gjson.GetBytes(got, "include.0").String(); include != "reasoning.encrypted_content" {
+		t.Fatalf("Codex include[0] = %q, want reasoning.encrypted_content; body=%s", include, got)
+	}
+}
+
+func TestPrepareOpenAIResponsesWebSocketBody_NormalizesStatelessReasoningReplay(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"store":false,
+		"input":[
+			{"id":"rs_missing","type":"reasoning","summary":[]},
+			{"type":"message","role":"user","content":"continue"}
+		]
+	}`)
+
+	got := PrepareOpenAIResponsesWebSocketBody(raw)
+	if count := len(gjson.GetBytes(got, "input").Array()); count != 1 {
+		t.Fatalf("WebSocket input count = %d, want message only; body=%s", count, got)
+	}
+	if include := gjson.GetBytes(got, "include.0").String(); include != "reasoning.encrypted_content" {
+		t.Fatalf("WebSocket include[0] = %q, want reasoning.encrypted_content; body=%s", include, got)
+	}
+	if typ := gjson.GetBytes(got, "type").String(); typ != "response.create" {
+		t.Fatalf("WebSocket type = %q, want response.create; body=%s", typ, got)
+	}
+}
+
 // ==================== Function Calling 测试 ====================
 
 func TestConvertMessagesToInput_ToolRole(t *testing.T) {

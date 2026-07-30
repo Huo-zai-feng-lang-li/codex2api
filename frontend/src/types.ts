@@ -1004,6 +1004,7 @@ export interface ChartTimelinePoint {
   cached_tokens: number
   errors_4xx: number
   errors_5xx: number
+  retry_errors_5xx: number
 }
 
 export interface ChartModelPoint {
