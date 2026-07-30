@@ -1,11 +1,10 @@
-# Task: 实现 Responses 跨账号无缝自动接管机制
+# Task: 修复 responses 历史丢失场景下的优雅降级切号
 
 ## 目标
-当 Responses API 的原账号不可用（429 Cooldown / 离线 / 配额耗尽）且会话上下文存在悬空（未闭环）Tool Call 时，系统能够自动补全/规整上下文，使账号池中的其他上游账号可以 100% 成功接管并流畅回复，消除 409 Conflict 阻断。
+解决服务重启后，老对话带有不存在的 `previous_response_id` 且原账号失效时无法切号的问题，通过剥离失效 Response ID，使账号池新账号能 100% 成功接收最新输入并畅通回复。
 
 ## 任务拆解
-- [x] 1. 分析 `proxy/responses_continuity.go` 中 `normalizeMatchedOpenAIResponsesToolOutputs` 的缺口逻辑
-- [x] 2. 设计未闭环 Tool Call 哑输出（Synthetic Tool Output）自动补齐与容错机制
-- [x] 3. 编写 TDD 测试用例（验证包含悬空 function_call/mcp_tool_call/custom_tool_call 时跨账号自动接管成功）
-- [x] 4. 实现自动接管补齐逻辑，并保持已有模式（如完整严苛校验）兼容性
-- [x] 5. 运行完整单元测试与集成测试，验证全链路闭环
+- [x] 1. 定位 `canBuildOpenAIResponsesContinuationFallback` 在 `materialize` 返回 false 时的断流链
+- [ ] 2. 增加针对失效/未知 `previous_response_id` 的安全剥离降级逻辑（Stripped Previous ID Fallback）
+- [ ] 3. 编写 TDD 单元测试验证老对话丢失历史时仍能 100% 无缝切号
+- [ ] 4. 重新编译生成 `codex2api.exe` 并进行全量测试校验

@@ -261,8 +261,20 @@ accountAttempts:
 		account, stickyProxyURL := pick.account, pick.proxyURL
 		if account == nil {
 			if continuationOwnerBound {
-				_ = writeResponsesWSMessage(conn, buildContinuationContextIncompleteEvent())
-				return nil
+				if canBuildOpenAIResponsesContinuationFallback(continuationCacheBody, sessionID) {
+					if fallback, ok := buildOpenAIResponsesContinuationFallback(continuationCacheBody, sessionID); ok {
+						rawBody = fallback
+						accountFilter = baseAccountFilter
+						continuationOwnerBound = false
+						codexBody, expandedInputRaw = PrepareResponsesWebSocketBody(rawBody)
+						log.Printf("Responses WebSocket 续链绑定的原账号无法分配，自动解绑并成功切换为本地历史降级回放 (session=%s)", sessionID)
+						continue accountAttempts
+					}
+				}
+				accountFilter = baseAccountFilter
+				continuationOwnerBound = false
+				log.Printf("Responses WebSocket 续链绑定的原账号不可用，已自动解除绑定并尝试使用池内其他账号 (session=%s)", sessionID)
+				continue accountAttempts
 			}
 			if attemptedUpstream && c.Request.Context().Err() != nil {
 				return errResponsesWSClientGone

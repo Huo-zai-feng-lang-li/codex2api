@@ -1859,9 +1859,15 @@ func (h *Handler) Responses(c *gin.Context) {
 						h.store.Release(account)
 						return
 					}
-					cacheOpenAIResponsesContinuation(continuationCacheBody, respBody, account, sessionID)
-					respBody = h.rewriteResponsesBodyForDownstream(respBody)
-					c.Data(http.StatusOK, contentType, respBody)
+					if resp.StatusCode == http.StatusOK {
+						cacheOpenAIResponsesContinuation(continuationCacheBody, respBody, account, sessionID)
+						respBody = h.rewriteResponsesBodyForDownstream(respBody)
+						c.Data(http.StatusOK, contentType, respBody)
+					} else {
+						c.Data(resp.StatusCode, contentType, respBody)
+					}
+					h.store.Release(account)
+					return
 				}
 			}
 
@@ -1879,6 +1885,16 @@ func (h *Handler) Responses(c *gin.Context) {
 						outcome.failureKind = kind
 					}
 				}
+			}
+			if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != 429 && resp.StatusCode != 401 && resp.StatusCode != 402 {
+				recyclePooledClient(account, proxyURL)
+				h.store.Release(account)
+				ct := resp.Header.Get("Content-Type")
+				if ct == "" {
+					ct = "application/json"
+				}
+				c.Data(resp.StatusCode, ct, terminalFailurePayload)
+				return
 			}
 			if shouldTransparentRetryStream(outcome, attempt, maxRetries, wroteAnyBody, c.Request.Context().Err(), writeErr) {
 				recyclePooledClient(account, proxyURL)
@@ -1898,6 +1914,14 @@ func (h *Handler) Responses(c *gin.Context) {
 						resp.Body.Close()
 						h.store.Release(account)
 						h.store.UnbindSessionAffinity(affinityKey, account.ID())
+						if len(terminalFailurePayload) > 0 {
+							status := outcome.logStatusCode
+							if status == 0 {
+								status = http.StatusBadRequest
+							}
+							c.Data(status, "application/json", terminalFailurePayload)
+							return
+						}
 						writeContinuationContextIncomplete(c)
 						return
 					}

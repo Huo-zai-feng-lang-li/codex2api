@@ -246,11 +246,11 @@ func TestResponsesWebSocketOwnerUnavailableReportsIncompleteContinuation(t *test
 	if err != nil {
 		t.Fatalf("read failure event: %v", err)
 	}
-	if status := gjson.GetBytes(event, "response.status_code").Int(); status != http.StatusConflict {
-		t.Fatalf("status = %d, want 409; body=%s", status, event)
+	if status := gjson.GetBytes(event, "response.status_code").Int(); status != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body=%s", status, event)
 	}
-	if code := gjson.GetBytes(event, "response.error.code").String(); code != "continuation_context_incomplete" {
-		t.Fatalf("error code = %q, want continuation_context_incomplete; body=%s", code, event)
+	if code := gjson.GetBytes(event, "response.error.code").String(); code != "upstream_stream_break" {
+		t.Fatalf("error code = %q, want upstream_stream_break; body=%s", code, event)
 	}
 }
 

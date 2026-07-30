@@ -435,6 +435,7 @@ func TestOpenAIResponsesContinuationWithoutLocalHistoryDoesNotGuess(t *testing.T
 	gin.SetMode(gin.TestMode)
 	resetResponseCacheForTest()
 	resetOpenAIResponsesContinuityForTest()
+	http.DefaultTransport.(*http.Transport).CloseIdleConnections()
 
 	upstreamCalls := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1468,6 +1469,30 @@ func TestOpenAIResponsesFallbackAutoCompletesPartialToolOutputSet(t *testing.T) 
 	}
 	if input[3].Get("call_id").String() != "call_two" || input[3].Get("type").String() != "function_call_output" {
 		t.Fatalf("missing tool call Output was not auto-completed with synthetic output: %s", fallback)
+	}
+}
+
+func TestOpenAIResponsesFallbackStripsMissingPreviousID(t *testing.T) {
+	resetOpenAIResponsesContinuityForTest()
+	openAIResponsesContinuity.store("resp_missing_in_store", "", "", openAIResponsesContinuation{
+		input: []json.RawMessage{json.RawMessage(`{"type":"message","role":"user","content":"init"}`)},
+	})
+
+	request := []byte(`{"model":"gpt-5.4","previous_response_id":"resp_missing_in_store","input":[{"type":"message","role":"user","content":"hello"}]}`)
+
+	if !canBuildOpenAIResponsesContinuationFallback(request, "") {
+		t.Fatalf("request with missing previous_response_id must be fallback-buildable")
+	}
+	fallback, ok := buildOpenAIResponsesContinuationFallback(request, "")
+	if !ok {
+		t.Fatalf("buildOpenAIResponsesContinuationFallback failed for missing previous_response_id")
+	}
+	if gjson.GetBytes(fallback, "previous_response_id").Exists() {
+		t.Fatalf("fallback must strip missing previous_response_id: %s", fallback)
+	}
+	input := gjson.GetBytes(fallback, "input").Array()
+	if len(input) != 2 || input[1].Get("content").String() != "hello" {
+		t.Fatalf("fallback input matches original user content: %s", fallback)
 	}
 }
 

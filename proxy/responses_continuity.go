@@ -311,28 +311,37 @@ func bindOpenAIResponsesContinuationOwner(body []byte, sessionID string, base au
 
 func prepareOpenAIResponsesWebSocketContinuation(body []byte, sessionID string, base auth.AccountFilter) ([]byte, auth.AccountFilter, bool, bool) {
 	ownerFilter, ownerBound := bindOpenAIResponsesContinuationOwner(body, sessionID, base)
-	if !canBuildOpenAIResponsesContinuationFallback(body, sessionID) {
-		return body, ownerFilter, false, ownerBound
+	previousID := gjson.GetBytes(body, "previous_response_id").String()
+	if previousID != "" && openAIResponsesContinuity.isReplayable(previousID) {
+		if !canBuildOpenAIResponsesContinuationFallback(body, sessionID) {
+			return body, ownerFilter, false, ownerBound
+		}
+		fallback, ok := buildOpenAIResponsesContinuationFallback(body, sessionID)
+		if !ok {
+			return body, ownerFilter, false, ownerBound
+		}
+		return fallback, base, true, false
 	}
-	fallback, ok := buildOpenAIResponsesContinuationFallback(body, sessionID)
-	if !ok {
-		return body, ownerFilter, false, ownerBound
-	}
-	return fallback, base, true, false
+	return body, ownerFilter, false, ownerBound
 }
 
 func buildOpenAIResponsesContinuationFallback(body []byte, sessionID string) ([]byte, bool) {
-	previousID := replayableOpenAIResponsesContinuationID(body, sessionID)
-	history, ok := openAIResponsesContinuity.materialize(previousID)
-	if !ok || len(history) == 0 {
-		return body, false
-	}
-	history = sanitizeReplayableOpenAIResponsesItems(history)
 	current, ok := openAIResponsesInputItems(body)
 	if !ok || len(current) == 0 {
 		return body, false
 	}
-	history = append(history, current...)
+	previousID := replayableOpenAIResponsesContinuationID(body, sessionID)
+	history, historyOk := openAIResponsesContinuity.materialize(previousID)
+	if !historyOk || len(history) == 0 {
+		ownerFilter, ownerBound := bindOpenAIResponsesContinuationOwner(body, sessionID, nil)
+		if !ownerBound && ownerFilter == nil && previousID != "" {
+			return body, false
+		}
+		history = current
+	} else {
+		history = sanitizeReplayableOpenAIResponsesItems(history)
+		history = append(history, current...)
+	}
 	if len(history) > openAIResponsesContinuity.limits.maxItems || rawMessagesSize(history) > openAIResponsesContinuity.limits.maxItemBytes {
 		return body, false
 	}
@@ -350,6 +359,25 @@ func buildOpenAIResponsesContinuationFallback(body []byte, sessionID string) ([]
 	}
 	fallback, err = sjson.SetRawBytes(fallback, "input", input)
 	return fallback, err == nil
+}
+
+func canBuildOpenAIResponsesContinuationFallback(body []byte, sessionID string) bool {
+	current, ok := openAIResponsesInputItems(body)
+	if !ok || len(current) == 0 {
+		return false
+	}
+	previousID := replayableOpenAIResponsesContinuationID(body, sessionID)
+	if previousID == "" {
+		return false
+	}
+	history, historyOk := openAIResponsesContinuity.materialize(previousID)
+	if !historyOk || len(history) == 0 {
+		return false
+	}
+	history = sanitizeReplayableOpenAIResponsesItems(history)
+	history = append(history, current...)
+	_, ok = normalizeMatchedOpenAIResponsesToolOutputs(history)
+	return ok
 }
 
 func shouldReplayOpenAIResponsesContinuationBeforeUpstream(body []byte, account *auth.Account, sessionID string) bool {
@@ -383,20 +411,7 @@ func replayableOpenAIResponsesContinuationID(body []byte, sessionID string) stri
 	return openAIResponsesContinuity.getLatestReplayableResponseID(sessionID)
 }
 
-func canBuildOpenAIResponsesContinuationFallback(body []byte, sessionID string) bool {
-	previousID := replayableOpenAIResponsesContinuationID(body, sessionID)
-	history, ok := openAIResponsesContinuity.materialize(previousID)
-	if !ok {
-		return false
-	}
-	history = sanitizeReplayableOpenAIResponsesItems(history)
-	current, ok := openAIResponsesInputItems(body)
-	if !ok || len(current) == 0 {
-		return false
-	}
-	_, ok = normalizeMatchedOpenAIResponsesToolOutputs(append(history, current...))
-	return ok
-}
+
 
 var openAIResponsesAutoCompleteToolOutputs = openAIResponsesAutoCompleteToolOutputsFromEnv(os.Getenv)
 
@@ -411,9 +426,18 @@ func openAIResponsesAutoCompleteToolOutputsFromEnv(getenv func(string) string) b
 func normalizeMatchedOpenAIResponsesToolOutputs(items []json.RawMessage) ([]json.RawMessage, bool) {
 	expectedOutputs := make(map[string]string)
 	requiredOutputs := make(map[string]struct{})
+	providedOutputs := make(map[string]struct{})
+
 	for _, item := range items {
 		parsed := gjson.ParseBytes(item)
-		expectedType, isCall := openAIResponsesToolOutputType(parsed.Get("type").String())
+		itemType := parsed.Get("type").String()
+		if isOpenAIResponsesToolOutputType(itemType) {
+			callID := openAIResponsesToolCorrelationID(parsed)
+			if callID != "" {
+				providedOutputs[callID] = struct{}{}
+			}
+		}
+		expectedType, isCall := openAIResponsesToolOutputType(itemType)
 		if !isCall {
 			continue
 		}
@@ -437,20 +461,11 @@ func normalizeMatchedOpenAIResponsesToolOutputs(items []json.RawMessage) ([]json
 		actualType := parsed.Get("type").String()
 		if !isOpenAIResponsesToolOutputType(actualType) {
 			normalized = append(normalized, item)
-			// 若开启自动补齐开关：当遇到要求 Output 的 Tool Call 且在后续没有提供匹配的 Output 时，插接合规 Synthetic Output 补齐断链
 			expectedType, isCall := openAIResponsesToolOutputType(actualType)
 			if openAIResponsesAutoCompleteToolOutputs && isCall && openAIResponsesToolCallRequiresOutput(parsed) {
 				callID := openAIResponsesToolCorrelationID(parsed)
 				if callID != "" {
-					hasMatchingOutput := false
-					for _, futureItem := range items {
-						fParsed := gjson.ParseBytes(futureItem)
-						if isOpenAIResponsesToolOutputType(fParsed.Get("type").String()) && openAIResponsesToolCorrelationID(fParsed) == callID {
-							hasMatchingOutput = true
-							break
-						}
-					}
-					if !hasMatchingOutput {
+					if _, hasMatchingOutput := providedOutputs[callID]; !hasMatchingOutput {
 						syntheticOutput := buildSyntheticOpenAIResponsesToolOutput(expectedType, callID)
 						normalized = append(normalized, syntheticOutput)
 						seenOutputs[callID] = struct{}{}
