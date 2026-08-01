@@ -76,6 +76,12 @@ test('keeps every error attempt returned by the detailed-list API', () => {
   assert.match(source, /data\.logs\.map\(\(log\)\s*=>/)
 })
 
+test('exports an embeddable panel with optional visible polling', () => {
+  assert.match(source, /export function OperationsErrorsPanel\(\{\s*autoRefresh = true/s)
+  assert.match(source, /if \(!autoRefresh\) return/)
+  assert.match(source, /<OperationsErrorsPanel\s+autoRefresh=\{true\}/)
+})
+
 test('drives error table headers and cells from persisted ordered columns', () => {
   assert.match(source, /usePersistedTableColumns\('codex2api:ops-errors:columns'/)
   assert.match(source, /<ColumnSettingsDropdown/)

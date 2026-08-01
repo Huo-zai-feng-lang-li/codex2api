@@ -15,7 +15,10 @@ test('keeps usage statistics range control independent from dashboard request lo
 })
 
 test('places the self-contained request log panel immediately below active requests', () => {
-  assert.match(dashboardSource, /<ActiveRequestsPanel[^>]*\/>\s*<UsageLogsPanel\s*\/>/s)
+  assert.match(dashboardSource, /type DashboardRequestTab = 'usage_logs' \| 'error_details'/)
+  assert.match(dashboardSource, /useState<DashboardRequestTab>\('usage_logs'\)/)
+  assert.match(dashboardSource, /<ActiveRequestsPanel[^>]*\/>\s*<DashboardRequestTabs/s)
+  assert.match(dashboardSource, /activeRequestTab === 'usage_logs'[\s\S]*<UsageLogsPanel\s*\/>/)
   assert.match(logsPanelSource, /api\.getUsageLogsPaged/)
   assert.match(logsPanelSource, /api\.getAPIKeys\(\)/)
   assert.match(logsPanelSource, /api\.getModels\(\)/)
@@ -29,4 +32,10 @@ test('places the self-contained request log panel immediately below active reque
 test('does not couple request log loading to dashboard polling', () => {
   const pollingBlock = dashboardSource.match(/useVisiblePolling\([\s\S]*?DASHBOARD_REFRESH_INTERVAL_MS[\s\S]*?\)/)?.[0] ?? ''
   assert.doesNotMatch(pollingBlock, /UsageLogs|loadLogs|getUsageLogsPaged/)
+})
+
+test('keeps operations error details lazy and manual inside dashboard tabs', () => {
+  assert.match(dashboardSource, /const OperationsErrorsPanel = lazy\(/)
+  assert.match(dashboardSource, /activeRequestTab === 'error_details'[\s\S]*<OperationsErrorsPanel\s+autoRefresh=\{false\}/)
+  assert.doesNotMatch(dashboardSource, /getOpsErrors|getOpsErrorSummary/)
 })

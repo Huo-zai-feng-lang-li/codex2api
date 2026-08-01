@@ -84,7 +84,16 @@ const summaryMetricIcons = {
   retry_attempts: RotateCcw,
 } satisfies Record<OpsErrorSummaryMetricKey, typeof AlertCircle>
 
+interface OperationsErrorsPanelProps {
+  autoRefresh?: boolean
+  showChrome?: boolean
+}
+
 export default function OperationsErrors() {
+  return <OperationsErrorsPanel autoRefresh={true} showChrome={true} />
+}
+
+export function OperationsErrorsPanel({ autoRefresh = true, showChrome = false }: OperationsErrorsPanelProps) {
   const { t } = useTranslation()
   const { toast, showToast } = useToast()
   const [timeRange, setTimeRange] = useState<TimeRangeKey>('1h')
@@ -185,9 +194,10 @@ export default function OperationsErrors() {
   })
 
   useVisiblePolling(async () => {
+    if (!autoRefresh) return
     const core = await loadErrorCore()
     setData((current) => ({ ...current, ...core }))
-  }, 15000)
+  }, 15000, { enabled: autoRefresh })
 
   const hasActiveFilters = Boolean(statusFilter || errorKindFilter || endpointFilter || apiKeyFilter || streamFilter || searchQuery)
   const totalPages = Math.max(1, Math.ceil(data.total / pageSize))
@@ -288,7 +298,7 @@ export default function OperationsErrors() {
 
   return (
     <StateShell
-      variant="page"
+      variant={showChrome ? 'page' : 'section'}
       loading={loading}
       error={error}
       onRetry={() => void reload()}
@@ -297,17 +307,21 @@ export default function OperationsErrors() {
       errorTitle={t('opsErrors.errorTitle')}
     >
       <>
-        <PageHeader
-          title={t('opsErrors.title')}
-          description={t('opsErrors.description')}
-          actions={
-            <Button variant="outline" onClick={() => void reload()}>
-              <RefreshCw className="size-3.5" />
-              {t('common.refresh')}
-            </Button>
-          }
-        />
-        <OpsTabs />
+        {showChrome && (
+          <>
+            <PageHeader
+              title={t('opsErrors.title')}
+              description={t('opsErrors.description')}
+              actions={
+                <Button variant="outline" onClick={() => void reload()}>
+                  <RefreshCw className="size-3.5" />
+                  {t('common.refresh')}
+                </Button>
+              }
+            />
+            <OpsTabs />
+          </>
+        )}
 
         <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-4 mb-6">
           {summaryMetrics.map((metric) => {
