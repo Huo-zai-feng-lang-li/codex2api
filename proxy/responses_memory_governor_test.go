@@ -77,6 +77,7 @@ func TestResponsesMemoryLimitsReadEnvironment(t *testing.T) {
 		"CODEX_RESPONSES_CONTINUITY_MAX_ENTRIES":  "800",
 		"CODEX_RESPONSES_CONTINUITY_MAX_CHAIN_MB": "6",
 		"CODEX_RESPONSES_CONTINUITY_MAX_BYTES_MB": "48",
+		"CODEX_RESPONSES_CONTINUITY_TTL_HOURS":    "12",
 	}
 	getenv := func(key string) string { return values[key] }
 	governor := responsesMemoryLimitsFromEnv(getenv)
@@ -84,7 +85,7 @@ func TestResponsesMemoryLimitsReadEnvironment(t *testing.T) {
 		t.Fatalf("governor limits = %+v", governor)
 	}
 	continuity := openAIResponsesContinuityLimitsFromEnv(getenv)
-	if continuity.maxEntries != 800 || continuity.maxItemBytes != 6<<20 || continuity.maxBytes != 48<<20 {
+	if continuity.ttl != 12*time.Hour || continuity.maxEntries != 800 || continuity.maxItemBytes != 6<<20 || continuity.maxBytes != 48<<20 {
 		t.Fatalf("continuity limits = %+v", continuity)
 	}
 	if mode := openAIResponsesContinuityModeFromEnv(func(string) string { return "upstream" }); mode != openAIResponsesContinuityModeUpstream {

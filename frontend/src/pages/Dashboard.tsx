@@ -8,9 +8,11 @@ import StateShell from '../components/StateShell'
 import StatCard from '../components/StatCard'
 import UsageStatsSummary from '../components/UsageStatsSummary'
 import ActiveRequestsPanel from '../components/ActiveRequestsPanel'
-import type { StatsResponse, UsageStats, ChartAggregation, RuntimeStatusResponse } from '../types'
+import UsageLogsPanel from '../components/UsageLogsPanel'
+import type { StatsResponse, UsageStats, ChartAggregation } from '../types'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useVisiblePolling } from '../hooks/useVisiblePolling'
+import { useActiveRequestsStream } from '../hooks/useActiveRequestsStream'
 import { Card, CardContent } from '@/components/ui/card'
 import { Users, CheckCircle, Gauge, XCircle, Activity } from 'lucide-react'
 
@@ -46,6 +48,7 @@ function ChartsSkeleton() {
 
 export default function Dashboard() {
   const { t } = useTranslation()
+  const activeRequests = useActiveRequestsStream()
   const [timeRange, setTimeRange] = useState<TimeRangeKey>('1h')
   const [chartData, setChartData] = useState<ChartAggregation | null>(null)
   const [chartDataRange, setChartDataRange] = useState<TimeRangeKey | null>(null)
@@ -55,20 +58,18 @@ export default function Dashboard() {
 
   // 仅加载轻量级统计数据（秒级响应）
   const loadDashboardStats = useCallback(async () => {
-    const [stats, usageStats, runtimeStatus] = await Promise.all([
+    const [stats, usageStats] = await Promise.all([
       api.getStats(),
       api.getUsageStats(),
-      api.getRuntimeStatus(),
     ])
-    return { stats, usageStats, runtimeStatus }
+    return { stats, usageStats }
   }, [])
 
   const { data, loading, error, reload, reloadSilently } = useDataLoader<{
     stats: StatsResponse | null
     usageStats: UsageStats | null
-    runtimeStatus: RuntimeStatusResponse | null
   }>({
-    initialData: { stats: null, usageStats: null, runtimeStatus: null },
+    initialData: { stats: null, usageStats: null },
     load: loadDashboardStats,
   })
 
@@ -106,7 +107,7 @@ export default function Dashboard() {
     await Promise.all([reloadSilently(), loadChartData()])
   }, DASHBOARD_REFRESH_INTERVAL_MS, { enabled: timeRange === '1h' })
 
-  const { stats, usageStats, runtimeStatus } = data
+  const { stats, usageStats } = data
   const total = stats?.total ?? 0
   const available = stats?.available ?? 0
   const rateLimited = stats?.rate_limited ?? 0
@@ -170,7 +171,8 @@ export default function Dashboard() {
               latencyAnimationKey={chartDataRange ?? undefined}
               latencyLoading={latencyLoading}
             />
-            <ActiveRequestsPanel requests={runtimeStatus?.accounts.active_request_details ?? []} />
+            <ActiveRequestsPanel requests={activeRequests} />
+            <UsageLogsPanel />
             <Suspense fallback={<ChartsSkeleton />}>
               <DashboardUsageCharts
                 chartData={chartData}

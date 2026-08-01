@@ -26,7 +26,7 @@
 - [x] 写出并复现 WS 首字前重试必须复用原账号的失败用例。
 - [x] 写出并复现 WS 到 HTTP 降级缺少完整注册历史必须拒绝的失败用例。
 - [ ] 补充严格亲和解绑后必须尊重本次排除列表的测试。
-- [ ] 将 HTTP fallback 成功用例改为注册完整续链历史，而非旧的局部工具缓存。
+- [x] 将 HTTP fallback 成功用例改为注册完整续链历史，而非旧的局部工具缓存。
 
 ### Task 2: 最小调度修复
 
@@ -42,7 +42,7 @@
 
 - [ ] 严格亲和存在时继续选原账号；无绑定时向普通选号传递排除列表。
 - [ ] `nextRetryAccountPickForSession` 使用排除感知的严格选择与等待。
-- [ ] HTTP/WS 在 `ErrNoAvailableAccount` 时直接删除该账号当前选择键的绑定，再重试其他账号。
+- [x] HTTP/WS 在 `ErrNoAvailableAccount` 时直接删除该账号当前选择键的绑定，再重试其他账号。
 - [ ] 新请求也以本次会话键维持请求内重试，续链历史降级后清空选择键以允许安全切号。
 
 ### Task 3: 验证与归档
@@ -51,6 +51,20 @@
 - Modify: `.agent/handoff.md`
 - Modify: `.agent/plan-Responses续链WS闭环.md`
 
-- [ ] 运行定向 auth、HTTP、WS 与未知历史降级测试。
+- [x] 运行定向 auth、HTTP、WS 与未知历史降级测试。
 - [ ] 运行 `go test ./proxy -count=1`、`go test ./... -count=1`、`go vet ./...`、`git diff --check`。
-- [ ] 构建、热更新前检查在途请求；授权 A->B 两连包与数据库流水仍依赖可用测试 Key。
+- [x] 修复 `rate_limited` / `payment_required` 严格绑定仍死守额度耗尽账号的问题；按用户要求暂不运行新增回归。
+
+### Task 4: 续链持久化容量治理
+
+- [x] 审计重启恢复、TTL、容量上限和并发会话头更新。
+- [x] 现场确认 `data/codex2api.db` 已启用续链持久化：165 个节点、78 个会话头。
+- [x] 确认治理设计：不可回放节点只保留路由元数据；滑动 TTL 可配置且默认延长；容量清理必须同步修复会话头；历史不完整继续显式失败，禁止静默续接。
+- [x] 非 replayable 完成节点不再持久化大体积 input/output；Trim 会事务化瘦身历史遗留 payload，避免无效数据挤占 64 MiB 配额。
+- [x] Prune/Trim 删除节点时仅修复受损的 `responses_continuity_heads`，并以 operation sequence 条件删除防止并发新 head 被误删。
+- [x] 滑动 TTL 改为 `CODEX_RESPONSES_CONTINUITY_TTL_HOURS` 可配置，安全默认值延长为 24 小时。
+- [x] 补充 TTL、容量淘汰、遗留 payload 瘦身和悬空 head 回归测试。
+- [x] 修复严格会话无候选账号时的 30 秒空等，复用恢复探针并快速返回。
+- [x] 新服务已运行并复验 `/health`：`inflight_requests=0`、`continuity_persistent=true`、`continuity_persistence_failures=0`。
+- [x] 已备份并压缩 `data/codex2api.db`，不可回放终态 payload 归零，悬空 head 归零。
+- [ ] 可选真实账号验收：A -> B 两连包与数据库流水仍依赖可用测试 Key。

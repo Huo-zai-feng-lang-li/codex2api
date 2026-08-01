@@ -35,6 +35,7 @@ import type {
   PromptFilterRulesResponse,
   PromptFilterTestResponse,
   RuntimeStatusResponse,
+  RuntimeActiveRequest,
   ResetRadarResponse,
   SecurityEventsResponse,
   SecurityCapturesResponse,
@@ -56,6 +57,7 @@ import type {
   CreateAccountGroupRequest,
   UpdateAccountGroupRequest,
 } from './types'
+import { createSSEParser } from './lib/sse'
 
 const BASE = '/api/admin'
 export const ADMIN_AUTH_REQUIRED_EVENT = 'codex2api:admin-auth-required'
@@ -168,6 +170,61 @@ async function requestBlob(path: string, options: RequestInit = {}): Promise<Blo
   return res.blob()
 }
 
+export interface ActiveRequestsSnapshot {
+  active_requests: number
+  active_request_details: RuntimeActiveRequest[]
+}
+
+interface ActiveRequestsStreamOptions {
+  signal: AbortSignal
+  onSnapshot: (snapshot: ActiveRequestsSnapshot) => void
+}
+
+export class AdminUnauthorizedError extends Error {}
+
+function parseActiveRequestsSnapshot(data: string): ActiveRequestsSnapshot {
+  const snapshot = JSON.parse(data) as Partial<ActiveRequestsSnapshot>
+  if (typeof snapshot.active_requests !== 'number' || !Array.isArray(snapshot.active_request_details)) {
+    throw new Error('Invalid active requests snapshot')
+  }
+  return snapshot as ActiveRequestsSnapshot
+}
+
+async function streamActiveRequests({ signal, onSnapshot }: ActiveRequestsStreamOptions): Promise<void> {
+  const headers = new Headers({ Accept: 'text/event-stream' })
+  const adminKey = getAdminKey()
+  if (adminKey) headers.set('X-Admin-Key', adminKey)
+
+  const res = await fetch(`${BASE}/runtime-status/active-requests/events`, {
+    cache: 'no-store',
+    headers,
+    signal,
+  })
+  if (!res.ok) {
+    const body = await res.text()
+    const message = extractAdminErrorMessage(body, res.status)
+    if (res.status === 401) {
+      resetAdminAuthState()
+      throw new AdminUnauthorizedError(message)
+    }
+    throw new Error(message)
+  }
+  if (!res.body) throw new Error('Active requests event stream is unavailable')
+
+  const parser = createSSEParser((event) => {
+    if (event.event === 'snapshot') onSnapshot(parseActiveRequestsSnapshot(event.data))
+  })
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    parser.push(decoder.decode(value, { stream: true }))
+  }
+  parser.push(decoder.decode())
+  parser.finish()
+}
+
 function buildOpsErrorSearchParams(params: {
   start: string
   end: string
@@ -242,6 +299,7 @@ export const api = {
   getHealth: () => request<HealthResponse>('/health'),
   getOpsOverview: () => request<OpsOverviewResponse>('/ops/overview'),
   getRuntimeStatus: () => request<RuntimeStatusResponse>('/runtime-status'),
+  streamActiveRequests,
   shutdownSystem: () => request<ShutdownResponse>('/system/shutdown', { method: 'POST' }),
   getResetRadar: () => request<ResetRadarResponse>('/reset-radar'),
   getOpsErrorSummary: (params: {

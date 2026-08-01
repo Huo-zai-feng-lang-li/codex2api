@@ -436,7 +436,7 @@ accountAttempts:
 					}
 					if IsNoAvailableAccountError(reqErr) {
 						h.store.Release(account)
-						h.unbindResponsesSessionAffinity(affinityKey, account, 0)
+						h.store.UnbindSessionAffinity(selectionAffinityKey, account.ID())
 						retryExclusions.MarkHard(account.ID())
 						attemptedUpstream = false
 						log.Printf("Responses WebSocket 选中 OpenAI Responses 账号在执行前已无可用凭据，切换下一个账号重试 (attempt %d/%d, account %d)", attempt+1, maxRetries+1, account.ID())
@@ -604,7 +604,7 @@ accountAttempts:
 			}
 			if IsNoAvailableAccountError(reqErr) {
 				h.store.Release(account)
-				h.unbindResponsesSessionAffinity(affinityKey, account, 0)
+				h.store.UnbindSessionAffinity(selectionAffinityKey, account.ID())
 				retryExclusions.MarkHard(account.ID())
 				attemptedUpstream = false
 				log.Printf("Responses WebSocket 选中账号在执行前已无可用凭据，切换下一个账号重试 (attempt %d/%d, account %d)", attempt+1, maxRetries+1, account.ID())

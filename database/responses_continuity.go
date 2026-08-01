@@ -281,19 +281,27 @@ func (db *DB) PruneResponsesContinuations(ctx context.Context, accessedBefore ti
 	if db == nil || db.conn == nil {
 		return 0, nil
 	}
-	query := "DELETE FROM responses_continuity WHERE accessed_at < $1"
+	query := "SELECT response_id FROM responses_continuity WHERE accessed_at < $1"
 	if db.isSQLite() {
-		query = "DELETE FROM responses_continuity WHERE accessed_at < ?"
+		query = "SELECT response_id FROM responses_continuity WHERE accessed_at < ?"
 	}
-	result, err := db.conn.ExecContext(ctx, query, accessedBefore.UTC())
+	rows, err := db.conn.QueryContext(ctx, query, accessedBefore.UTC())
 	if err != nil {
 		return 0, err
 	}
-	deleted, err := result.RowsAffected()
-	if err == sql.ErrNoRows {
-		return 0, nil
+	defer rows.Close()
+	responseIDs := make(map[string]struct{})
+	for rows.Next() {
+		var responseID string
+		if err := rows.Scan(&responseID); err != nil {
+			return 0, err
+		}
+		responseIDs[responseID] = struct{}{}
 	}
-	return deleted, err
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	return db.deleteResponsesContinuations(ctx, responseIDs)
 }
 
 type responsesContinuationMeta struct {
@@ -305,6 +313,9 @@ type responsesContinuationMeta struct {
 func (db *DB) TrimResponsesContinuations(ctx context.Context, maxEntries, maxBytes int) (int64, error) {
 	if db == nil || db.conn == nil || maxEntries <= 0 || maxBytes <= 0 {
 		return 0, nil
+	}
+	if err := db.compactResponsesContinuityPersistence(ctx); err != nil {
+		return 0, err
 	}
 	count, totalBytes, err := db.responsesContinuityUsage(ctx)
 	if err != nil {
@@ -390,14 +401,25 @@ func markResponsesContinuationSubtree(root string, children map[string][]string,
 }
 
 func (db *DB) deleteResponsesContinuations(ctx context.Context, responseIDs map[string]struct{}) (int64, error) {
-	if len(responseIDs) == 0 {
-		return 0, nil
-	}
 	tx, err := db.conn.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
+	deleted, err := db.deleteResponsesContinuationsWith(ctx, tx, responseIDs)
+	if err != nil {
+		return 0, err
+	}
+	if err := db.repairResponsesContinuationHeads(ctx, tx); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return deleted, nil
+}
+
+func (db *DB) deleteResponsesContinuationsWith(ctx context.Context, tx *sql.Tx, responseIDs map[string]struct{}) (int64, error) {
 	ids := make([]string, 0, len(responseIDs))
 	for responseID := range responseIDs {
 		ids = append(ids, responseID)
@@ -428,8 +450,116 @@ func (db *DB) deleteResponsesContinuations(ctx context.Context, responseIDs map[
 		}
 		deleted += count
 	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
 	return deleted, nil
+}
+
+func (db *DB) compactResponsesContinuityPersistence(ctx context.Context) error {
+	tx, err := db.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	query := `
+		UPDATE responses_continuity
+		SET input_json = ?, output_json = ?, size_bytes = 0
+		WHERE replayable = ?
+		  AND state IN ('failed', 'cancelled', 'completed')
+		  AND (size_bytes <> 0 OR input_json <> ? OR output_json <> ?)`
+	if !db.isSQLite() {
+		query = `
+			UPDATE responses_continuity
+			SET input_json = $1, output_json = $2, size_bytes = 0
+			WHERE replayable = $3
+			  AND state IN ('failed', 'cancelled', 'completed')
+			  AND (size_bytes <> 0 OR input_json <> $4 OR output_json <> $5)`
+	}
+	if _, err := tx.ExecContext(ctx, query,
+		[]byte("null"), []byte("null"), false, []byte("null"), []byte("null"),
+	); err != nil {
+		return err
+	}
+	if err := db.repairResponsesContinuationHeads(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+type invalidResponsesContinuationHead struct {
+	sessionID    string
+	operationSeq int64
+}
+
+func (db *DB) repairResponsesContinuationHeads(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT h.session_id, h.operation_seq
+		FROM responses_continuity_heads h
+		LEFT JOIN responses_continuity latest ON latest.response_id = h.latest_response_id
+		LEFT JOIN responses_continuity replayable ON replayable.response_id = h.latest_replayable_id
+		WHERE latest.response_id IS NULL
+		   OR replayable.response_id IS NULL
+		   OR replayable.replayable = FALSE
+		   OR replayable.state NOT IN ('completed', 'interrupted_replayable')`)
+	if err != nil {
+		return err
+	}
+	invalidHeads := make([]invalidResponsesContinuationHead, 0)
+	for rows.Next() {
+		var head invalidResponsesContinuationHead
+		if err := rows.Scan(&head.sessionID, &head.operationSeq); err != nil {
+			rows.Close()
+			return err
+		}
+		invalidHeads = append(invalidHeads, head)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, head := range invalidHeads {
+		latestResponseID, operationSeq, err := db.latestResponsesContinuationCandidate(ctx, tx, head.sessionID, false)
+		if err != nil {
+			return err
+		}
+		latestReplayableID, _, err := db.latestResponsesContinuationCandidate(ctx, tx, head.sessionID, true)
+		if err != nil {
+			return err
+		}
+		if latestResponseID != "" && latestReplayableID != "" {
+			if err := db.upsertResponsesContinuationHeadWith(ctx, tx, head.sessionID, latestResponseID, latestReplayableID, operationSeq); err != nil {
+				return err
+			}
+			continue
+		}
+		query := "DELETE FROM responses_continuity_heads WHERE session_id = $1 AND operation_seq <= $2"
+		if db.isSQLite() {
+			query = "DELETE FROM responses_continuity_heads WHERE session_id = ? AND operation_seq <= ?"
+		}
+		if _, err := tx.ExecContext(ctx, query, head.sessionID, head.operationSeq); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (db *DB) latestResponsesContinuationCandidate(ctx context.Context, tx *sql.Tx, sessionID string, replayableOnly bool) (string, int64, error) {
+	placeholder := "$1"
+	if db.isSQLite() {
+		placeholder = "?"
+	}
+	filter := ""
+	if replayableOnly {
+		filter = " AND replayable = TRUE AND state IN ('completed', 'interrupted_replayable')"
+	}
+	query := fmt.Sprintf(`
+		SELECT response_id, operation_seq
+		FROM responses_continuity
+		WHERE session_id = %s%s
+		ORDER BY operation_seq DESC, accessed_at DESC, created_at DESC
+		LIMIT 1`, placeholder, filter)
+	var responseID string
+	var operationSeq int64
+	err := tx.QueryRowContext(ctx, query, sessionID).Scan(&responseID, &operationSeq)
+	if err == sql.ErrNoRows {
+		return "", 0, nil
+	}
+	return responseID, operationSeq, err
 }

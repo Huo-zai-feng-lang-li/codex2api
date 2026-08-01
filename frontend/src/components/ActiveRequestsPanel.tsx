@@ -1,5 +1,7 @@
+import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { RuntimeActiveRequest } from '../types'
+import { advanceRuntimeDuration } from '../lib/runtimeDuration'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -11,6 +13,8 @@ interface ActiveRequestsPanelProps {
 
 export default function ActiveRequestsPanel({ requests, className = '' }: ActiveRequestsPanelProps) {
   const { t } = useTranslation()
+  const nowMs = useActiveRequestClock(requests.length > 0)
+  const snapshotAtMs = useRequestSnapshotBaseline(requests)
   return (
     <Card className={className}>
       <CardContent className="p-5">
@@ -58,7 +62,9 @@ export default function ActiveRequestsPanel({ requests, className = '' }: Active
                   <TableCell>
                     <Badge variant="secondary">{request.stream ? t('runtime.streamMode') : t('runtime.syncMode')}</Badge>
                   </TableCell>
-                  <TableCell className="text-right font-mono text-[12px]">{formatDurationMs(request.duration_ms)}</TableCell>
+                  <TableCell className="text-right font-mono text-[12px]">
+                    {formatDurationMs(advanceRuntimeDuration(request.duration_ms, snapshotAtMs, nowMs))}
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -67,6 +73,27 @@ export default function ActiveRequestsPanel({ requests, className = '' }: Active
       </CardContent>
     </Card>
   )
+}
+
+function useActiveRequestClock(enabled: boolean): number {
+  const [nowMs, setNowMs] = useState(Date.now)
+
+  useEffect(() => {
+    setNowMs(Date.now())
+    if (!enabled) return
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1_000)
+    return () => window.clearInterval(timer)
+  }, [enabled])
+
+  return nowMs
+}
+
+function useRequestSnapshotBaseline(requests: RuntimeActiveRequest[]): number {
+  const snapshot = useRef({ requests, receivedAtMs: Date.now() })
+  if (snapshot.current.requests !== requests) {
+    snapshot.current = { requests, receivedAtMs: Date.now() }
+  }
+  return snapshot.current.receivedAtMs
 }
 
 function formatRuntimeAccountLabel(request: RuntimeActiveRequest): string {

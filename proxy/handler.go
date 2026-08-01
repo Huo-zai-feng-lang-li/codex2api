@@ -87,9 +87,7 @@ func (h *Handler) responsesContinuationOwnerUnavailable(accountID int64) bool {
 }
 
 func responsesContinuationAffinityKey(body []byte, affinityKey string) string {
-	if strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String()) == "" {
-		return ""
-	}
+	_ = body
 	return affinityKey
 }
 
@@ -1622,7 +1620,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				}
 				if IsNoAvailableAccountError(reqErr) {
 					h.store.Release(account)
-					h.unbindResponsesSessionAffinity(affinityKey, account, 0)
+					h.store.UnbindSessionAffinity(selectionAffinityKey, account.ID())
 					retryExclusions.MarkHard(account.ID())
 					log.Printf("选中 OpenAI Responses 账号在执行前已无可用凭据，切换下一个账号重试 (attempt %d/%d, account %d, /v1/responses)", attempt+1, maxRetries+1, account.ID())
 					attemptedUpstream = false
@@ -2097,7 +2095,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			}
 			if IsNoAvailableAccountError(reqErr) {
 				h.store.Release(account)
-				h.unbindResponsesSessionAffinity(affinityKey, account, 0)
+				h.store.UnbindSessionAffinity(selectionAffinityKey, account.ID())
 				retryExclusions.MarkHard(account.ID())
 				log.Printf("选中账号在执行前已无可用凭据，切换下一个账号重试 (attempt %d/%d, account %d, /v1/responses)", attempt+1, maxRetries+1, account.ID())
 				attemptedUpstream = false

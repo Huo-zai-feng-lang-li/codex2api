@@ -79,6 +79,53 @@ func TestNextForStrictSessionExcludingWithFilterHonorsExclusionAfterUnbind(t *te
 	store.Release(account)
 }
 
+func TestNextForStrictSessionExcludingWithFilterFallsBackFromPaymentRequired(t *testing.T) {
+	bound := &Account{
+		DBID:           1,
+		AccessToken:    "tok-1",
+		Status:         StatusCooldown,
+		CooldownReason: "payment_required",
+		CooldownUtil:   time.Now().Add(time.Hour),
+	}
+	store := &Store{
+		accounts:       []*Account{bound, {DBID: 2, AccessToken: "tok-2"}},
+		maxConcurrency: 1,
+	}
+	store.bindSessionAffinity("session-payment-required", bound, "http://proxy-1")
+
+	account, proxyURL := store.NextForStrictSessionExcludingWithFilter("session-payment-required", 0, map[int64]bool{1: true}, nil)
+	if account == nil || account.ID() != 2 {
+		t.Fatalf("fallback account = %+v, want account 2", account)
+	}
+	if proxyURL != "" {
+		t.Fatalf("proxyURL = %q, want empty after fallback", proxyURL)
+	}
+	store.Release(account)
+}
+
+func TestNextForStrictSessionExcludingWithFilterFallsBackFromError(t *testing.T) {
+	bound := &Account{
+		DBID:        1,
+		AccessToken: "tok-1",
+		Status:      StatusError,
+		ErrorMsg:    "token invalid",
+	}
+	store := &Store{
+		accounts:       []*Account{bound, {DBID: 2, AccessToken: "tok-2"}},
+		maxConcurrency: 1,
+	}
+	store.bindSessionAffinity("session-error", bound, "http://proxy-1")
+
+	account, proxyURL := store.NextForStrictSessionExcludingWithFilter("session-error", 0, map[int64]bool{1: true}, nil)
+	if account == nil || account.ID() != 2 {
+		t.Fatalf("fallback account = %+v, want account 2", account)
+	}
+	if proxyURL != "" {
+		t.Fatalf("proxyURL = %q, want empty after fallback", proxyURL)
+	}
+	store.Release(account)
+}
+
 func TestNextForSessionUsesCachedAffinityWhenLocalBindingMissing(t *testing.T) {
 	tokenCache := cache.NewMemory(1)
 	defer tokenCache.Close()

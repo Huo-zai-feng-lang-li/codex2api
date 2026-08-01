@@ -117,7 +117,7 @@ func (h *Handler) nextRetryAccountPickForSession(ctx context.Context, affinityKe
 			snapshot = h.store.DispatchPoolSnapshotWithFilter(apiKeyID, exclude, filter)
 			log.Printf("小账号池首字超时软排除已试完，清空本次请求软排除: pool_total=%d pool_excluded=%d", snapshot.Total, snapshot.Excluded)
 		}
-		account, stickyProxyURL := h.store.NextForStrictSessionWithFilter(affinityKey, apiKeyID, filter)
+		account, stickyProxyURL := h.store.NextForStrictSessionExcludingWithFilter(affinityKey, apiKeyID, exclude, filter)
 		if account != nil {
 			return retryAccountPick{account: account, proxyURL: stickyProxyURL, poolSnapshot: snapshot}
 		}
@@ -126,7 +126,7 @@ func (h *Handler) nextRetryAccountPickForSession(ctx context.Context, affinityKe
 			return retryAccountPick{poolSnapshot: snapshot, queueFull: true}
 		}
 		waitStart := time.Now()
-		account, stickyProxyURL = h.store.WaitForStrictSessionAvailableWithFilter(ctx, affinityKey, 30*time.Second, apiKeyID, filter)
+		account, stickyProxyURL = h.store.WaitForStrictSessionAvailableExcludingWithFilter(ctx, affinityKey, 30*time.Second, apiKeyID, exclude, filter)
 		queueWait := time.Since(waitStart)
 		releaseQueue()
 		if account != nil {

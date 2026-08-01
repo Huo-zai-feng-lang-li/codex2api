@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"os"
 	goruntime "runtime"
 	"strings"
@@ -310,7 +311,7 @@ func (h *Handler) runtimeActiveRequestDetails(now time.Time) []runtimeActiveRequ
 			AccountName:      snapshot.AccountName,
 			AccountEmail:     snapshot.AccountEmail,
 			Endpoint:         snapshot.Endpoint,
-			UpstreamEndpoint: snapshot.UpstreamEndpoint,
+			UpstreamEndpoint: sanitizeRuntimeUpstreamEndpoint(snapshot.UpstreamEndpoint),
 			Model:            snapshot.Model,
 			EffectiveModel:   snapshot.EffectiveModel,
 			APIKeyID:         snapshot.APIKeyID,
@@ -322,6 +323,18 @@ func (h *Handler) runtimeActiveRequestDetails(now time.Time) []runtimeActiveRequ
 		})
 	}
 	return out
+}
+
+func sanitizeRuntimeUpstreamEndpoint(endpoint string) string {
+	parsed, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil {
+		return ""
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.ForceQuery = false
+	parsed.Fragment = ""
+	return parsed.String()
 }
 
 func (h *Handler) runtimeImageStorageStatus() runtimeImageStorageResponse {

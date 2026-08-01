@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1613,7 +1614,7 @@ func TestOpenAIResponsesFallbackRejectsDuplicateToolOutputs(t *testing.T) {
 	}
 }
 
-func TestPrepareOpenAIResponsesWebSocketContinuationReleasesOwnerAfterReplay(t *testing.T) {
+func TestPrepareOpenAIResponsesWebSocketContinuationKeepsOwnerThenReplayFallback(t *testing.T) {
 	tests := []struct {
 		name           string
 		call           string
@@ -1643,21 +1644,26 @@ func TestPrepareOpenAIResponsesWebSocketContinuationReleasesOwnerAfterReplay(t *
 			request := []byte(fmt.Sprintf(`{"model":"gpt-5.4","previous_response_id":%q,"input":[%s]}`, responseID, tt.followup))
 
 			body, filter, replayed, ownerBound := prepareOpenAIResponsesWebSocketContinuation(request, "", func(*auth.Account) bool { return true })
-			if !replayed {
-				t.Fatal("complete WebSocket continuation should replay local history")
+			if replayed || !ownerBound {
+				t.Fatalf("prepare replayed = %v, ownerBound = %v; want owner-bound before fallback", replayed, ownerBound)
 			}
-			if ownerBound {
-				t.Fatal("complete WebSocket replay must release owner binding")
+			if !bytes.Equal(body, request) {
+				t.Fatalf("owner-bound prepare changed request: %s", body)
 			}
-			if gjson.GetBytes(body, "previous_response_id").Exists() {
-				t.Fatalf("replayed WebSocket body retained previous_response_id: %s", body)
+			if !filter(owner) || filter(fallback) {
+				t.Fatal("owner-bound prepare must not release the owner-only account filter")
 			}
-			if !filter(owner) || !filter(fallback) {
-				t.Fatal("local WebSocket replay must release the owner-only account filter")
+
+			activation, ok := activateOpenAIResponsesContinuationFallback(context.Background(), request, "", false, "test_owner_unavailable")
+			if !ok || !activation.activated {
+				t.Fatalf("complete WebSocket continuation should activate fallback, ok=%v activated=%v", ok, activation.activated)
 			}
-			input := gjson.GetBytes(body, "input").Array()
+			if gjson.GetBytes(activation.body, "previous_response_id").Exists() {
+				t.Fatalf("replayed WebSocket body retained previous_response_id: %s", activation.body)
+			}
+			input := gjson.GetBytes(activation.body, "input").Array()
 			if len(input) != 3 || input[1].Get("type").String() != tt.expectedCall || input[2].Get("type").String() != tt.expectedOutput {
-				t.Fatalf("WebSocket replay did not preserve complete tool history: %s", body)
+				t.Fatalf("WebSocket replay did not preserve complete tool history: %s", activation.body)
 			}
 		})
 	}

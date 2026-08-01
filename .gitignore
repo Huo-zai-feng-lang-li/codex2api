@@ -36,6 +36,7 @@ USAGE_WINDOW_LOGIC.md
 data/*.db
 data/*.db-shm
 data/*.db-wal
+data/*.bak
 data/backups/
 data/images/
 data/backgrounds/

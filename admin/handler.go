@@ -288,6 +288,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.DELETE("/account-groups/:id", h.DeleteAccountGroup)
 	api.GET("/health", h.GetHealth)
 	api.GET("/runtime-status", h.GetRuntimeStatus)
+	api.GET("/runtime-status/active-requests/events", h.StreamActiveRequests)
 	api.GET("/ops/overview", h.GetOpsOverview)
 	api.GET("/ops/runtime-status", h.GetRuntimeStatus)
 	api.GET("/ops/errors", h.GetOpsErrorLogs)

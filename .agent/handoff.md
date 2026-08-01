@@ -1,44 +1,66 @@
-# 最新接续状态 (2026-08-01 16:20)
+# 最新接续状态 (2026-08-02 00:28)
 
 ## 核心进展
-- Bug 修复型：Responses 续链已收紧为“无完整历史不剥离 `previous_response_id`”。当前关键修复在 `proxy/responses_ws.go`，待处理 WS 回归用例后再完整验证、构建和热更新。
+- Bug 修复型：Responses 续链、切号和持久化容量治理已完成到源码与运行态。当前服务 PID `27124`，运行路径 `C:\Users\Administrator\Desktop\codex2api\codex2api.exe`，运行 EXE SHA256 为 `E17301BB23C6E301F4122C28B724F39278A7A8C5368452880536F68158CFD9F8`。
+- `/health` 已复验：`status=ok`、`available=27/45`、`responses_memory.inflight_requests=0`、`continuity_persistent=true`、`continuity_persistence_failures=0`。
+- 续链持久化垃圾已清理并压缩：不可回放终态 payload 已归零，悬空 `responses_continuity_heads` 已归零，SQLite 主库从约 85 MB 压缩到约 16 MB。
 
 ## 核心动机与背景 (Motivation & Background)
-- 审计发现 WS 上游不支持或缺少终止事件时会转 HTTP；旧逻辑调用 `expandPreviousResponse` 后无条件删除 `previous_response_id`。
-- `responseCache` 仅缓存工具调用需要的局部上下文，不能证明完整会话历史；缓存未命中或祖先消息缺失时会静默发送无指针 HTTP 请求，造成续链上下文丢失。
-- 此错误会放大为上游的会话/终端/工作区权限类错误。代理未硬编码该错误文本，且会透传上游错误，因此不能宣称已消除。
-- 项目规则要求 HTTP/WS 对称、原账号 Cooling 时等待不盲换、只在 Disabled/401/403/删除后安全切号、禁止 409 死锁、真实 A->B 两连包均 200 才可验收。
+- 用户关注：账号 `rate_limited/payment_required/401/403/Disabled/错误状态` 时是否能丝滑换号；换号、WS 降级、重启恢复时是否还会静默丢上下文并诱发“当前会话未提供终端或工作区文件访问权限”。
+- 根因分两层：
+  - 调度层：严格会话绑定曾把长期不可调度状态当作普通等待，导致池里有号也可能卡住。
+  - 续链层：跨账号续接不能依赖上游原 `previous_response_id`，必须由本地完整历史物化后再剥离指针；历史不完整时只能显式失败。
+- 持久化层新增问题：旧库里大量不可回放终态节点占用配额，并存在悬空 head，影响重启恢复和清理效率。
 
 ## 关键设计与实现 (Implementation & Decisions)
-- `proxy/translator.go`、`proxy/executor.go`：已移除普通 Codex 请求路径对 `previous_response_id` 的无条件删除。
-- `proxy/responses_continuity.go`：Codex/第三方有显式 `previous_response_id` 时必须先走本地完整历史回放；历史不可验证时返回显式 `continuation_context_unavailable`，不再当作新会话发送。
-- `auth/store.go`、`proxy/retry_exclusions.go`、`proxy/handler.go`、`proxy/responses_ws.go`：已新增严格会话亲和选择和等待。账号未 Disabled 时保持绑定；401/403 或 Disabled 才解绑。HTTP/WS 首字失败回归测试已覆盖同账号重试。
-- 当前 WS 修复：`prepareOpenAIResponsesHTTPBodyFromWebSocket` 改为三返回值，只有 `buildOpenAIResponsesContinuationFallback` 从续链注册表成功物化完整历史时才删除指针；否则调用方写 `response.failed`，错误码 `continuation_context_unavailable`，且不请求 HTTP 上游。
-- 当前 WS 修复：`prepareOpenAIResponsesWebSocketContinuation` 不再在账号选择前预先回放；先保持原生 WS，只有需要降级到 HTTP/切号时才要求完整历史物化。
-- 新增回归：`TestResponsesWebSocketFallbackWithoutContinuationHistoryFailsExplicitly`。旧代码红灯证据：WS 400 后实际请求 HTTP 且下游收到 `response.completed`；修复目标为 HTTP 调用数 0、下游 `response.failed` 503。
+- `auth/store.go`
+  - `rate_limited`、`payment_required`、`StatusError`、Disabled、DispatchPaused、Banned、账号删除：不等待绑定账号，解绑后切换号池。
+  - 普通短暂 Cooling、并发占满、短时不可调度：继续等待原绑定账号。
+  - 严格会话无候选账号时不再空等 30 秒，会触发恢复探针并快速返回。
+- `proxy/handler.go`、`proxy/responses_ws.go`、`proxy/retry_exclusions.go`
+  - HTTP 与 WebSocket 对称使用严格亲和和失败账号排除；解绑后不会重新挑中刚失败账号。
+  - owner 不可用、第三方无状态续链、WS 转 HTTP 时，必须先激活完整本地历史回放；失败返回 `continuation_context_unavailable`。
+- `proxy/responses_continuity.go`
+  - 只有完整历史和工具调用状态可验证时才物化历史并删除 `previous_response_id`。
+  - 不可回放终态不再保留大体积 input/output。
+  - 滑动 TTL 默认改为 24 小时，并支持 `CODEX_RESPONSES_CONTINUITY_TTL_HOURS`。
+- `database/responses_continuity.go`
+  - `PruneResponsesContinuations` / `TrimResponsesContinuations` 在事务内清理节点，并定向修复或删除悬空 head。
+  - Trim 先瘦身遗留不可回放 payload，再按容量淘汰，避免无效数据挤占 64 MiB 配额。
+- `.agent/rules/README.md`
+  - 已固化 HTTP/WS 双通道、切号完整历史、持久化容量治理、TTL 配置、显式失败边界，防止后续 agent 改回危险语义。
 
 ## 验证证据
-- 红灯：`go test ./proxy -run '^TestResponsesWebSocketFallbackWithoutContinuationHistoryFailsExplicitly$' -count=1`，旧逻辑失败，日志显示 WS 400 后 HTTP fallback，断言实际收到 `response.completed`。
-- 中间定向测试曾通过：未知历史显式失败、未来工具字段保留、WS 空 400 回退；该结果发生在后续“只信任完整续链注册表”收紧之前，不能作为最终验收。
-- 当前验证：`go test ./proxy -run '^TestResponsesWebSocket' -count=1` 仍失败。需先按新安全语义调整/补齐下列测试及对应逻辑：
-  - `TestResponsesWebSocketFallbackRequestErrorPreservesTransportFailureWithoutAccountRetry`
-  - `TestResponsesWebSocketOtherCloseAndEOFDoNotUseShortHTTPFallback`
-  - `TestResponsesWebSocketOwnerUnavailableReportsIncompleteContinuation`（此前也有 2 秒读超时记录，需单独定位）
-- 更新后的运行实例：`codex2api.exe` PID `36488`，监听 `127.0.0.1:18080`，`GET /health` 返回 200。该实例早于当前未构建的源代码修改，不能视为本轮修复已上线。
-- `GET /v1/models` 无认证返回 401；未读取或暴露任何 API Key，因此尚不能对真实服务执行授权 A->B 两连包端到端测试。
+- `go test ./proxy -run 'TestResponses(NoAvailableAccountFailsFastWithoutCancelledContext|RequestTriggersRecoveryProbeWhenNoDispatchableAccount)$|TestPrepareOpenAIResponsesWebSocketContinuationKeepsOwnerThenReplayFallback' -count=1`：PASS。
+- `go test ./database -run 'ResponsesContinuity|LatestReplayableResponse' -count=1`：PASS。
+- `go test ./proxy -run '^TestOpenAIResponsesContinuity|^TestResponsesMemoryLimitsReadEnvironment$' -count=1`：PASS。
+- `go test ./proxy -count=1`：PASS。
+- `go test ./... -count=1`：PASS，全部包通过。
+- `go vet ./...`：PASS。
+- `git diff --check`：PASS，仅有既有 LF/CRLF 提示。
+- 数据备份：`data\codex2api.db.pre-continuity-cleanup-20260802-001210.bak`。
+- 数据清理后复验：
+  - `terminal_non_replayable_rows=54`
+  - `terminal_non_replayable_bytes=0`
+  - `dangling_latest=0`
+  - `dangling_replayable=0`
+  - `heads=3`
+  - `db_file_bytes=16003072`
 
 ## 待办事项 (Next Steps)
-- [ ] 逐个定位并修正当前失败的 WS 回归用例；区分应改为“历史缺失 503”的旧预期与真实实现缺陷。
-- [ ] 补充真实 WS 两连包机器人：包 A 获得 `response_id`，包 B 携带该 ID；分别覆盖完整历史安全降级 200 和未知历史 503/HTTP 调用数 0。
-- [ ] 运行 `go test ./proxy -count=1`、`go test ./... -count=1`、`go vet ./...`、`git diff --check`。
-- [ ] 构建并热更新新二进制前，确认 `/health` 的 `responses_memory.inflight_requests == 0`；热更新后用授权测试 Key 执行真实 A->B 两连包，并核验两条 200 使用日志及错误日志为零。
+- [ ] 可选：用户用真实外部账号做一次 A -> B 两连包验收：首包拿 `response_id`，让账号 A 进入 `rate_limited/payment_required` 或不可用，再用同会话 `previous_response_id` 发续包，确认自动切到账号 B 且工具/终端/工作区上下文不断。
+- [ ] 若真实验收仍出现“当前会话未提供终端或工作区文件访问权限”，优先查上游/客户端权限状态；代理层当前不会生成这句，也不会在历史不完整时静默新会话。
 
 ## 关键上下文
 - 目录: `C:\Users\Administrator\Desktop\codex2api`
 - 主要文件:
   - `C:\Users\Administrator\Desktop\codex2api\.agent\rules\README.md`
-  - `C:\Users\Administrator\Desktop\codex2api\proxy\responses_ws.go`：`fallbackToHTTP`、`prepareOpenAIResponsesHTTPBodyFromWebSocket`、`forwardResponsesWebSocketTurn`
-  - `C:\Users\Administrator\Desktop\codex2api\proxy\responses_continuity.go`：`activateOpenAIResponsesContinuationFallback`、`buildOpenAIResponsesContinuationFallback`、`prepareOpenAIResponsesWebSocketContinuation`
-  - `C:\Users\Administrator\Desktop\codex2api\proxy\handler.go`：HTTP Responses、`writeContinuationContextUnavailable`
-  - `C:\Users\Administrator\Desktop\codex2api\auth\store.go`：`NextForStrictSessionWithFilter`、`WaitForStrictSessionAvailableWithFilter`
-  - `C:\Users\Administrator\Desktop\codex2api\proxy\responses_transport_cache_test.go`：WS fallback 安全回归
+  - `C:\Users\Administrator\Desktop\codex2api\.agent\plan-Responses续链WS闭环.md`
+  - `C:\Users\Administrator\Desktop\codex2api\auth\store.go`
+  - `C:\Users\Administrator\Desktop\codex2api\database\responses_continuity.go`
+  - `C:\Users\Administrator\Desktop\codex2api\database\responses_continuity_test.go`
+  - `C:\Users\Administrator\Desktop\codex2api\proxy\responses_continuity.go`
+  - `C:\Users\Administrator\Desktop\codex2api\proxy\responses_continuity_test.go`
+  - `C:\Users\Administrator\Desktop\codex2api\proxy\responses_ws.go`
+  - `C:\Users\Administrator\Desktop\codex2api\proxy\handler.go`
+  - `C:\Users\Administrator\Desktop\codex2api\proxy\retry_exclusions.go`

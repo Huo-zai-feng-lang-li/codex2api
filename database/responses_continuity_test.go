@@ -42,6 +42,9 @@ func TestResponsesContinuityPersistsAndPrunesRows(t *testing.T) {
 			t.Fatalf("UpsertResponsesContinuation(%s): %v", rows[i].ResponseID, err)
 		}
 	}
+	if err := db.UpsertResponsesContinuationHead(ctx, "session-expired", "resp_expired", "resp_expired", 1); err != nil {
+		t.Fatalf("seed expired head: %v", err)
+	}
 
 	deleted, err := db.PruneResponsesContinuations(ctx, now.Add(-time.Hour))
 	if err != nil {
@@ -53,6 +56,9 @@ func TestResponsesContinuityPersistsAndPrunesRows(t *testing.T) {
 
 	if _, ok, err := db.GetResponsesContinuation(ctx, "resp_expired"); err != nil || ok {
 		t.Fatalf("expired row: ok=%v err=%v", ok, err)
+	}
+	if _, _, _, found, err := db.GetResponsesContinuationHead(ctx, "session-expired"); err != nil || found {
+		t.Fatalf("expired head: found=%v err=%v", found, err)
 	}
 	root, ok, err := db.GetResponsesContinuation(ctx, "resp_root")
 	if err != nil || !ok {
@@ -88,12 +94,15 @@ func TestTrimResponsesContinuationsBoundsDiskRowsAndBytes(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	for i, id := range []string{"resp_a", "resp_b", "resp_c"} {
 		row := ResponsesContinuationRow{
-			ResponseID: id, InputJSON: []byte(`[]`), OutputJSON: []byte(`[]`),
+			ResponseID: id, SessionID: "session-" + id, InputJSON: []byte(`[{"large":"legacy"}]`), OutputJSON: []byte(`[{"large":"legacy"}]`),
 			Replayable: false, CreatedAt: now.Add(time.Duration(i) * time.Second),
 			AccessedAt: now.Add(time.Duration(i) * time.Second), SizeBytes: 40,
 		}
 		if err := db.UpsertResponsesContinuation(ctx, &row); err != nil {
 			t.Fatalf("UpsertResponsesContinuation(%s): %v", id, err)
+		}
+		if err := db.UpsertResponsesContinuationHead(ctx, row.SessionID, id, id, int64(i+1)); err != nil {
+			t.Fatalf("seed head %s: %v", id, err)
 		}
 	}
 
@@ -101,16 +110,25 @@ func TestTrimResponsesContinuationsBoundsDiskRowsAndBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TrimResponsesContinuations: %v", err)
 	}
-	if deleted != 2 {
-		t.Fatalf("deleted = %d, want 2", deleted)
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want 1 after compaction removes byte pressure", deleted)
 	}
-	for _, responseID := range []string{"resp_a", "resp_b"} {
-		if _, ok, err := db.GetResponsesContinuation(ctx, responseID); err != nil || ok {
-			t.Fatalf("trimmed %s: ok=%v err=%v", responseID, ok, err)
+	if _, ok, err := db.GetResponsesContinuation(ctx, "resp_a"); err != nil || ok {
+		t.Fatalf("trimmed resp_a: ok=%v err=%v", ok, err)
+	}
+	for _, responseID := range []string{"resp_a", "resp_b", "resp_c"} {
+		if _, _, _, found, err := db.GetResponsesContinuationHead(ctx, "session-"+responseID); err != nil || found {
+			t.Fatalf("non-replayable head %s: found=%v err=%v", responseID, found, err)
 		}
 	}
-	if _, ok, err := db.GetResponsesContinuation(ctx, "resp_c"); err != nil || !ok {
-		t.Fatalf("retained resp_c: ok=%v err=%v", ok, err)
+	for _, responseID := range []string{"resp_b", "resp_c"} {
+		retained, ok, err := db.GetResponsesContinuation(ctx, responseID)
+		if err != nil || !ok {
+			t.Fatalf("retained %s: ok=%v err=%v", responseID, ok, err)
+		}
+		if string(retained.InputJSON) != "null" || string(retained.OutputJSON) != "null" || retained.SizeBytes != 0 {
+			t.Fatalf("legacy non-replayable payload not compacted: %+v", retained)
+		}
 	}
 }
 
@@ -148,5 +166,34 @@ func TestGetLatestReplayableResponseBySessionIDSkipsNewestPending(t *testing.T) 
 	}
 	if row.ResponseID != "resp_replayable" {
 		t.Fatalf("response_id = %q, want resp_replayable", row.ResponseID)
+	}
+}
+
+func TestTrimResponsesContinuationsPreservesPendingPayload(t *testing.T) {
+	ctx := context.Background()
+	db, err := New("sqlite", filepath.Join(t.TempDir(), "codex2api.db"))
+	if err != nil {
+		t.Fatalf("New(sqlite): %v", err)
+	}
+	defer db.Close()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	pending := ResponsesContinuationRow{
+		ResponseID: "resp_pending_payload", SessionID: "session-pending",
+		InputJSON: []byte(`[{"type":"message","content":"still running"}]`), OutputJSON: []byte(`[]`),
+		Replayable: false, State: "pending", CreatedAt: now, AccessedAt: now, SizeBytes: 58,
+	}
+	if err := db.UpsertResponsesContinuation(ctx, &pending); err != nil {
+		t.Fatalf("seed pending row: %v", err)
+	}
+	if _, err := db.TrimResponsesContinuations(ctx, 10, 1<<20); err != nil {
+		t.Fatalf("TrimResponsesContinuations: %v", err)
+	}
+	row, ok, err := db.GetResponsesContinuation(ctx, pending.ResponseID)
+	if err != nil || !ok {
+		t.Fatalf("pending row: ok=%v err=%v", ok, err)
+	}
+	if string(row.InputJSON) != string(pending.InputJSON) || row.SizeBytes != pending.SizeBytes {
+		t.Fatalf("pending payload changed: %+v", row)
 	}
 }

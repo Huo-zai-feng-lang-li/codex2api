@@ -1647,6 +1647,9 @@ type Store struct {
 	activeRequestSeq     int64
 	activeRequestsMu     sync.RWMutex
 	activeRequests       map[int64]ActiveRequestMeta
+	activeRequestSubSeq  int64
+	activeRequestSubsMu  sync.Mutex
+	activeRequestSubs    map[int64]chan struct{}
 	dispatchQueueDepth   int64
 	dispatchQueueLimit   int64
 }
@@ -1789,6 +1792,7 @@ func (s *Store) BeginActiveRequest(meta ActiveRequestMeta) int64 {
 	}
 	s.activeRequests[id] = meta
 	s.activeRequestsMu.Unlock()
+	s.notifyActiveRequestChanges()
 	return id
 }
 
@@ -1798,8 +1802,14 @@ func (s *Store) EndActiveRequest(id int64) {
 		return
 	}
 	s.activeRequestsMu.Lock()
-	delete(s.activeRequests, id)
+	_, existed := s.activeRequests[id]
+	if existed {
+		delete(s.activeRequests, id)
+	}
 	s.activeRequestsMu.Unlock()
+	if existed {
+		s.notifyActiveRequestChanges()
+	}
 }
 
 // ActiveRequestSnapshots 返回按开始时间排序的活跃请求快照。
@@ -3260,15 +3270,21 @@ func (s *Store) NextForSession(key string, apiKeyID int64, exclude map[int64]boo
 // NextForStrictSessionWithFilter keeps a Responses session on its bound account
 // until that account is explicitly disabled or removed.
 func (s *Store) NextForStrictSessionWithFilter(key string, apiKeyID int64, filter AccountFilter) (*Account, string) {
+	return s.NextForStrictSessionExcludingWithFilter(key, apiKeyID, nil, filter)
+}
+
+// NextForStrictSessionExcludingWithFilter keeps a bound Responses session on
+// its account, while applying retry exclusions after that binding is removed.
+func (s *Store) NextForStrictSessionExcludingWithFilter(key string, apiKeyID int64, exclude map[int64]bool, filter AccountFilter) (*Account, string) {
 	if s == nil {
 		return nil, ""
 	}
 	key = strings.TrimSpace(key)
 	if key == "" {
-		return s.NextExcludingWithFilter(apiKeyID, nil, filter), ""
+		return s.NextExcludingWithFilter(apiKeyID, exclude, filter), ""
 	}
 	if binding, ok := s.strictSessionBinding(key); ok {
-		if s.sessionAffinityAccountActive(binding.accountID) {
+		if s.strictSessionBindingShouldWait(binding.accountID) {
 			if account := s.takeByIDExcluding(binding.accountID, apiKeyID, nil, filter); account != nil {
 				return account, binding.proxyURL
 			}
@@ -3276,7 +3292,7 @@ func (s *Store) NextForStrictSessionWithFilter(key string, apiKeyID int64, filte
 		}
 		s.UnbindSessionAffinity(key, binding.accountID)
 	}
-	return s.NextExcludingWithFilter(apiKeyID, nil, filter), ""
+	return s.NextExcludingWithFilter(apiKeyID, exclude, filter), ""
 }
 
 func (s *Store) strictSessionBinding(key string) (sessionAffinity, bool) {
@@ -3421,6 +3437,41 @@ func (s *Store) sessionAffinityAccountActive(accountID int64) bool {
 	return false
 }
 
+func (s *Store) strictSessionBindingShouldWait(accountID int64) bool {
+	if s == nil || accountID == 0 {
+		return false
+	}
+	s.mu.RLock()
+	var target *Account
+	for _, account := range s.accounts {
+		if account != nil && account.DBID == accountID {
+			target = account
+			break
+		}
+	}
+	s.mu.RUnlock()
+	if target == nil {
+		return false
+	}
+	if atomic.LoadInt32(&target.Disabled) != 0 || atomic.LoadInt32(&target.DispatchPaused) != 0 {
+		return false
+	}
+	target.mu.RLock()
+	defer target.mu.RUnlock()
+	if target.Status == StatusError || target.healthTierLocked() == HealthTierBanned {
+		return false
+	}
+	if target.Status != StatusCooldown {
+		return true
+	}
+	switch target.CooldownReason {
+	case "rate_limited", "payment_required":
+		return false
+	default:
+		return true
+	}
+}
+
 func (s *Store) getCachedSessionAffinity(key string) (sessionAffinity, bool) {
 	if s == nil || s.tokenCache == nil {
 		return sessionAffinity{}, false
@@ -3510,16 +3561,30 @@ func (s *Store) WaitForSessionAvailable(ctx context.Context, key string, timeout
 }
 
 func (s *Store) WaitForStrictSessionAvailableWithFilter(ctx context.Context, key string, timeout time.Duration, apiKeyID int64, filter AccountFilter) (*Account, string) {
+	return s.WaitForStrictSessionAvailableExcludingWithFilter(ctx, key, timeout, apiKeyID, nil, filter)
+}
+
+// WaitForStrictSessionAvailableExcludingWithFilter waits for a bound account
+// when it remains active, and honors exclusions after the binding is gone.
+func (s *Store) WaitForStrictSessionAvailableExcludingWithFilter(ctx context.Context, key string, timeout time.Duration, apiKeyID int64, exclude map[int64]bool, filter AccountFilter) (*Account, string) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	probeStarted := s.ensureRecoveryProbeForWait(apiKeyID, exclude, filter)
+	if !s.hasAccountExistWithFilter(apiKeyID, exclude, filter) && !probeStarted {
+		return nil, ""
+	}
+
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	backoff := 50 * time.Millisecond
 
 	for {
-		if account, proxyURL := s.NextForStrictSessionWithFilter(key, apiKeyID, filter); account != nil {
+		if account, proxyURL := s.NextForStrictSessionExcludingWithFilter(key, apiKeyID, exclude, filter); account != nil {
 			return account, proxyURL
+		}
+		if !s.hasAccountExistWithFilter(apiKeyID, exclude, filter) && !s.ensureRecoveryProbeForWait(apiKeyID, exclude, filter) {
+			return nil, ""
 		}
 		backoffTimer := time.NewTimer(backoff)
 		select {

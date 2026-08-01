@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	openAIResponsesContinuityTTL          = time.Hour
+	openAIResponsesContinuityTTL          = 24 * time.Hour
 	openAIResponsesContinuityMaxEntries   = 2000
 	openAIResponsesContinuityMaxItems     = 400
 	openAIResponsesContinuityMaxItemBytes = 4 << 20
@@ -130,7 +130,7 @@ func openAIResponsesContinuityModeFromEnv(getenv func(string) string) string {
 
 func openAIResponsesContinuityLimitsFromEnv(getenv func(string) string) openAIResponsesContinuityLimits {
 	return openAIResponsesContinuityLimits{
-		ttl:          openAIResponsesContinuityTTL,
+		ttl:          time.Duration(positiveEnvInt(getenv, "CODEX_RESPONSES_CONTINUITY_TTL_HOURS", int(openAIResponsesContinuityTTL/time.Hour))) * time.Hour,
 		maxEntries:   positiveEnvInt(getenv, "CODEX_RESPONSES_CONTINUITY_MAX_ENTRIES", openAIResponsesContinuityMaxEntries),
 		maxItems:     openAIResponsesContinuityMaxItems,
 		maxItemBytes: positiveEnvInt(getenv, "CODEX_RESPONSES_CONTINUITY_MAX_CHAIN_MB", openAIResponsesContinuityMaxItemBytes>>20) << 20,

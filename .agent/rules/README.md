@@ -12,7 +12,7 @@ Codex 桌面端走 `GET /responses` (WebSocket)，其他客户端走 `POST /v1/r
 
 ### 1.2 账号死守不盲换铁律（保上下文强粘性）
 - **强制规则**：只要上轮绑定的原账号在数据库中存在且未被强制禁用（`Disabled != 0`），即使因探针/并发进入短 Cooling，`WaitForSessionAvailableWithFilter` 必须退避等待原账号恢复。**严禁因临时 Cooling 盲目换号并剥离上下文指针！**
-- **切号前提**：只有原账号被明确 `Disabled`、返回 401/403 或彻底删除时，才允许启动无缝切号降级。
+- **切号前提**：原账号明确 `Disabled`、删除、401/403、`payment_required`、账号级 `rate_limited`、`StatusError` 或本地派发凭据失效时，允许启动无缝切号降级；切号前必须确认本地完整历史可回放，否则显式返回 `continuation_context_unavailable`。
 
 ### 1.3 续链自愈零 409 铁律（封死死锁回路）
 - **强制规则**：一旦降级逻辑已激活（`alreadyActivated == true`），系统直接放行当前已自愈处理的 `body`。**绝对禁止二次触发 `writeContinuationContextIncomplete` 抛出 409 冲突错！**
@@ -24,6 +24,11 @@ Codex 桌面端走 `GET /responses` (WebSocket)，其他客户端走 `POST /v1/r
 
 ### 1.5 优雅部署与在途流量排空铁律
 - **强制规则**：热替换新二进制前，必须核对 `/health` 的 `responses_memory.inflight_requests == 0`；优雅关闭旧 PID 后再原子替换 EXE 并拉起新服务，禁止强杀导致在途连接断裂。
+
+### 1.6 续链持久化容量治理铁律
+- **强制规则**：`responses_continuity` 仅允许 replayable 节点保存完整 input/output；failed、cancelled 等不可回放节点只能保留路由和状态元数据，禁止大体积垃圾占用续链配额。
+- **清理一致性**：Prune/Trim 删除续链节点后，必须在同一事务内修复或删除悬空的 `responses_continuity_heads`；禁止留下指向不存在节点的会话头。
+- **保留时间**：续链采用最后访问时间驱动的滑动 TTL，默认 24 小时，可通过 `CODEX_RESPONSES_CONTINUITY_TTL_HOURS` 调整。历史无法完整恢复时必须显式失败，禁止静默按新会话续接。
 
 ---
 
