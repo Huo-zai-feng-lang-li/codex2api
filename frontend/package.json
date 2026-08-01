@@ -15,11 +15,12 @@
     "clsx": "^2.1.1",
     "i18next": "^25.10.9",
     "lucide-react": "^1.0.1",
+    "postcss": "^8.5.25",
     "radix-ui": "^1.4.3",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-i18next": "^16.6.6",
-    "react-router-dom": "^7.1.0",
+    "react-router-dom": "^7.18.2",
     "recharts": "^3.8.0",
     "shiki": "^3.23.0",
     "tailwind-merge": "^3.5.0",
@@ -30,6 +31,6 @@
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^6.0.1",
     "typescript": "^5.9.3",
-    "vite": "^8.0.2"
+    "vite": "^8.2.0"
   }
 }

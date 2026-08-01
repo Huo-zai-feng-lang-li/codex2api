@@ -19,6 +19,7 @@ import { Users, CheckCircle, Gauge, XCircle, Activity } from 'lucide-react'
 const DashboardUsageCharts = lazy(() => import('../components/DashboardUsageCharts'))
 
 const DASHBOARD_REFRESH_INTERVAL_MS = 15_000
+const ACTIVE_REQUESTS_REFRESH_INTERVAL_MS = 3_000
 
 function ChartsSkeleton() {
   return (
@@ -48,7 +49,7 @@ function ChartsSkeleton() {
 
 export default function Dashboard() {
   const { t } = useTranslation()
-  const activeRequests = useActiveRequestsStream()
+  const { requests: activeRequests, refreshActiveRequests } = useActiveRequestsStream()
   const [timeRange, setTimeRange] = useState<TimeRangeKey>('1h')
   const [chartData, setChartData] = useState<ChartAggregation | null>(null)
   const [chartDataRange, setChartDataRange] = useState<TimeRangeKey | null>(null)
@@ -106,6 +107,11 @@ export default function Dashboard() {
   useVisiblePolling(async () => {
     await Promise.all([reloadSilently(), loadChartData()])
   }, DASHBOARD_REFRESH_INTERVAL_MS, { enabled: timeRange === '1h' })
+  useVisiblePolling(
+    refreshActiveRequests,
+    ACTIVE_REQUESTS_REFRESH_INTERVAL_MS,
+    { enabled: activeRequests.length > 0, immediateOnVisible: true },
+  )
 
   const { stats, usageStats } = data
   const total = stats?.total ?? 0

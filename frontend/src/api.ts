@@ -225,6 +225,14 @@ async function streamActiveRequests({ signal, onSnapshot }: ActiveRequestsStream
   parser.finish()
 }
 
+async function getActiveRequestsSnapshot(): Promise<ActiveRequestsSnapshot> {
+  const status = await request<RuntimeStatusResponse>('/runtime-status')
+  return {
+    active_requests: status.accounts.active_requests,
+    active_request_details: status.accounts.active_request_details ?? [],
+  }
+}
+
 function buildOpsErrorSearchParams(params: {
   start: string
   end: string
@@ -299,6 +307,7 @@ export const api = {
   getHealth: () => request<HealthResponse>('/health'),
   getOpsOverview: () => request<OpsOverviewResponse>('/ops/overview'),
   getRuntimeStatus: () => request<RuntimeStatusResponse>('/runtime-status'),
+  getActiveRequestsSnapshot,
   streamActiveRequests,
   shutdownSystem: () => request<ShutdownResponse>('/system/shutdown', { method: 'POST' }),
   getResetRadar: () => request<ResetRadarResponse>('/reset-radar'),

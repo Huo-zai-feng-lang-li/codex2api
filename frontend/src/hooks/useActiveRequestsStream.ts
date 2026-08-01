@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { AdminUnauthorizedError, api } from '../api'
 import type { RuntimeActiveRequest } from '../types'
 
@@ -7,6 +7,10 @@ const MAX_RECONNECT_DELAY_MS = 15_000
 
 export function useActiveRequestsStream() {
   const [requests, setRequests] = useState<RuntimeActiveRequest[]>([])
+  const refreshActiveRequests = useCallback(async () => {
+    const snapshot = await api.getActiveRequestsSnapshot()
+    setRequests(snapshot.active_request_details)
+  }, [])
 
   useEffect(() => {
     let stopped = false
@@ -46,5 +50,5 @@ export function useActiveRequestsStream() {
     }
   }, [])
 
-  return requests
+  return { requests, refreshActiveRequests }
 }

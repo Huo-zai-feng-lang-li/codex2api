@@ -56,4 +56,4 @@ jobs:
 
       - name: Run npm audit
         working-directory: frontend
-        run: npm audit --omit=dev --audit-level=high
+        run: node ../scripts/security/npm-audit-high.mjs
