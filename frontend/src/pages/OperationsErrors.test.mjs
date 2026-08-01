@@ -77,9 +77,12 @@ test('keeps every error attempt returned by the detailed-list API', () => {
 })
 
 test('exports an embeddable panel with optional visible polling', () => {
-  assert.match(source, /export function OperationsErrorsPanel\(\{\s*autoRefresh = true/s)
+  assert.match(source, /interface OperationsErrorsPanelProps[\s\S]*headerAddon\?: ReactNode/)
+  assert.match(source, /export function OperationsErrorsPanel\(\{\s*autoRefresh = true[\s\S]*headerAddon/s)
   assert.match(source, /if \(!autoRefresh\) return/)
   assert.match(source, /<OperationsErrorsPanel\s+autoRefresh=\{true\}/)
+  assert.match(source, /\{headerAddon\}/)
+  assert.match(source, /showChrome && \([\s\S]*<OpsTabs \/>/)
 })
 
 test('drives error table headers and cells from persisted ordered columns', () => {

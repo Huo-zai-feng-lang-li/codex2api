@@ -72,22 +72,19 @@ function DashboardRequestTabs({
   onTabChange: (tab: DashboardRequestTab) => void
 }) {
   const { t } = useTranslation()
-  const tabs: Array<{ key: DashboardRequestTab; label: string; description: string }> = [
+  const tabs: Array<{ key: DashboardRequestTab; label: string }> = [
     {
       key: 'usage_logs',
       label: t('dashboard.requestRecords'),
-      description: t('dashboard.requestRecordsDesc'),
     },
     {
       key: 'error_details',
       label: t('dashboard.errorDetails'),
-      description: t('dashboard.errorDetailsDesc'),
     },
   ]
 
   return (
-    <div className="rounded-2xl border border-border bg-card/85 p-2 shadow-sm">
-      <div className="grid gap-2 md:grid-cols-2" role="tablist" aria-label={t('dashboard.requestDetailsTabs')}>
+    <div className="inline-flex shrink-0 rounded-lg border border-border bg-muted/50 p-0.5" role="tablist" aria-label={t('dashboard.requestDetailsTabs')}>
         {tabs.map((tab) => {
           const selected = activeTab === tab.key
           return (
@@ -97,18 +94,16 @@ function DashboardRequestTabs({
               role="tab"
               aria-selected={selected}
               onClick={() => onTabChange(tab.key)}
-              className={`rounded-xl border px-4 py-3 text-left transition-all duration-200 ${
+              className={`rounded-md px-2.5 py-1 text-xs font-medium transition-all duration-200 ${
                 selected
-                  ? 'border-primary/30 bg-primary/10 text-foreground shadow-sm'
-                  : 'border-transparent bg-transparent text-muted-foreground hover:border-border hover:bg-muted/60 hover:text-foreground'
+                  ? 'bg-background text-foreground shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground'
               }`}
             >
-              <span className="block text-sm font-semibold">{tab.label}</span>
-              <span className="mt-1 block text-xs leading-relaxed text-muted-foreground">{tab.description}</span>
+              {tab.label}
             </button>
           )
         })}
-      </div>
     </div>
   )
 }
@@ -195,6 +190,7 @@ export default function Dashboard() {
     error: <XCircle className="size-[22px]" />,
     requests: <Activity className="size-[22px]" />,
   }
+  const requestTabs = <DashboardRequestTabs activeTab={activeRequestTab} onTabChange={setActiveRequestTab} />
 
   return (
     <StateShell
@@ -245,11 +241,18 @@ export default function Dashboard() {
               latencyLoading={latencyLoading}
             />
             <ActiveRequestsPanel requests={activeRequests} />
-            <DashboardRequestTabs activeTab={activeRequestTab} onTabChange={setActiveRequestTab} />
-            {activeRequestTab === 'usage_logs' && <UsageLogsPanel />}
+            {activeRequestTab === 'usage_logs' && (
+              <UsageLogsPanel
+                autoRefreshWhen={true}
+                headerAddon={requestTabs}
+              />
+            )}
             {activeRequestTab === 'error_details' && (
               <Suspense fallback={<RequestTabSkeleton />}>
-                <OperationsErrorsPanel autoRefresh={false} />
+                <OperationsErrorsPanel
+                  autoRefresh={false}
+                  headerAddon={requestTabs}
+                />
               </Suspense>
             )}
             <Suspense fallback={<ChartsSkeleton />}>

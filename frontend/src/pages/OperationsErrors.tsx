@@ -87,13 +87,14 @@ const summaryMetricIcons = {
 interface OperationsErrorsPanelProps {
   autoRefresh?: boolean
   showChrome?: boolean
+  headerAddon?: ReactNode
 }
 
 export default function OperationsErrors() {
   return <OperationsErrorsPanel autoRefresh={true} showChrome={true} />
 }
 
-export function OperationsErrorsPanel({ autoRefresh = true, showChrome = false }: OperationsErrorsPanelProps) {
+export function OperationsErrorsPanel({ autoRefresh = true, showChrome = false, headerAddon }: OperationsErrorsPanelProps) {
   const { t } = useTranslation()
   const { toast, showToast } = useToast()
   const [timeRange, setTimeRange] = useState<TimeRangeKey>('1h')
@@ -323,51 +324,54 @@ export function OperationsErrorsPanel({ autoRefresh = true, showChrome = false }
           </>
         )}
 
-        <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-4 mb-6">
-          {summaryMetrics.map((metric) => {
-            const Icon = summaryMetricIcons[metric.key]
-            return (
-              <SummaryPill
-                key={metric.key}
-                label={t(metric.labelKey)}
-                value={formatNumber(metric.value)}
-                icon={<Icon className="size-4" />}
-                tone={metric.tone}
-              />
-            )
-          })}
-          <SummaryPill
-            label="5xx"
-            value={formatNumber(data.summary?.status_5xx ?? 0)}
-            icon={<ServerCrash className="size-4" />}
-            tone="danger"
-          />
-          <SummaryPill
-            label="401"
-            value={formatNumber(data.summary?.unauthorized ?? 0)}
-            icon={<ShieldAlert className="size-4" />}
-            tone="danger"
-          />
-          <SummaryPill
-            label="429"
-            value={formatNumber(data.summary?.rate_limited ?? 0)}
-            icon={<TimerReset className="size-4" />}
-            tone="warning"
-          />
-          <SummaryPill
-            label={t('opsErrors.timeouts')}
-            value={formatNumber(data.summary?.timeouts ?? 0)}
-            icon={<Clock3 className="size-4" />}
-            tone="warning"
-          />
-        </div>
+        {showChrome && (
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-4 mb-6">
+            {summaryMetrics.map((metric) => {
+              const Icon = summaryMetricIcons[metric.key]
+              return (
+                <SummaryPill
+                  key={metric.key}
+                  label={t(metric.labelKey)}
+                  value={formatNumber(metric.value)}
+                  icon={<Icon className="size-4" />}
+                  tone={metric.tone}
+                />
+              )
+            })}
+            <SummaryPill
+              label="5xx"
+              value={formatNumber(data.summary?.status_5xx ?? 0)}
+              icon={<ServerCrash className="size-4" />}
+              tone="danger"
+            />
+            <SummaryPill
+              label="401"
+              value={formatNumber(data.summary?.unauthorized ?? 0)}
+              icon={<ShieldAlert className="size-4" />}
+              tone="danger"
+            />
+            <SummaryPill
+              label="429"
+              value={formatNumber(data.summary?.rate_limited ?? 0)}
+              icon={<TimerReset className="size-4" />}
+              tone="warning"
+            />
+            <SummaryPill
+              label={t('opsErrors.timeouts')}
+              value={formatNumber(data.summary?.timeouts ?? 0)}
+              icon={<Clock3 className="size-4" />}
+              tone="warning"
+            />
+          </div>
+        )}
 
         <Card>
           <CardContent className="p-6">
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-              <div>
+              <div className="flex flex-wrap items-center gap-3">
                 <h3 className="text-base font-semibold text-foreground">{t('opsErrors.tableTitle')}</h3>
-                <p className="mt-1 text-sm text-muted-foreground">{t('opsErrors.tableDesc')}</p>
+                {headerAddon}
+                {showChrome && <p className="basis-full text-sm text-muted-foreground">{t('opsErrors.tableDesc')}</p>}
               </div>
               <div className="inline-flex rounded-lg border border-border bg-muted/50 p-0.5">
                 {ERROR_TIME_RANGES.map((key) => (

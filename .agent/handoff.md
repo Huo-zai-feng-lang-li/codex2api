@@ -51,6 +51,11 @@
 - [ ] 可选：用户用真实外部账号做一次 A -> B 两连包验收：首包拿 `response_id`，让账号 A 进入 `rate_limited/payment_required` 或不可用，再用同会话 `previous_response_id` 发续包，确认自动切到账号 B 且工具/终端/工作区上下文不断。
 - [ ] 若真实验收仍出现“当前会话未提供终端或工作区文件访问权限”，优先查上游/客户端权限状态；代理层当前不会生成这句，也不会在历史不完整时静默新会话。
 
+## 前端仪表盘请求明细 Tab (2026-08-02)
+- 仪表盘请求记录与错误明细共用同一个列表卡片内的小 Tab，默认请求记录；错误明细嵌入时不显示系统运维顶部导航、页面副标题和摘要卡。
+- 请求记录只在 Tab 激活、页面可见且存在活跃请求时每 3 秒静默刷新；错误明细仅在切换打开时加载，不启用自动轮询。
+- 关键文件：`frontend/src/pages/Dashboard.tsx`、`frontend/src/components/UsageLogsPanel.tsx`、`frontend/src/pages/OperationsErrors.tsx`。
+
 ## 关键上下文
 - 目录: `C:\Users\Administrator\Desktop\codex2api`
 - 主要文件:

@@ -6,6 +6,7 @@ import { formatBeijingTime } from '../utils/time'
 import type { APIKeyRow, UsageLog } from '../types'
 import { useConfirmDialog } from '../hooks/useConfirmDialog'
 import { useToast } from '../hooks/useToast'
+import { useVisiblePolling } from '../hooks/useVisiblePolling'
 import { DEFAULT_PAGE_SIZE_OPTIONS, usePersistedPageSize } from '../hooks/usePersistedPageSize'
 import { usePersistedTableColumns } from '../hooks/usePersistedTableColumns'
 import type { TableColumnDefinition } from '../lib/tableColumns'
@@ -48,8 +49,14 @@ const usageTableHeadClass = 'text-[12px] font-semibold'
 const usageTableTextClass = 'text-[14px]'
 const usageTableMonoClass = 'font-mono text-[13px] tabular-nums'
 const usageTableBadgeClass = 'text-[13px]'
+const REQUEST_LOGS_ACTIVE_REFRESH_INTERVAL_MS = 3_000
 
-export default function UsageLogsPanel() {
+interface UsageLogsPanelProps {
+  autoRefreshWhen?: boolean
+  headerAddon?: ReactNode
+}
+
+export default function UsageLogsPanel({ autoRefreshWhen = false, headerAddon }: UsageLogsPanelProps) {
   const { t } = useTranslation()
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
@@ -74,34 +81,52 @@ export default function UsageLogsPanel() {
   const searchTimer = useRef<ReturnType<typeof setTimeout>>(null)
   const { preferences, setPreferences, visibleColumns } = usePersistedTableColumns(USAGE_VISIBLE_COLUMNS_KEY, USAGE_COLUMN_DEFINITIONS)
 
+  const fetchLogs = useCallback(async () => {
+    const { start, end } = resolveUsageRangeISO(timeRange, customRange)
+    const response = await api.getUsageLogsPaged({
+      start,
+      end,
+      page,
+      pageSize,
+      email: searchEmail || undefined,
+      model: filterModel || undefined,
+      endpoint: filterEndpoint || undefined,
+      apiKeyId: filterApiKeyId || undefined,
+      fast: filterFast || undefined,
+      stream: filterStream || undefined,
+    })
+    setLogs(response.logs ?? [])
+    setLogsTotal(response.total ?? 0)
+  }, [timeRange, customRange, page, pageSize, searchEmail, filterModel, filterEndpoint, filterApiKeyId, filterFast, filterStream])
+
   const loadLogs = useCallback(async () => {
     setLogsLoading(true)
     try {
-      const { start, end } = resolveUsageRangeISO(timeRange, customRange)
-      const response = await api.getUsageLogsPaged({
-        start,
-        end,
-        page,
-        pageSize,
-        email: searchEmail || undefined,
-        model: filterModel || undefined,
-        endpoint: filterEndpoint || undefined,
-        apiKeyId: filterApiKeyId || undefined,
-        fast: filterFast || undefined,
-        stream: filterStream || undefined,
-      })
-      setLogs(response.logs ?? [])
-      setLogsTotal(response.total ?? 0)
+      await fetchLogs()
     } catch {
       // Keep this panel isolated from the dashboard page-level error boundary.
     } finally {
       setLogsLoading(false)
     }
-  }, [timeRange, customRange, page, pageSize, searchEmail, filterModel, filterEndpoint, filterApiKeyId, filterFast, filterStream])
+  }, [fetchLogs])
+
+  const refreshLogsSilently = useCallback(async () => {
+    try {
+      await fetchLogs()
+    } catch {
+      // Keep background refresh silent; manual refresh still exposes visible loading.
+    }
+  }, [fetchLogs])
 
   useEffect(() => {
     void loadLogs()
   }, [loadLogs])
+
+  useVisiblePolling(
+    refreshLogsSilently,
+    REQUEST_LOGS_ACTIVE_REFRESH_INTERVAL_MS,
+    { enabled: autoRefreshWhen, immediateOnVisible: true },
+  )
 
   useEffect(() => {
     let active = true
@@ -194,12 +219,11 @@ export default function UsageLogsPanel() {
   return (
     <Card>
       <CardContent className="p-4">
-        <div className="mb-4 flex items-center justify-between gap-3 overflow-visible max-lg:overflow-x-auto">
-          <div className="flex shrink-0 items-center gap-3">
-            <h3 className="whitespace-nowrap text-base font-semibold text-foreground">{t('usage.requestLogs')}</h3>
-            <UsageRangeSelector value={timeRange} customRange={customRange} onChange={handleRangeChange} />
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
+        <div className="mb-4 flex flex-wrap items-center gap-3 overflow-visible max-lg:overflow-x-auto">
+          <h3 className="whitespace-nowrap text-base font-semibold leading-8 text-foreground">{t('usage.requestLogs')}</h3>
+          {headerAddon}
+          <UsageRangeSelector value={timeRange} customRange={customRange} onChange={handleRangeChange} />
+          <div className="ml-auto flex shrink-0 items-center gap-2">
             <span className="whitespace-nowrap text-xs text-muted-foreground">
               {logsLoading ? t('common.loading') : t('usage.recordsCount', { count: logsTotal })}
             </span>
