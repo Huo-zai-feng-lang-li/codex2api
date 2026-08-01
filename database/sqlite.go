@@ -313,9 +313,18 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 			input_json BLOB NOT NULL DEFAULT '[]',
 			output_json BLOB NOT NULL DEFAULT '[]',
 			replayable INTEGER NOT NULL DEFAULT 0,
+			state TEXT DEFAULT 'completed',
+			operation_seq INTEGER DEFAULT 0,
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			accessed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			size_bytes INTEGER NOT NULL DEFAULT 0
+		);`,
+		`CREATE TABLE IF NOT EXISTS responses_continuity_heads (
+			session_id TEXT PRIMARY KEY,
+			latest_response_id TEXT DEFAULT '',
+			latest_replayable_id TEXT DEFAULT '',
+			operation_seq INTEGER DEFAULT 0,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_responses_continuity_accessed_at ON responses_continuity(accessed_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_responses_continuity_parent_id ON responses_continuity(parent_id);`,
@@ -444,6 +453,8 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"proxies", "test_location", "TEXT DEFAULT ''"},
 		{"proxies", "test_latency_ms", "INTEGER DEFAULT 0"},
 		{"responses_continuity", "session_id", "TEXT DEFAULT ''"},
+		{"responses_continuity", "state", "TEXT DEFAULT 'completed'"},
+		{"responses_continuity", "operation_seq", "INTEGER DEFAULT 0"},
 	}
 	for _, column := range columns {
 		if err := db.ensureSQLiteColumn(ctx, column.table, column.name, column.def); err != nil {

@@ -3229,9 +3229,65 @@ func (s *Store) UnbindSessionAffinity(key string, accountID int64) {
 	}
 }
 
+// UnbindSessionAffinityKey removes any session binding for the key regardless of account ID.
+func (s *Store) UnbindSessionAffinityKey(key string) {
+	if s == nil {
+		return
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return
+	}
+
+	s.sessionMu.Lock()
+	delete(s.sessionBindings, key)
+	s.sessionMu.Unlock()
+
+	if s.tokenCache != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		if err := s.tokenCache.DeleteSessionAffinity(ctx, key, 0); err != nil {
+			log.Printf("强制清除缓存会话粘性失败: key=%s err=%v", key, err)
+		}
+	}
+}
+
 // NextForSession 优先复用已绑定的账号和代理，失败时回退到普通选号。
 func (s *Store) NextForSession(key string, apiKeyID int64, exclude map[int64]bool) (*Account, string) {
 	return s.NextForSessionWithFilter(key, apiKeyID, exclude, nil)
+}
+
+// NextForStrictSessionWithFilter keeps a Responses session on its bound account
+// until that account is explicitly disabled or removed.
+func (s *Store) NextForStrictSessionWithFilter(key string, apiKeyID int64, filter AccountFilter) (*Account, string) {
+	if s == nil {
+		return nil, ""
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return s.NextExcludingWithFilter(apiKeyID, nil, filter), ""
+	}
+	if binding, ok := s.strictSessionBinding(key); ok {
+		if s.sessionAffinityAccountActive(binding.accountID) {
+			if account := s.takeByIDExcluding(binding.accountID, apiKeyID, nil, filter); account != nil {
+				return account, binding.proxyURL
+			}
+			return nil, ""
+		}
+		s.UnbindSessionAffinity(key, binding.accountID)
+	}
+	return s.NextExcludingWithFilter(apiKeyID, nil, filter), ""
+}
+
+func (s *Store) strictSessionBinding(key string) (sessionAffinity, bool) {
+	now := time.Now()
+	s.sessionMu.RLock()
+	binding, ok := s.sessionBindings[key]
+	s.sessionMu.RUnlock()
+	if ok && binding.expiresAt.After(now) {
+		return binding, true
+	}
+	return s.getCachedSessionAffinity(key)
 }
 
 // NextForSessionWithFilter 优先复用已绑定的账号和代理，并应用请求级账号过滤器。
@@ -3285,15 +3341,20 @@ func (s *Store) NextForSessionWithFilter(key string, apiKeyID int64, exclude map
 				delete(s.sessionBindings, key)
 			}
 			s.sessionMu.Unlock()
-		} else if acc := s.takeByIDExcluding(binding.accountID, apiKeyID, exclude, filter); acc != nil {
-			// 命中粘性,记一次复用
-			s.sessionMu.Lock()
-			if current, exists := s.sessionBindings[key]; exists && current.accountID == binding.accountID {
-				current.requestCount++
-				s.sessionBindings[key] = current
+		} else {
+			if acc := s.takeByIDExcluding(binding.accountID, apiKeyID, exclude, filter); acc != nil {
+				// 命中粘性,记一次复用
+				s.sessionMu.Lock()
+				if current, exists := s.sessionBindings[key]; exists && current.accountID == binding.accountID {
+					current.requestCount++
+					s.sessionBindings[key] = current
+				}
+				s.sessionMu.Unlock()
+				return acc, binding.proxyURL
 			}
-			s.sessionMu.Unlock()
-			return acc, binding.proxyURL
+			if mode == AffinityModeStrict && s.sessionAffinityAccountActive(binding.accountID) {
+				return nil, ""
+			}
 		}
 	}
 	if binding, ok := s.getCachedSessionAffinity(key); ok {
@@ -3308,6 +3369,8 @@ func (s *Store) NextForSessionWithFilter(key string, apiKeyID int64, exclude map
 			s.sessionBindings[key] = binding
 			s.sessionMu.Unlock()
 			return acc, binding.proxyURL
+		} else if mode == AffinityModeStrict && s.sessionAffinityAccountActive(binding.accountID) {
+			return nil, ""
 		}
 	}
 
@@ -3342,6 +3405,20 @@ func (s *Store) affinityAccountStillHealthy(accountID int64) bool {
 	}
 	tier := target.healthTierLocked()
 	return tier == HealthTierHealthy
+}
+
+func (s *Store) sessionAffinityAccountActive(accountID int64) bool {
+	if s == nil || accountID == 0 {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, account := range s.accounts {
+		if account != nil && account.DBID == accountID {
+			return atomic.LoadInt32(&account.Disabled) == 0
+		}
+	}
+	return false
 }
 
 func (s *Store) getCachedSessionAffinity(key string) (sessionAffinity, bool) {
@@ -3430,6 +3507,34 @@ func (s *Store) WaitForAvailable(ctx context.Context, timeout time.Duration, api
 // WaitForSessionAvailable waits for a session-preferred account and proxy pair.
 func (s *Store) WaitForSessionAvailable(ctx context.Context, key string, timeout time.Duration, apiKeyID int64, exclude map[int64]bool) (*Account, string) {
 	return s.WaitForSessionAvailableWithFilter(ctx, key, timeout, apiKeyID, exclude, nil)
+}
+
+func (s *Store) WaitForStrictSessionAvailableWithFilter(ctx context.Context, key string, timeout time.Duration, apiKeyID int64, filter AccountFilter) (*Account, string) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	backoff := 50 * time.Millisecond
+
+	for {
+		if account, proxyURL := s.NextForStrictSessionWithFilter(key, apiKeyID, filter); account != nil {
+			return account, proxyURL
+		}
+		backoffTimer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			backoffTimer.Stop()
+			return nil, ""
+		case <-deadline.C:
+			backoffTimer.Stop()
+			return nil, ""
+		case <-backoffTimer.C:
+			if backoff < 500*time.Millisecond {
+				backoff *= 2
+			}
+		}
+	}
 }
 
 func (s *Store) hasDispatchCandidateWithFilter(apiKeyID int64, exclude map[int64]bool, filter AccountFilter) bool {
@@ -3601,12 +3706,38 @@ func (s *Store) ensureRecoveryProbeForWait(apiKeyID int64, exclude map[int64]boo
 	return s.RecoveryProbeRunning()
 }
 
+func (s *Store) hasAccountExistWithFilter(apiKeyID int64, exclude map[int64]bool, filter AccountFilter) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, acc := range s.accounts {
+		if acc == nil || atomic.LoadInt32(&acc.Disabled) != 0 || atomic.LoadInt32(&acc.DispatchPaused) != 0 {
+			continue
+		}
+		if exclude != nil && exclude[acc.DBID] {
+			continue
+		}
+		if filter != nil && !filter(acc) {
+			continue
+		}
+		if !s.accountAllowedForAPIKey(acc, apiKeyID) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 // WaitForSessionAvailableWithFilter waits for an account that satisfies the request-level filter.
 func (s *Store) WaitForSessionAvailableWithFilter(ctx context.Context, key string, timeout time.Duration, apiKeyID int64, exclude map[int64]bool, filter AccountFilter) (*Account, string) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if !s.hasDispatchCandidateWithFilter(apiKeyID, exclude, filter) && !s.ensureRecoveryProbeForWait(apiKeyID, exclude, filter) {
+	probeStarted := s.ensureRecoveryProbeForWait(apiKeyID, exclude, filter)
+	if !s.hasAccountExistWithFilter(apiKeyID, exclude, filter) && !probeStarted {
 		return nil, ""
 	}
 
@@ -3634,7 +3765,7 @@ func (s *Store) WaitForSessionAvailableWithFilter(ctx context.Context, key strin
 			if acc != nil {
 				return acc, proxyURL
 			}
-			if !s.hasDispatchCandidateWithFilter(apiKeyID, exclude, filter) && !s.ensureRecoveryProbeForWait(apiKeyID, exclude, filter) {
+			if !s.hasAccountExistWithFilter(apiKeyID, exclude, filter) && !s.ensureRecoveryProbeForWait(apiKeyID, exclude, filter) {
 				return nil, ""
 			}
 			// 等待一下再重试（指数退避，最大 500ms）

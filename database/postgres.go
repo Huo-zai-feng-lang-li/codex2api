@@ -953,14 +953,27 @@ func (db *DB) migrate(ctx context.Context) error {
 				session_id VARCHAR(255) DEFAULT '',
 				account_id BIGINT DEFAULT 0,
 				base_url TEXT DEFAULT '',
-				input_json BYTEA NOT NULL DEFAULT '\\x',
-				output_json BYTEA NOT NULL DEFAULT '\\x',
+				input_json BYTEA NOT NULL DEFAULT '\x',
+				output_json BYTEA NOT NULL DEFAULT '\x',
 				replayable BOOLEAN NOT NULL DEFAULT FALSE,
+				state VARCHAR(50) DEFAULT 'completed',
+				operation_seq BIGINT DEFAULT 0,
 				created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 				accessed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 				size_bytes INT NOT NULL DEFAULT 0
 			);
 			ALTER TABLE responses_continuity ADD COLUMN IF NOT EXISTS session_id VARCHAR(255) DEFAULT '';
+			ALTER TABLE responses_continuity ADD COLUMN IF NOT EXISTS state VARCHAR(50) DEFAULT 'completed';
+			ALTER TABLE responses_continuity ADD COLUMN IF NOT EXISTS operation_seq BIGINT DEFAULT 0;
+
+			CREATE TABLE IF NOT EXISTS responses_continuity_heads (
+				session_id VARCHAR(255) PRIMARY KEY,
+				latest_response_id VARCHAR(255) DEFAULT '',
+				latest_replayable_id VARCHAR(255) DEFAULT '',
+				operation_seq BIGINT DEFAULT 0,
+				updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+			);
+
 			CREATE INDEX IF NOT EXISTS idx_responses_continuity_accessed_at ON responses_continuity(accessed_at);
 			CREATE INDEX IF NOT EXISTS idx_responses_continuity_parent_id ON responses_continuity(parent_id);
 			CREATE INDEX IF NOT EXISTS idx_responses_continuity_session_id ON responses_continuity(session_id);

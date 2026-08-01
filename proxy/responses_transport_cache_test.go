@@ -113,6 +113,9 @@ func (c *recordingRuntimeCache) affinityDeleteCalls() []affinityDeleteCall {
 func newDirectResponsesWebSocketClient(t *testing.T, upstreamURL string, maxRetries int, runtimeCache cache.TokenCache) *websocket.Conn {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
+	previousMode := openAIResponsesContinuityMode
+	openAIResponsesContinuityMode = openAIResponsesContinuityModeUpstream
+	t.Cleanup(func() { openAIResponsesContinuityMode = previousMode })
 	store := auth.NewStore(nil, nil, &database.SystemSettings{
 		MaxConcurrency: 2,
 		TestModel:      "gpt-5.4",
@@ -169,11 +172,53 @@ func writeResponsesWebSocketTurn(t *testing.T, conn *websocket.Conn, payload str
 func seedResponsesTransportFallbackHistory(t *testing.T) {
 	t.Helper()
 	resetResponseCacheForTest()
+	resetOpenAIResponsesContinuityForTest()
 	t.Cleanup(resetResponseCacheForTest)
+	t.Cleanup(resetOpenAIResponsesContinuityForTest)
+	openAIResponsesContinuity.store("resp_prev", "", "", openAIResponsesContinuation{
+		input: []json.RawMessage{
+			json.RawMessage(`{"type":"message","role":"user","content":"call a tool"}`),
+		},
+		output: []json.RawMessage{
+			json.RawMessage(`{"type":"function_call","id":"fc_123","call_id":"call_abc","name":"lookup","arguments":"{}"}`),
+		},
+	})
 	cacheCompletedResponse(
 		[]byte(`[{"type":"message","role":"user","content":"call a tool"}]`),
 		[]byte(`{"type":"response.completed","response":{"id":"resp_prev","output":[{"type":"function_call","id":"fc_123","call_id":"call_abc","name":"lookup","arguments":"{}"}]}}`),
 	)
+}
+
+func TestResponsesWebSocketFallbackWithoutContinuationHistoryFailsExplicitly(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetResponseCacheForTest()
+	resetOpenAIResponsesContinuityForTest()
+	t.Cleanup(resetResponseCacheForTest)
+	t.Cleanup(resetOpenAIResponsesContinuityForTest)
+
+	runtimeCache := newRecordingRuntimeCache(t)
+	var httpCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if websocket.IsWebSocketUpgrade(r) {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		httpCalls.Add(1)
+		writeCompletedResponsesSSE(w)
+	}))
+	defer upstream.Close()
+
+	conn := newDirectResponsesWebSocketClient(t, upstream.URL, 0, runtimeCache)
+	terminal := writeResponsesWebSocketTurn(t, conn, responsesTransportTestPayload)
+	if typ := gjson.GetBytes(terminal, "type").String(); typ != "response.failed" {
+		t.Fatalf("terminal type = %q body=%s, want response.failed", typ, terminal)
+	}
+	if code := gjson.GetBytes(terminal, "response.error.code").String(); code != "continuation_context_unavailable" {
+		t.Fatalf("terminal error code = %q body=%s, want continuation_context_unavailable", code, terminal)
+	}
+	if got := httpCalls.Load(); got != 0 {
+		t.Fatalf("HTTP fallback calls = %d, want 0 when continuation history is unavailable", got)
+	}
 }
 
 const responsesTransportTestPayload = `{"model":"gpt-5.4","previous_response_id":"resp_prev","input":[{"type":"function_call_output","call_id":"call_abc","output":"ok"}]}`
@@ -407,8 +452,11 @@ func TestResponsesWebSocketFallbackRequestErrorPreservesTransportFailureWithoutA
 	}
 }
 
-func TestResponsesWebSocketFallbackRequestErrorUnbindsWithoutSwitchingAccount(t *testing.T) {
+func TestResponsesWebSocketFallbackRequestErrorPreservesSessionAffinity(t *testing.T) {
 	seedResponsesTransportFallbackHistory(t)
+	previousMode := openAIResponsesContinuityMode
+	openAIResponsesContinuityMode = openAIResponsesContinuityModeUpstream
+	t.Cleanup(func() { openAIResponsesContinuityMode = previousMode })
 	runtimeCache := newRecordingRuntimeCache(t)
 	const sessionID = "fallback-http-request-error"
 	affinityKey := sessionAffinityKey(sessionID, 0)
@@ -497,9 +545,8 @@ func TestResponsesWebSocketFallbackRequestErrorUnbindsWithoutSwitchingAccount(t 
 	if got := secondCalls.Load(); got != 0 {
 		t.Fatalf("second account calls = %d, want 0", got)
 	}
-	deletes := runtimeCache.affinityDeleteCalls()
-	if len(deletes) != 1 || deletes[0].key != affinityKey || deletes[0].accountID != firstAccount.ID() {
-		t.Fatalf("affinity deletes = %+v, want key=%q account=%d", deletes, affinityKey, firstAccount.ID())
+	if deletes := runtimeCache.affinityDeleteCalls(); len(deletes) != 0 {
+		t.Fatalf("affinity deletes = %+v, want no unbind for a transport error", deletes)
 	}
 }
 

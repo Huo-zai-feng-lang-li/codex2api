@@ -362,8 +362,11 @@ func (tc *redisTokenCache) GetSessionAffinity(ctx context.Context, key string) (
 
 func (tc *redisTokenCache) DeleteSessionAffinity(ctx context.Context, key string, accountID int64) error {
 	key = strings.TrimSpace(key)
-	if key == "" || accountID == 0 {
+	if key == "" {
 		return nil
+	}
+	if accountID == 0 {
+		return tc.client.Del(ctx, sessionAffinityKey(key)).Err()
 	}
 	const script = `
 local value = redis.call("GET", KEYS[1])

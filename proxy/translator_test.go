@@ -1635,6 +1635,17 @@ func TestPrepareResponsesWebSocketBodyPreservesPreviousResponseID(t *testing.T) 
 	}
 }
 
+func TestPrepareResponsesBodyPreservesUnexpandedPreviousResponseID(t *testing.T) {
+	resetResponseCacheForTest()
+	raw := []byte(`{"model":"gpt-5.4","previous_response_id":"resp_missing","input":"continue"}`)
+
+	got, _ := PrepareResponsesBody(raw)
+
+	if previousID := gjson.GetBytes(got, "previous_response_id").String(); previousID != "resp_missing" {
+		t.Fatalf("previous_response_id = %q, want resp_missing; body=%s", previousID, got)
+	}
+}
+
 func TestInvalidEncryptedContentErrorDetection(t *testing.T) {
 	body := []byte(`{
 		"error":{

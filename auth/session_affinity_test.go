@@ -31,6 +31,54 @@ func TestNextForSessionPrefersBoundAccountAndProxy(t *testing.T) {
 	}
 }
 
+func TestNextForSessionStrictKeepsCoolingBoundAccount(t *testing.T) {
+	bound := &Account{
+		DBID:         1,
+		AccessToken:  "tok-1",
+		Status:       StatusCooldown,
+		CooldownUtil: time.Now().Add(time.Minute),
+	}
+	store := &Store{
+		accounts:       []*Account{bound, {DBID: 2, AccessToken: "tok-2"}},
+		maxConcurrency: 1,
+	}
+	store.SetAffinityMode(AffinityModeStrict)
+	store.bindSessionAffinity("session-cooling", bound, "http://proxy-1")
+
+	account, proxyURL := store.NextForSession("session-cooling", 0, nil)
+	if account != nil {
+		store.Release(account)
+		t.Fatalf("cooling bound account must not fall back, got account %d", account.ID())
+	}
+	if proxyURL != "" {
+		t.Fatalf("proxyURL = %q, want empty while waiting for bound account", proxyURL)
+	}
+}
+
+func TestNextForStrictSessionExcludingWithFilterHonorsExclusionAfterUnbind(t *testing.T) {
+	store := &Store{
+		accounts: []*Account{
+			{DBID: 1, AccessToken: "tok-1"},
+			{DBID: 2, AccessToken: "tok-2"},
+		},
+		maxConcurrency: 2,
+	}
+	store.bindSessionAffinity("session-1", store.accounts[0], "http://proxy-1")
+
+	account, _ := store.NextForStrictSessionExcludingWithFilter("session-1", 0, map[int64]bool{1: true}, nil)
+	if account == nil || account.ID() != 1 {
+		t.Fatalf("bound account = %+v, want account 1", account)
+	}
+	store.Release(account)
+	store.UnbindSessionAffinity("session-1", 1)
+
+	account, _ = store.NextForStrictSessionExcludingWithFilter("session-1", 0, map[int64]bool{1: true}, nil)
+	if account == nil || account.ID() != 2 {
+		t.Fatalf("unbound account = %+v, want account 2", account)
+	}
+	store.Release(account)
+}
+
 func TestNextForSessionUsesCachedAffinityWhenLocalBindingMissing(t *testing.T) {
 	tokenCache := cache.NewMemory(1)
 	defer tokenCache.Close()

@@ -186,10 +186,13 @@ func TestResponsesWebSocketAdditionalToolsInputReachesOpenAIResponsesUpstream(t 
 }
 
 func TestPrepareOpenAIResponsesHTTPBodyFromWebSocketPreservesAdditionalToolsInput(t *testing.T) {
-	body, expandedInputRaw := prepareOpenAIResponsesHTTPBodyFromWebSocket(
+	body, expandedInputRaw, ok := prepareOpenAIResponsesHTTPBodyFromWebSocket(
 		futureResponsesAdditionalToolsBody(`"type":"response.create"`, `"stream":true`),
 		false,
 	)
+	if !ok {
+		t.Fatal("HTTP fallback body preparation failed")
+	}
 
 	assertFutureAdditionalToolsPayload(t, body)
 	assertFutureAdditionalToolsPayload(t, []byte(`{"input":`+expandedInputRaw+`}`))

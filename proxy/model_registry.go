@@ -59,6 +59,10 @@ type ModelSyncResult struct {
 }
 
 var builtinModelInfos = []ModelInfo{
+	modelInfoForID("gpt-5.6-sol", ModelSourceBuiltin),
+	modelInfoForID("gpt-5.6-terra", ModelSourceBuiltin),
+	modelInfoForID("gpt-5.6-luna", ModelSourceBuiltin),
+	modelInfoForID("gpt-5.6", ModelSourceBuiltin),
 	modelInfoForID("gpt-5.5", ModelSourceBuiltin),
 	modelInfoForID("gpt-5.4", ModelSourceBuiltin),
 	modelInfoForID("gpt-5.4-mini", ModelSourceBuiltin),

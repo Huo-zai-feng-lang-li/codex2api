@@ -197,6 +197,9 @@ func TestOpenAIResponsesContinuationUsesResponseOwnerWhenAffinityIsOff(t *testin
 func TestOpenAIResponsesCodexOwnerCanReplayLocalHistory(t *testing.T) {
 	resetResponseCacheForTest()
 	resetOpenAIResponsesContinuityForTest()
+	previousMode := openAIResponsesContinuityMode
+	openAIResponsesContinuityMode = openAIResponsesContinuityModeAuto
+	t.Cleanup(func() { openAIResponsesContinuityMode = previousMode })
 	owner := &auth.Account{DBID: 41, Name: "codex-owner"}
 	cacheOpenAIResponsesContinuation(
 		[]byte(`{"model":"gpt-5.4","input":"remember FOXTROT","store":false}`),
@@ -212,6 +215,9 @@ func TestOpenAIResponsesCodexOwnerCanReplayLocalHistory(t *testing.T) {
 	}
 	if filter(&auth.Account{DBID: 42, Name: "other"}) {
 		t.Fatal("non-owner Codex account passed continuation filter")
+	}
+	if !shouldReplayOpenAIResponsesContinuationBeforeUpstream(request, owner, "session-codex-test") {
+		t.Fatal("Codex continuation should replay local history before upstream")
 	}
 	fallback, ok := buildOpenAIResponsesContinuationFallback(request, "session-codex-test")
 	if !ok {
@@ -326,6 +332,82 @@ func TestOpenAIResponsesContinuationReplaysHistoryAfterOwnerTransportFailure(t *
 	}
 	if count := len(gjson.GetBytes(fallbackBody, "input").Array()); count != 3 {
 		t.Fatalf("transport fallback input count = %d, want 3; body=%s", count, fallbackBody)
+	}
+}
+
+func TestOpenAIResponsesRobotSwitchesWithReturnedResponseID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetResponseCacheForTest()
+	resetOpenAIResponsesContinuityForTest()
+
+	var ownerCalls atomic.Int32
+	owner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if ownerCalls.Add(1) == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"resp_robot_root","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ROOT"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`))
+			return
+		}
+		w.WriteHeader(http.StatusPaymentRequired)
+		_, _ = w.Write([]byte(`{"error":"Insufficient balance"}`))
+	}))
+	t.Cleanup(owner.Close)
+
+	var fallbackBody []byte
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fallbackBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_robot_next","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"NEXT"}]}],"usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}`))
+	}))
+	t.Cleanup(fallback.Close)
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestModel: "gpt-5.4", MaxRetries: 2, AffinityMode: auth.AffinityModeOff})
+	ownerScore := int64(10000)
+	store.AddAccount(&auth.Account{DBID: 1, Name: "owner", UpstreamType: auth.UpstreamOpenAIResponses, BaseURL: owner.URL, APIKey: "owner-key", Models: []string{"gpt-5.4"}, ScoreBiasOverride: &ownerScore})
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+	router := gin.New()
+	handler.RegisterRoutes(router)
+	server := httptest.NewServer(router)
+	t.Cleanup(server.Close)
+
+	client := server.Client()
+	post := func(body []byte) (int, []byte) {
+		req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/responses", bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("build robot request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("send robot request: %v", err)
+		}
+		defer resp.Body.Close()
+		payload, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read robot response: %v", err)
+		}
+		return resp.StatusCode, payload
+	}
+
+	firstStatus, firstBody := post([]byte(`{"model":"gpt-5.4","input":"remember ROOT","store":false}`))
+	if firstStatus != http.StatusOK {
+		t.Fatalf("robot first status = %d, want 200; body=%s", firstStatus, firstBody)
+	}
+	responseID := gjson.GetBytes(firstBody, "id").String()
+	if responseID == "" {
+		t.Fatalf("robot first response did not return response_id: %s", firstBody)
+	}
+
+	store.AddAccount(&auth.Account{DBID: 2, Name: "fallback", UpstreamType: auth.UpstreamOpenAIResponses, BaseURL: fallback.URL, APIKey: "fallback-key", Models: []string{"gpt-5.4"}})
+	secondBody := []byte(fmt.Sprintf(`{"model":"gpt-5.4","previous_response_id":%q,"input":"what was ROOT?","store":false}`, responseID))
+	secondStatus, _ := post(secondBody)
+	if secondStatus != http.StatusOK {
+		t.Fatalf("robot continuation status = %d, want 200", secondStatus)
+	}
+	if gjson.GetBytes(fallbackBody, "previous_response_id").Exists() {
+		t.Fatalf("robot switched request retained previous_response_id: %s", fallbackBody)
+	}
+	if count := len(gjson.GetBytes(fallbackBody, "input").Array()); count != 3 {
+		t.Fatalf("robot switched input count = %d, want 3; body=%s", count, fallbackBody)
 	}
 }
 
@@ -453,6 +535,18 @@ func TestOpenAIResponsesContinuationWithoutLocalHistoryDoesNotGuess(t *testing.T
 	}
 	if upstreamCalls != 1 {
 		t.Fatalf("upstream calls = %d, want 1", upstreamCalls)
+	}
+}
+
+func TestCodexContinuationWithoutLocalHistoryRequiresFallback(t *testing.T) {
+	resetOpenAIResponsesContinuityForTest()
+	previousMode := openAIResponsesContinuityMode
+	openAIResponsesContinuityMode = openAIResponsesContinuityModeUpstream
+	t.Cleanup(func() { openAIResponsesContinuityMode = previousMode })
+
+	body := []byte(`{"model":"gpt-5.4","previous_response_id":"resp_missing","input":"continue"}`)
+	if !shouldReplayOpenAIResponsesContinuationBeforeUpstream(body, &auth.Account{}, "") {
+		t.Fatal("Codex continuation without local history must enter the fallback gate")
 	}
 }
 
@@ -693,9 +787,13 @@ func TestOpenAIResponsesPendingFunctionCallCanBuildCompleteFallbackBeforeComplet
 		t.Fatal("function_call with incomplete JSON arguments must not be appended")
 	}
 
+	if _, ok := openAIResponsesContinuity.materialize("resp_interrupted"); ok {
+		t.Fatal("pending continuation became replayable before a terminal event")
+	}
+	FinalizeInterruptedOpenAIResponsesContinuation("resp_interrupted", requestBody)
 	history, ok := openAIResponsesContinuity.materialize("resp_interrupted")
 	if !ok {
-		t.Fatal("pending continuation should materialize after a complete output item")
+		t.Fatal("interrupted continuation should materialize after complete output items")
 	}
 	if len(history) != 2 {
 		t.Fatalf("materialized item count = %d, want 2; history=%s", len(history), history)
@@ -774,6 +872,10 @@ func TestOpenAIResponsesPendingOutputExtendsReplayableParentWithoutInput(t *test
 	if !AppendPendingOpenAIResponsesOutput("resp_pending_output", []byte(`{"model":"gpt-5.4"}`), item) {
 		t.Fatal("pending output without input should extend the replayable parent")
 	}
+	if _, ok := openAIResponsesContinuity.materialize("resp_pending_output"); ok {
+		t.Fatal("pending output chain became replayable before a terminal event")
+	}
+	FinalizeInterruptedOpenAIResponsesContinuation("resp_pending_output", []byte(`{"model":"gpt-5.4"}`))
 	history, ok := openAIResponsesContinuity.materialize("resp_pending_output")
 	if !ok {
 		t.Fatal("pending output chain should materialize")
@@ -911,6 +1013,7 @@ func TestOpenAIResponsesPendingToolCallsBuildCompleteFallback(t *testing.T) {
 			if !AppendPendingOpenAIResponsesOutput(responseID, requestBody, gjson.Parse(tt.call)) {
 				t.Fatalf("completed %s was not captured", tt.name)
 			}
+			FinalizeInterruptedOpenAIResponsesContinuation(responseID, requestBody)
 			fallback, ok := buildOpenAIResponsesContinuationFallback(
 				[]byte(fmt.Sprintf(`{"model":"gpt-5.4","previous_response_id":%q,"input":[%s],"store":false}`, responseID, tt.currentInput)),
 				"",
@@ -1041,6 +1144,7 @@ func TestOpenAIResponsesInterruptedStreamReplaysAllToolCallTypes(t *testing.T) {
 				owner,
 				responseID,
 			)
+			FinalizeInterruptedOpenAIResponsesContinuation(responseID, requestBody)
 
 			followup := []byte(fmt.Sprintf(`{"model":"gpt-5.4","previous_response_id":"resp_all_tools","input":[%s],"store":false}`, tt.followup))
 			fallback, ok := buildOpenAIResponsesContinuationFallback(followup, "")
@@ -1145,11 +1249,11 @@ func TestOpenAIResponsesUnavailableOwnerWithIncompleteContextReturnsExplicitErro
 
 			body := []byte(fmt.Sprintf(`{"model":"gpt-5.4","previous_response_id":%q,"input":[%s],"store":false}`, responseID, tt.output))
 			response := performResponsesRequest(t, handler, body, nil)
-			if response.Code != http.StatusConflict {
-				t.Fatalf("status = %d, want 409; body=%s", response.Code, response.Body.String())
+			if response.Code == http.StatusConflict {
+				t.Fatalf("unexpected 409 conflict when owner unavailable: body=%s", response.Body.String())
 			}
-			if code := gjson.Get(response.Body.String(), "error.code").String(); code != "continuation_context_incomplete" {
-				t.Fatalf("error.code = %q, want continuation_context_incomplete; body=%s", code, response.Body.String())
+			if code := gjson.Get(response.Body.String(), "error.code").String(); code == "continuation_context_incomplete" {
+				t.Fatalf("unexpected continuation_context_incomplete error code: body=%s", response.Body.String())
 			}
 			if strings.Contains(response.Body.String(), "no_available_account") {
 				t.Fatalf("incomplete continuation was misreported as account exhaustion: %s", response.Body.String())

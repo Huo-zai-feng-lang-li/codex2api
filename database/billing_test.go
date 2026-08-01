@@ -30,6 +30,10 @@ func TestGetModelPricingUsesSub2APICodexFallbacks(t *testing.T) {
 		wantInput  float64
 		wantOutput float64
 	}{
+		{model: "gpt-5.6-luna-20260730", wantInput: 0.2, wantOutput: 1.2},
+		{model: "gpt-5.6-terra-20260730", wantInput: 2.0, wantOutput: 12.0},
+		{model: "gpt-5.6-sol-20260730", wantInput: 5.0, wantOutput: 30.0},
+		{model: "gpt-5.6", wantInput: 5.0, wantOutput: 30.0},
 		{model: "gpt-5.4-mini-20260401", wantInput: 0.75, wantOutput: 4.5},
 		{model: "gpt-5.3-codex-spark", wantInput: 1.25, wantOutput: 10.0},
 		{model: "gpt-5.3-codex", wantInput: 1.75, wantOutput: 14.0},

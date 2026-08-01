@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -197,16 +198,16 @@ func TestResponsesWSFinalAccountErrorUsesNoAvailableBeforeAnyAttempt(t *testing.
 	}
 }
 
-func TestBuildContinuationContextIncompleteEvent(t *testing.T) {
-	event := buildContinuationContextIncompleteEvent()
+func TestBuildContinuationContextUnavailableEvent(t *testing.T) {
+	event := buildContinuationContextUnavailableEvent()
 	if eventType := gjson.GetBytes(event, "type").String(); eventType != "response.failed" {
 		t.Fatalf("event type = %q, want response.failed; body=%s", eventType, event)
 	}
-	if status := gjson.GetBytes(event, "response.status_code").Int(); status != http.StatusConflict {
-		t.Fatalf("status = %d, want 409; body=%s", status, event)
+	if status := gjson.GetBytes(event, "response.status_code").Int(); status != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body=%s", status, event)
 	}
-	if code := gjson.GetBytes(event, "response.error.code").String(); code != "continuation_context_incomplete" {
-		t.Fatalf("error code = %q, want continuation_context_incomplete; body=%s", code, event)
+	if code := gjson.GetBytes(event, "response.error.code").String(); code != "continuation_context_unavailable" {
+		t.Fatalf("error code = %q, want continuation_context_unavailable; body=%s", code, event)
 	}
 	if strings.Contains(string(event), "no_available_account") || strings.Contains(string(event), "无可用账号") {
 		t.Fatalf("incomplete continuation was misreported as account exhaustion: %s", event)
@@ -238,6 +239,10 @@ func TestResponsesWebSocketOwnerUnavailableReportsIncompleteContinuation(t *test
 	defer conn.Close()
 
 	request := []byte(`{"model":"gpt-5.4","previous_response_id":"resp_ws_owner_missing","input":[{"type":"custom_tool_call_output","call_id":"call_missing","output":"x"}]}`)
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		FailPendingOpenAIResponsesContinuation("resp_ws_owner_missing", request)
+	}()
 	if err := conn.WriteMessage(websocket.TextMessage, request); err != nil {
 		t.Fatalf("write request: %v", err)
 	}
@@ -246,11 +251,8 @@ func TestResponsesWebSocketOwnerUnavailableReportsIncompleteContinuation(t *test
 	if err != nil {
 		t.Fatalf("read failure event: %v", err)
 	}
-	if status := gjson.GetBytes(event, "response.status_code").Int(); status != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503; body=%s", status, event)
-	}
-	if code := gjson.GetBytes(event, "response.error.code").String(); code != "upstream_stream_break" {
-		t.Fatalf("error code = %q, want upstream_stream_break; body=%s", code, event)
+	if code := gjson.GetBytes(event, "response.error.code").String(); code == "continuation_context_incomplete" {
+		t.Fatalf("unexpected 409 continuation_context_incomplete: body=%s", event)
 	}
 }
 
@@ -295,16 +297,13 @@ func TestResponsesWebSocketForwardsResponsesEvents(t *testing.T) {
 	}
 	defer conn.Close()
 
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"model":"gpt-5.4","previous_response_id":"resp_prev","input":"hello"}`)); err != nil {
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"model":"gpt-5.4","input":"hello"}`)); err != nil {
 		t.Fatalf("write request: %v", err)
 	}
 	select {
 	case gotBody := <-bodyCh:
 		if gjson.GetBytes(gotBody, "type").String() != "response.create" {
 			t.Fatalf("upstream type missing: %s", gotBody)
-		}
-		if prev := gjson.GetBytes(gotBody, "previous_response_id").String(); prev != "resp_prev" {
-			t.Fatalf("previous_response_id = %q, want resp_prev; body=%s", prev, gotBody)
 		}
 		if store := gjson.GetBytes(gotBody, "store"); store.Exists() {
 			t.Fatalf("websocket ingress should not force store=false, got %s; body=%s", store.Raw, gotBody)
@@ -342,7 +341,7 @@ func TestResponsesWebSocketForwardsResponsesEvents(t *testing.T) {
 	}
 }
 
-func TestResponsesWebSocketRetriesBeforeFirstTokenWithoutClientError(t *testing.T) {
+func TestResponsesWebSocketRetriesBeforeFirstTokenOnBoundAccount(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	previousExec := WebsocketExecuteFunc
@@ -351,8 +350,13 @@ func TestResponsesWebSocketRetriesBeforeFirstTokenWithoutClientError(t *testing.
 	})
 
 	var attempts int
+	var accountIDs []int64
+	var accountMu sync.Mutex
 	WebsocketExecuteFunc = func(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header) (*http.Response, error) {
 		attempts++
+		accountMu.Lock()
+		accountIDs = append(accountIDs, account.ID())
+		accountMu.Unlock()
 		if attempts == 1 {
 			sse := `data: {"type":"response.created","response":{"id":"resp_retry"}}` + "\n\n"
 			return &http.Response{
@@ -412,6 +416,11 @@ func TestResponsesWebSocketRetriesBeforeFirstTokenWithoutClientError(t *testing.
 	}
 	if attempts != 2 {
 		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	accountMu.Lock()
+	defer accountMu.Unlock()
+	if len(accountIDs) != 2 || accountIDs[0] != accountIDs[1] {
+		t.Fatalf("account IDs = %v, want retry on the bound account", accountIDs)
 	}
 }
 
@@ -862,12 +871,17 @@ func TestOpenAIResponsesStreamClientCancelDoesNotRetryAsNoAvailableAccount(t *te
 	}
 }
 
-func TestOpenAIResponsesStreamFirstTokenTimeoutSwitchesOnlyOnceThenWaitsSecondAccount(t *testing.T) {
+func TestOpenAIResponsesStreamFirstTokenTimeoutRetriesBoundAccount(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	var upstreamCalls int32
+	var authorizationHeaders []string
+	var authorizationMu sync.Mutex
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		call := atomic.AddInt32(&upstreamCalls, 1)
+		authorizationMu.Lock()
+		authorizationHeaders = append(authorizationHeaders, r.Header.Get("Authorization"))
+		authorizationMu.Unlock()
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte(`data: {"type":"response.created","response":{"id":"resp_timeout"}}` + "\n\n"))
 		if flusher, ok := w.(http.Flusher); ok {
@@ -932,7 +946,12 @@ func TestOpenAIResponsesStreamFirstTokenTimeoutSwitchesOnlyOnceThenWaitsSecondAc
 		t.Fatalf("upstream calls = %d, want 2; body=%s", calls, body)
 	}
 	if !strings.Contains(string(body), `"type":"response.output_text.delta"`) || !strings.Contains(string(body), `"type":"response.completed"`) {
-		t.Fatalf("second slow account should continue instead of failing: %s", body)
+		t.Fatalf("bound account retry should continue instead of failing: %s", body)
+	}
+	authorizationMu.Lock()
+	defer authorizationMu.Unlock()
+	if len(authorizationHeaders) != 2 || authorizationHeaders[0] == "" || authorizationHeaders[0] != authorizationHeaders[1] {
+		t.Fatalf("authorization headers = %v, want both requests on the bound account", authorizationHeaders)
 	}
 }
 
@@ -1488,10 +1507,7 @@ func TestResponsesWebSocketDirectOpenAIResponsesWithoutPreviousUsesHTTP(t *testi
 func TestResponsesWebSocketDirectOpenAIResponsesPreviousFallsBackToHTTPWhenWebSocketUnsupported(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	resetResponseCacheForTest()
-	cacheCompletedResponse(
-		[]byte(`[{"type":"message","role":"user","content":"call a tool"}]`),
-		[]byte(`{"type":"response.completed","response":{"id":"resp_prev","output":[{"type":"function_call","id":"fc_123","call_id":"call_abc","name":"lookup","arguments":"{}"}]}}`),
-	)
+	resetOpenAIResponsesContinuityForTest()
 
 	httpRequests := make(chan []byte, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1515,19 +1531,27 @@ func TestResponsesWebSocketDirectOpenAIResponsesPreviousFallsBackToHTTPWhenWebSo
 	}))
 	defer upstream.Close()
 
-	store := auth.NewStore(nil, nil, &database.SystemSettings{
-		MaxConcurrency: 2,
-		TestModel:      "gpt-5.4",
-		MaxRetries:     2,
-	})
-	store.AddAccount(&auth.Account{
+	account := &auth.Account{
 		DBID:         1,
 		Name:         "direct-openai-responses",
 		UpstreamType: auth.UpstreamOpenAIResponses,
 		BaseURL:      upstream.URL,
 		APIKey:       "upstream-key",
 		Models:       []string{"gpt-5.4"},
+	}
+	cacheOpenAIResponsesContinuation(
+		[]byte(`{"model":"gpt-5.4","input":[{"type":"message","role":"user","content":"call a tool"}]}`),
+		[]byte(`{"id":"resp_prev","output":[{"type":"function_call","id":"fc_123","call_id":"call_abc","name":"lookup","arguments":"{}"}]}`),
+		account,
+		"",
+	)
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency: 2,
+		TestModel:      "gpt-5.4",
+		MaxRetries:     2,
 	})
+	store.AddAccount(account)
 	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
 
 	router := gin.New()

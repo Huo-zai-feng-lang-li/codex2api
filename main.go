@@ -360,15 +360,20 @@ func main() {
 
 	reason := <-shutdownRequests
 
-	log.Printf("收到停止指令，直接终止服务... reason=%s", security.SanitizeLog(reason))
-	_ = server.Close()
+	log.Printf("收到停止指令，优雅排空关停服务... reason=%s", security.SanitizeLog(reason))
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("HTTP 主服务优雅关停异常: %v", err)
+		_ = server.Close()
+	}
 	if oauthCallbackServer != nil {
-		_ = oauthCallbackServer.Close()
+		_ = oauthCallbackServer.Shutdown(shutdownCtx)
 	}
 	store.Stop()
 	wsrelay.ShutdownExecutor()
 	proxy.CloseErrorLogger()
-	log.Println("已终止服务")
+	log.Println("服务已安全关停排空")
 	os.Exit(0)
 }
 

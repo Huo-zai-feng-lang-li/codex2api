@@ -55,18 +55,23 @@ type openAIResponsesTransportState struct {
 	fallbackTTL  time.Duration
 }
 
-func (state *openAIResponsesTransportState) fallbackToHTTP(rawBody []byte, httpEndpoint string, ttl time.Duration) string {
+func (state *openAIResponsesTransportState) fallbackToHTTP(rawBody []byte, httpEndpoint string, ttl time.Duration) (string, bool) {
+	body, inputRaw, ok := prepareOpenAIResponsesHTTPBodyFromWebSocket(rawBody, true)
+	if !ok {
+		return "", false
+	}
 	state.endpoint = httpEndpoint
 	state.execute = ExecuteOpenAIResponsesRequest
 	state.useWebSocket = false
 	state.fallbackTTL = ttl
-	state.body, state.inputRaw = prepareOpenAIResponsesHTTPBodyFromWebSocket(rawBody, true)
-	return state.inputRaw
+	state.body = body
+	state.inputRaw = inputRaw
+	return state.inputRaw, true
 }
 
 func (h *Handler) finishOpenAIResponsesHTTPFallbackRequestError(conn *websocket.Conn, account *auth.Account, affinityKey, httpEndpoint string, reqErr error) error {
 	h.store.Release(account)
-	h.store.UnbindSessionAffinity(affinityKey, account.ID())
+	h.unbindResponsesSessionAffinity(affinityKey, account, 0)
 	log.Printf("responses_transport_fallback result=http_request_failed endpoint_key=%s err=%v", responsesTransportCacheKey(httpEndpoint), reqErr)
 	apiErr := api.NewAPIError(api.ErrCodeUpstreamError, reqErr.Error(), api.ErrorTypeUpstream)
 	if err := writeResponsesWSMessage(conn, buildResponseFailedEvent(http.StatusBadGateway, apiErr.Message)); err != nil {
@@ -191,7 +196,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		return newResponsesWSCloseError(websocket.ClosePolicyViolation, apiErr.Message, err)
 	}
 
-	sessionID := ResolveSessionID(c.Request.Header, rawBody)
+	sessionID := ResolveResponsesSessionID(c.Request.Header, rawBody)
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := sessionAffinityKey(sessionID, apiKeyID)
 	reasoningEffort := extractReasoningEffort(rawBody)
@@ -225,6 +230,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	baseAccountFilter := accountFilterForResponsesModel(effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
 	baseAccountFilter = h.withModelCooldownFilter(effectiveModel, baseAccountFilter)
 	rawBody, accountFilter, continuationReplayed, continuationOwnerBound := prepareOpenAIResponsesWebSocketContinuation(continuationCacheBody, sessionID, baseAccountFilter)
+	selectionAffinityKey := responsesContinuationAffinityKey(rawBody, affinityKey)
 	if continuationReplayed {
 		codexBody, expandedInputRaw = PrepareResponsesWebSocketBody(rawBody)
 		log.Printf("Responses WebSocket 续链已展发本地历史并解除 owner 绑定 (session=%s)", sessionID)
@@ -238,6 +244,8 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	var lastBody []byte
 	retryExclusions := newRetryAccountExclusions()
 	invalidEncryptedContentRetried := false
+	continuationFallbackActivated := continuationReplayed
+	continuationOwnerAccountID := openAIResponsesContinuationOwnerAccountID(continuationCacheBody, sessionID)
 	var lastUpstreamCancel context.CancelFunc
 	var activeEnd func()
 	forceHTTPFallback := false
@@ -250,6 +258,21 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			lastUpstreamCancel()
 		}
 	}()
+	if continuationOwnerBound && h.responsesContinuationOwnerUnavailable(continuationOwnerAccountID) {
+		activation, ok := activateOpenAIResponsesContinuationFallback(c.Request.Context(), continuationCacheBody, sessionID, continuationFallbackActivated, "response_owner_unavailable")
+		if !ok {
+			_ = writeResponsesWSMessage(conn, buildContinuationContextUnavailableEvent())
+			return nil
+		}
+		rawBody = activation.body
+		selectionAffinityKey = ""
+		accountFilter = baseAccountFilter
+		continuationOwnerBound = false
+		continuationFallbackActivated = true
+		codexBody, expandedInputRaw = PrepareResponsesWebSocketBody(rawBody)
+		h.store.UnbindSessionAffinity(affinityKey, continuationOwnerAccountID)
+		log.Printf("Responses WebSocket 续链绑定的原账号已不可用，自动解绑并成功切换为本地历史降级回放 (session=%s)", sessionID)
+	}
 
 accountAttempts:
 	for attempt := 0; ; attempt++ {
@@ -257,24 +280,24 @@ accountAttempts:
 			activeEnd()
 			activeEnd = nil
 		}
-		pick := h.nextRetryAccountPickForSession(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter)
+		pick := h.nextRetryAccountPickForSession(c.Request.Context(), selectionAffinityKey, apiKeyID, retryExclusions, accountFilter)
 		account, stickyProxyURL := pick.account, pick.proxyURL
 		if account == nil {
 			if continuationOwnerBound {
-				if canBuildOpenAIResponsesContinuationFallback(continuationCacheBody, sessionID) {
-					if fallback, ok := buildOpenAIResponsesContinuationFallback(continuationCacheBody, sessionID); ok {
-						rawBody = fallback
-						accountFilter = baseAccountFilter
-						continuationOwnerBound = false
-						codexBody, expandedInputRaw = PrepareResponsesWebSocketBody(rawBody)
-						log.Printf("Responses WebSocket 续链绑定的原账号无法分配，自动解绑并成功切换为本地历史降级回放 (session=%s)", sessionID)
-						continue accountAttempts
-					}
+				activation, ok := activateOpenAIResponsesContinuationFallback(c.Request.Context(), continuationCacheBody, sessionID, continuationFallbackActivated, "response_owner_unavailable")
+				if ok {
+					rawBody = activation.body
+					selectionAffinityKey = ""
+					accountFilter = baseAccountFilter
+					continuationOwnerBound = false
+					continuationFallbackActivated = true
+					codexBody, expandedInputRaw = PrepareResponsesWebSocketBody(rawBody)
+					h.store.UnbindSessionAffinity(affinityKey, continuationOwnerAccountID)
+					log.Printf("Responses WebSocket 续链绑定的原账号无法分配，自动解绑并成功切换为本地历史降级回放 (session=%s)", sessionID)
+					continue accountAttempts
 				}
-				accountFilter = baseAccountFilter
-				continuationOwnerBound = false
-				log.Printf("Responses WebSocket 续链绑定的原账号不可用，已自动解除绑定并尝试使用池内其他账号 (session=%s)", sessionID)
-				continue accountAttempts
+				_ = writeResponsesWSMessage(conn, buildContinuationContextUnavailableEvent())
+				return nil
 			}
 			if attemptedUpstream && c.Request.Context().Err() != nil {
 				return errResponsesWSClientGone
@@ -288,10 +311,26 @@ accountAttempts:
 			_ = writeResponsesWSMessage(conn, buildResponseFailedEvent(statusCode, finalErr.Message))
 			return nil
 		}
+		if !continuationFallbackActivated && shouldReplayOpenAIResponsesContinuationBeforeUpstream(continuationCacheBody, account, sessionID) {
+			activation, ok := activateOpenAIResponsesContinuationFallback(c.Request.Context(), continuationCacheBody, sessionID, continuationFallbackActivated, "third_party_stateless_continuation")
+			if !ok {
+				h.store.Release(account)
+				h.store.UnbindSessionAffinity(affinityKey, continuationOwnerAccountID)
+				_ = writeResponsesWSMessage(conn, buildContinuationContextUnavailableEvent())
+				return nil
+			} else {
+				rawBody = activation.body
+				selectionAffinityKey = ""
+				accountFilter = baseAccountFilter
+				continuationOwnerBound = false
+				continuationFallbackActivated = true
+				codexBody, expandedInputRaw = PrepareResponsesWebSocketBody(rawBody)
+			}
+		}
 
 		start := time.Now()
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
-		h.store.BindSessionAffinity(affinityKey, account, proxyURL)
+		h.store.BindSessionAffinity(selectionAffinityKey, account, proxyURL)
 		upstreamEndpoint := "/v1/responses"
 		activeEnd = h.beginActiveProxyRequest(c, account, auth.ActiveRequestMeta{
 			Endpoint:         "/v1/responses",
@@ -318,7 +357,13 @@ accountAttempts:
 				execute:      ExecuteOpenAIResponsesRequest,
 				useWebSocket: hasPreviousResponseID && !h.prefersResponsesHTTP(c.Request.Context(), httpEndpoint),
 			}
-			transport.body, transport.inputRaw = prepareOpenAIResponsesHTTPBodyFromWebSocket(rawBody, hasPreviousResponseID && !transport.useWebSocket)
+			var continuationReady bool
+			transport.body, transport.inputRaw, continuationReady = prepareOpenAIResponsesHTTPBodyFromWebSocket(rawBody, hasPreviousResponseID && !transport.useWebSocket)
+			if !continuationReady {
+				h.store.Release(account)
+				_ = writeResponsesWSMessage(conn, buildContinuationContextUnavailableEvent())
+				return nil
+			}
 			if transport.inputRaw != "" {
 				expandedInputRaw = transport.inputRaw
 			}
@@ -365,8 +410,14 @@ accountAttempts:
 					if isOpenAIResponsesWebSocketUnsupported(resp.StatusCode, errBody) {
 						resp.Body.Close()
 						audit.Finish()
+						h.store.Release(account)
 						log.Printf("responses_transport_fallback reason=websocket_unsupported status=%d endpoint_key=%s", resp.StatusCode, responsesTransportCacheKey(httpEndpoint))
-						if inputRaw := transport.fallbackToHTTP(rawBody, httpEndpoint, responsesWSUnsupportedPreferenceTTL); inputRaw != "" {
+						inputRaw, continuationReady := transport.fallbackToHTTP(rawBody, httpEndpoint, responsesWSUnsupportedPreferenceTTL)
+						if !continuationReady {
+							_ = writeResponsesWSMessage(conn, buildContinuationContextUnavailableEvent())
+							return nil
+						}
+						if inputRaw != "" {
 							expandedInputRaw = inputRaw
 						}
 						continue transportAttempts
@@ -385,7 +436,7 @@ accountAttempts:
 					}
 					if IsNoAvailableAccountError(reqErr) {
 						h.store.Release(account)
-						h.store.UnbindSessionAffinity(affinityKey, account.ID())
+						h.unbindResponsesSessionAffinity(affinityKey, account, 0)
 						retryExclusions.MarkHard(account.ID())
 						attemptedUpstream = false
 						log.Printf("Responses WebSocket 选中 OpenAI Responses 账号在执行前已无可用凭据，切换下一个账号重试 (attempt %d/%d, account %d)", attempt+1, maxRetries+1, account.ID())
@@ -396,7 +447,7 @@ accountAttempts:
 						h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 					}
 					h.store.Release(account)
-					h.store.UnbindSessionAffinity(affinityKey, account.ID())
+					h.unbindResponsesSessionAffinity(affinityKey, account, 0)
 					retryExclusions.MarkHard(account.ID())
 
 					if !IsRetryableError(reqErr) && kind == "" {
@@ -422,7 +473,7 @@ accountAttempts:
 					}
 					SyncCodexUsageState(h.store, account, resp)
 					h.store.Release(account)
-					h.store.UnbindSessionAffinity(affinityKey, account.ID())
+					h.unbindResponsesSessionAffinity(affinityKey, account, resp.StatusCode)
 					retryExclusions.MarkHard(account.ID())
 
 					log.Printf("Responses WebSocket OpenAI Responses upstream returned error (attempt %d, status %d): %s", attempt+1, resp.StatusCode, upstreamErrorLogBody(errBody))
@@ -481,14 +532,26 @@ accountAttempts:
 					websocketFallbackHTTPEnabled() &&
 					isResponsesWebSocketShortFallbackError(err) {
 					log.Printf("responses_transport_fallback reason=websocket_missing_terminal endpoint_key=%s", responsesTransportCacheKey(httpEndpoint))
-					if inputRaw := transport.fallbackToHTTP(rawBody, httpEndpoint, responsesWSMissingTerminalPreferenceTTL); inputRaw != "" {
+					inputRaw, continuationReady := transport.fallbackToHTTP(rawBody, httpEndpoint, responsesWSMissingTerminalPreferenceTTL)
+					if !continuationReady {
+						_ = writeResponsesWSMessage(conn, buildContinuationContextUnavailableEvent())
+						return nil
+					}
+					if inputRaw != "" {
 						expandedInputRaw = inputRaw
 					}
 					continue transportAttempts
 				}
+				if transport.useWebSocket {
+					if statusCode, message, terminal := responsesWebSocketTerminalMissingResponseError(err); terminal {
+						if err := writeResponsesWSMessage(conn, buildResponseFailedEvent(statusCode, message)); err != nil {
+							return errResponsesWSClientGone
+						}
+						return nil
+					}
+				}
 
 				if shouldRetryErr, ok := err.(*responsesWSCloseError); ok && shouldRetryErr.code == websocket.CloseTryAgainLater {
-					h.store.UnbindSessionAffinity(affinityKey, account.ID())
 					retryExclusions.MarkHard(account.ID())
 					if shouldRetryRequestError(err, &generalRetries, maxRetries) {
 						continue accountAttempts
@@ -541,7 +604,7 @@ accountAttempts:
 			}
 			if IsNoAvailableAccountError(reqErr) {
 				h.store.Release(account)
-				h.store.UnbindSessionAffinity(affinityKey, account.ID())
+				h.unbindResponsesSessionAffinity(affinityKey, account, 0)
 				retryExclusions.MarkHard(account.ID())
 				attemptedUpstream = false
 				log.Printf("Responses WebSocket 选中账号在执行前已无可用凭据，切换下一个账号重试 (attempt %d/%d, account %d)", attempt+1, maxRetries+1, account.ID())
@@ -552,7 +615,7 @@ accountAttempts:
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 			}
 			h.store.Release(account)
-			h.store.UnbindSessionAffinity(affinityKey, account.ID())
+			h.unbindResponsesSessionAffinity(affinityKey, account, 0)
 			if kind == "websocket_missing_terminal" && websocketFallbackHTTPEnabled() {
 				forceHTTPFallback = true
 			} else {
@@ -591,7 +654,7 @@ accountAttempts:
 					}
 					log.Printf("Responses WebSocket upstream rejected encrypted_content, stripped encrypted reasoning context and retried once (attempt %d)", attempt+1)
 					h.store.Release(account)
-					h.store.UnbindSessionAffinity(affinityKey, account.ID())
+					h.unbindResponsesSessionAffinity(affinityKey, account, 0)
 					continue
 				}
 			}
@@ -601,7 +664,7 @@ accountAttempts:
 			}
 			SyncCodexUsageState(h.store, account, resp)
 			h.store.Release(account)
-			h.store.UnbindSessionAffinity(affinityKey, account.ID())
+			h.unbindResponsesSessionAffinity(affinityKey, account, resp.StatusCode)
 			retryExclusions.MarkHard(account.ID())
 
 			log.Printf("Responses WebSocket upstream returned error (attempt %d, status %d): %s", attempt+1, resp.StatusCode, upstreamErrorLogBody(errBody))
@@ -642,7 +705,6 @@ accountAttempts:
 				return err
 			}
 			if shouldRetryErr, ok := err.(*responsesWSCloseError); ok && shouldRetryErr.code == websocket.CloseTryAgainLater {
-				h.store.UnbindSessionAffinity(affinityKey, account.ID())
 				if classifyTransportFailure(err) == "websocket_missing_terminal" && websocketFallbackHTTPEnabled() {
 					forceHTTPFallback = true
 				} else {
@@ -760,10 +822,10 @@ func (h *Handler) streamResponsesWSUpstream(
 			gotTerminal = true
 			gotCompleted = true
 		}
-		if eventType == "response.failed" {
+		if eventType == "response.failed" || eventType == "response.cancelled" {
 			terminalFailurePayload = append([]byte(nil), data...)
 			gotTerminal = true
-			if !wroteAnyMessage && shouldRetryResponseFailedBeforeFirstMessage(data) {
+			if eventType == "response.failed" && !wroteAnyMessage && shouldRetryResponseFailedBeforeFirstMessage(data) {
 				withheldRetryableFailure = true
 				return false
 			}
@@ -775,7 +837,7 @@ func (h *Handler) streamResponsesWSUpstream(
 				pendingFirstTokenEvents = append(pendingFirstTokenEvents, append([]byte(nil), data...))
 				currentQueued = true
 				if totalPendingWebSocketEventBytes(pendingFirstTokenEvents) <= 1024*1024 {
-					return eventType != "response.completed" && eventType != "response.failed"
+					return !isOpenAIResponsesTerminalEvent(eventType)
 				}
 			}
 			for _, pending := range pendingFirstTokenEvents {
@@ -796,8 +858,15 @@ func (h *Handler) streamResponsesWSUpstream(
 				}
 			}
 		}
-		return eventType != "response.completed" && eventType != "response.failed"
+		return !isOpenAIResponsesTerminalEvent(eventType)
 	})
+	if pendingResponseID != "" && !gotTerminal {
+		if c.Request.Context().Err() != nil || writeErr != nil || clientGone {
+			CancelPendingOpenAIResponsesContinuation(pendingResponseID, continuationCacheBody)
+		} else {
+			FinalizeInterruptedOpenAIResponsesContinuation(pendingResponseID, continuationCacheBody)
+		}
+	}
 
 	totalDuration := int(time.Since(start).Milliseconds())
 	outcome := classifyStreamOutcome(c.Request.Context().Err(), readErr, writeErr, gotTerminal)
@@ -874,7 +943,6 @@ func (h *Handler) streamResponsesWSUpstream(
 	if outcome.penalize && !recoverableWSTransportFailure {
 		recyclePooledClient(account, proxyURL)
 		h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
-		h.store.UnbindSessionAffinity(affinityKey, account.ID())
 	} else if outcome.logStatusCode == http.StatusOK {
 		h.store.ClearModelCooldown(account, effectiveModel)
 		h.store.ReportRequestSuccessTTFT(account, time.Duration(firstTokenMs)*time.Millisecond, time.Duration(totalDuration)*time.Millisecond)
@@ -966,14 +1034,17 @@ func stripResponsesWebSocketEnvelope(raw []byte) []byte {
 	return stripped
 }
 
-func prepareOpenAIResponsesHTTPBodyFromWebSocket(raw []byte, dropPreviousResponseID bool) ([]byte, string) {
+func prepareOpenAIResponsesHTTPBodyFromWebSocket(raw []byte, dropPreviousResponseID bool) ([]byte, string, bool) {
 	body := stripResponsesWebSocketEnvelope(raw)
-	if dropPreviousResponseID {
-		body, _ = expandPreviousResponse(body)
-		body, _ = sjson.DeleteBytes(body, "previous_response_id")
+	if dropPreviousResponseID && gjson.GetBytes(body, "previous_response_id").Exists() {
+		fallback, ok := buildOpenAIResponsesContinuationFallback(body, "")
+		if !ok {
+			return body, "", false
+		}
+		body = fallback
 	}
 	body = PrepareOpenAIResponsesBody(body)
-	return body, responsesInputRaw(body)
+	return body, responsesInputRaw(body), true
 }
 
 func isOpenAIResponsesWebSocketUnsupported(status int, body []byte) bool {
@@ -1102,6 +1173,20 @@ func isResponsesWebSocketShortFallbackError(err error) bool {
 	return errors.As(err, &closeErr) &&
 		classifyTransportFailure(err) == "websocket_missing_terminal" &&
 		isResponsesWebSocketShortFallbackCloseCode(closeErr.upstreamCloseCode)
+}
+
+func responsesWebSocketTerminalMissingResponseError(err error) (int, string, bool) {
+	var closeErr *responsesWSCloseError
+	if !errors.As(err, &closeErr) ||
+		classifyTransportFailure(err) != "websocket_missing_terminal" ||
+		isResponsesWebSocketShortFallbackCloseCode(closeErr.upstreamCloseCode) {
+		return 0, "", false
+	}
+	statusCode := closeErr.status
+	if statusCode < 400 {
+		statusCode = http.StatusBadGateway
+	}
+	return statusCode, closeErr.reason, true
 }
 
 func responsesWSUpstreamAPIError(statusCode int, body []byte) *api.APIError {

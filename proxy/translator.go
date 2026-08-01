@@ -1323,9 +1323,8 @@ func normalizeResponsesFunctionTools(body map[string]any) bool {
 }
 
 type responsesBodyPrepareOptions struct {
-	forceStoreFalse            bool
-	expandPreviousResponse     bool
-	preservePreviousResponseID bool
+	forceStoreFalse        bool
+	expandPreviousResponse bool
 }
 
 // PrepareResponsesBody 将 Responses API 原始请求转换为上游可接受的格式
@@ -1341,9 +1340,7 @@ func PrepareResponsesBody(rawBody []byte) ([]byte, string) {
 // PrepareResponsesWebSocketBody keeps upstream response storage linkage for
 // native Responses WebSocket sessions.
 func PrepareResponsesWebSocketBody(rawBody []byte) ([]byte, string) {
-	return prepareResponsesBodyWithOptions(rawBody, responsesBodyPrepareOptions{
-		preservePreviousResponseID: true,
-	})
+	return prepareResponsesBodyWithOptions(rawBody, responsesBodyPrepareOptions{})
 }
 
 func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOptions) ([]byte, string) {
@@ -1491,10 +1488,6 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 	} {
 		delete(body, field)
 	}
-	if !opts.preservePreviousResponseID {
-		delete(body, "previous_response_id")
-	}
-
 	result, err := json.Marshal(body)
 	if err != nil {
 		return rawBody, expandedInputRaw

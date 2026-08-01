@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -291,7 +292,6 @@ func executeRequest(ctx context.Context, account *auth.Account, requestBody []by
 	}
 
 	// 2. 清理可能导致上游报错的多余字段
-	requestBody, _ = sjson.DeleteBytes(requestBody, "previous_response_id")
 	requestBody, _ = sjson.DeleteBytes(requestBody, "prompt_cache_retention")
 	requestBody, _ = sjson.DeleteBytes(requestBody, "safety_identifier")
 	requestBody, _ = sjson.DeleteBytes(requestBody, "disable_response_storage")
@@ -495,7 +495,12 @@ func bridgeOpenAIResponsesWebSocketToSSE(ctx context.Context, conn *websocket.Co
 		if msgType != websocket.TextMessage && msgType != websocket.BinaryMessage {
 			continue
 		}
-		if _, err := fmt.Fprintf(pw, "data: %s\n\n", data); err != nil {
+		payload := data
+		var compact bytes.Buffer
+		if json.Compact(&compact, data) == nil {
+			payload = compact.Bytes()
+		}
+		if _, err := fmt.Fprintf(pw, "data: %s\n\n", payload); err != nil {
 			_ = pw.CloseWithError(err)
 			return
 		}
@@ -530,7 +535,6 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	if !gjson.GetBytes(requestBody, "instructions").Exists() {
 		requestBody, _ = sjson.SetBytes(requestBody, "instructions", "")
 	}
-	requestBody, _ = sjson.DeleteBytes(requestBody, "previous_response_id")
 	requestBody, _ = sjson.DeleteBytes(requestBody, "prompt_cache_retention")
 	requestBody, _ = sjson.DeleteBytes(requestBody, "safety_identifier")
 	requestBody, _ = sjson.DeleteBytes(requestBody, "disable_response_storage")
@@ -740,6 +744,27 @@ func ResolveSessionID(headers http.Header, body []byte) string {
 	}
 
 	// 最后兜底：生成随机 UUID
+	return uuid.New().String()
+}
+
+// ResolveResponsesSessionID isolates independent Responses conversations while
+// preserving explicit session identifiers and locally known response chains.
+func ResolveResponsesSessionID(headers http.Header, body []byte) string {
+	if headers != nil {
+		if value := getHeaderCaseInsensitive(headers, "session_id", "session-id", "x-session-id", "conversation_id", "conversation-id", "x-conversation-id"); value != "" {
+			return value
+		}
+	}
+	if value := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String()); value != "" {
+		return value
+	}
+	previousID := strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String())
+	if previousID != "" {
+		if entry, ok := getOpenAIResponsesContinuation(previousID); ok && entry.sessionID != "" {
+			return entry.sessionID
+		}
+		return uuid.NewSHA1(uuid.NameSpaceOID, []byte("codex2api:responses:"+previousID)).String()
+	}
 	return uuid.New().String()
 }
 

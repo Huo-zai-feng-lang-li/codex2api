@@ -27,7 +27,10 @@ const (
 	openAIResponsesContinuityModeUpstream = "upstream"
 )
 
-var openAIResponsesContinuityDBTimeout = 250 * time.Millisecond
+var (
+	openAIResponsesContinuityDBTimeout = 250 * time.Millisecond
+	openAIResponsesContinuationWait    = 5 * time.Second
+)
 
 const (
 	openAIResponsesContinuityCleanupInterval = time.Minute
@@ -42,18 +45,28 @@ type openAIResponsesContinuityLimits struct {
 	maxBytes     int
 }
 
+const (
+	continuationStatePending               = "pending"
+	continuationStateCompleted             = "completed"
+	continuationStateInterruptedReplayable = "interrupted_replayable"
+	continuationStateFailed                = "failed"
+	continuationStateCancelled             = "cancelled"
+)
+
 type openAIResponsesContinuation struct {
-	accountID  int64
-	baseURL    string
-	parentID   string
-	sessionID  string
-	input      []json.RawMessage
-	output     []json.RawMessage
-	replayable bool
-	createdAt  time.Time
-	accessedAt time.Time
-	size       int
-	pending    bool
+	accountID    int64
+	baseURL      string
+	parentID     string
+	sessionID    string
+	input        []json.RawMessage
+	output       []json.RawMessage
+	replayable   bool
+	createdAt    time.Time
+	accessedAt   time.Time
+	size         int
+	pending      bool
+	state        string
+	operationSeq int64
 }
 
 type openAIResponsesContinuityStats struct {
@@ -69,9 +82,15 @@ type responsesContinuityPersistence interface {
 	GetResponsesContinuation(context.Context, string) (database.ResponsesContinuationRow, bool, error)
 	GetLatestResponseBySessionID(context.Context, string) (database.ResponsesContinuationRow, bool, error)
 	GetLatestReplayableResponseBySessionID(context.Context, string) (database.ResponsesContinuationRow, bool, error)
+	UpsertResponsesContinuationHead(context.Context, string, string, string, int64) error
+	GetResponsesContinuationHead(context.Context, string) (string, string, int64, bool, error)
 	TouchResponsesContinuations(context.Context, []string, time.Time) error
 	PruneResponsesContinuations(context.Context, time.Time) (int64, error)
 	TrimResponsesContinuations(context.Context, int, int) (int64, error)
+}
+
+type transactionalResponsesContinuityPersistence interface {
+	CommitResponsesContinuation(context.Context, *database.ResponsesContinuationRow, string, string, int64) error
 }
 
 type openAIResponsesContinuityCleanupRequest struct {
@@ -84,6 +103,9 @@ type openAIResponsesContinuityRegistry struct {
 	entries                 map[string]openAIResponsesContinuation
 	sessionLatest           map[string]string
 	sessionLatestReplayable map[string]string
+	sessionSequence         map[string]int64
+	sessionHeadSequence     map[string]int64
+	waiters                 map[string]chan struct{}
 	totalBytes              int
 	evictions               uint64
 	limits                  openAIResponsesContinuityLimits
@@ -136,6 +158,9 @@ func newOpenAIResponsesContinuityRegistry(limits openAIResponsesContinuityLimits
 		entries:                 make(map[string]openAIResponsesContinuation),
 		sessionLatest:           make(map[string]string),
 		sessionLatestReplayable: make(map[string]string),
+		sessionSequence:         make(map[string]int64),
+		sessionHeadSequence:     make(map[string]int64),
+		waiters:                 make(map[string]chan struct{}),
 		limits:                  limits,
 		now:                     time.Now,
 	}
@@ -185,9 +210,11 @@ func (registry *openAIResponsesContinuityRegistry) mergePersisted(rows []databas
 		if !inputOK || !outputOK {
 			continue
 		}
+		state := normalizeContinuationState(row.State, row.Replayable)
 		entry := openAIResponsesContinuation{
-			accountID: row.AccountID, baseURL: row.BaseURL, sessionID: row.SessionID,
-			createdAt: row.CreatedAt, accessedAt: now,
+			accountID: row.AccountID, baseURL: row.BaseURL, parentID: row.ParentID, sessionID: row.SessionID,
+			input: input, output: output, createdAt: row.CreatedAt, accessedAt: now,
+			pending: state == continuationStatePending, state: state, operationSeq: row.OperationSeq,
 		}
 		if entry.createdAt.IsZero() {
 			entry.createdAt = now
@@ -195,24 +222,55 @@ func (registry *openAIResponsesContinuityRegistry) mergePersisted(rows []databas
 		if entry.accessedAt.IsZero() {
 			entry.accessedAt = entry.createdAt
 		}
-		if row.Replayable && registry.canStoreReplayableLocked(row.ParentID, input, output) {
-			entry.parentID = row.ParentID
-			entry.input = input
-			entry.output = output
+		if isReplayableContinuationState(state) && row.Replayable && registry.canStoreReplayableLocked(row.ParentID, input, output) {
 			entry.replayable = true
 			entry.size = rawMessagesSize(input) + rawMessagesSize(output)
+		} else if state == continuationStatePending {
+			entry.size = rawMessagesSize(input) + rawMessagesSize(output)
+		} else {
+			entry.input = nil
+			entry.output = nil
 		}
 		registry.entries[row.ResponseID] = entry
 		registry.totalBytes += entry.size
 		if row.SessionID != "" {
-			registry.sessionLatest[row.SessionID] = row.ResponseID
-			if entry.replayable {
+			if row.OperationSeq > registry.sessionSequence[row.SessionID] {
+				registry.sessionSequence[row.SessionID] = row.OperationSeq
+			}
+			if entry.replayable && row.OperationSeq >= registry.sessionHeadSequence[row.SessionID] {
+				registry.sessionLatest[row.SessionID] = row.ResponseID
 				registry.sessionLatestReplayable[row.SessionID] = row.ResponseID
+				registry.sessionHeadSequence[row.SessionID] = row.OperationSeq
 			}
 		}
 	}
 	registry.purgeExpiredLocked(now)
 	registry.enforceLimitsLocked()
+}
+
+func normalizeContinuationState(state string, replayable bool) string {
+	switch strings.TrimSpace(state) {
+	case continuationStatePending, continuationStateCompleted, continuationStateInterruptedReplayable, continuationStateFailed, continuationStateCancelled:
+		return strings.TrimSpace(state)
+	default:
+		if replayable {
+			return continuationStateCompleted
+		}
+		return continuationStateFailed
+	}
+}
+
+func isReplayableContinuationState(state string) bool {
+	return state == continuationStateCompleted || state == continuationStateInterruptedReplayable
+}
+
+func isOpenAIResponsesTerminalEvent(eventType string) bool {
+	switch eventType {
+	case "response.completed", "response.failed", "response.cancelled":
+		return true
+	default:
+		return false
+	}
 }
 
 func (registry *openAIResponsesContinuityRegistry) ensureLoaded(responseID string) bool {
@@ -283,14 +341,7 @@ func decodePersistedRawMessages(data []byte) ([]json.RawMessage, bool) {
 }
 
 func bindOpenAIResponsesContinuationOwner(body []byte, sessionID string, base auth.AccountFilter) (auth.AccountFilter, bool) {
-	previousID := gjson.GetBytes(body, "previous_response_id").String()
-	var entry openAIResponsesContinuation
-	var ok bool
-	if previousID != "" {
-		entry, ok = getOpenAIResponsesContinuation(previousID)
-	} else if sessionID != "" {
-		_, entry, ok = openAIResponsesContinuity.getLatestResponse(sessionID)
-	}
+	entry, ok := openAIResponsesContinuationOwner(body, sessionID)
 	if !ok {
 		return base, false
 	}
@@ -309,20 +360,76 @@ func bindOpenAIResponsesContinuationOwner(body []byte, sessionID string, base au
 	}, true
 }
 
+func openAIResponsesContinuationOwner(body []byte, sessionID string) (openAIResponsesContinuation, bool) {
+	previousID := gjson.GetBytes(body, "previous_response_id").String()
+	if previousID != "" {
+		return getOpenAIResponsesContinuation(previousID)
+	}
+	if sessionID != "" {
+		_, entry, ok := openAIResponsesContinuity.getLatestResponse(sessionID)
+		return entry, ok
+	}
+	return openAIResponsesContinuation{}, false
+}
+
+func openAIResponsesContinuationOwnerAccountID(body []byte, sessionID string) int64 {
+	entry, ok := openAIResponsesContinuationOwner(body, sessionID)
+	if !ok {
+		return 0
+	}
+	return entry.accountID
+}
+
 func prepareOpenAIResponsesWebSocketContinuation(body []byte, sessionID string, base auth.AccountFilter) ([]byte, auth.AccountFilter, bool, bool) {
 	ownerFilter, ownerBound := bindOpenAIResponsesContinuationOwner(body, sessionID, base)
-	previousID := gjson.GetBytes(body, "previous_response_id").String()
-	if previousID != "" && openAIResponsesContinuity.isReplayable(previousID) {
-		if !canBuildOpenAIResponsesContinuationFallback(body, sessionID) {
-			return body, ownerFilter, false, ownerBound
-		}
-		fallback, ok := buildOpenAIResponsesContinuationFallback(body, sessionID)
-		if !ok {
-			return body, ownerFilter, false, ownerBound
-		}
-		return fallback, base, true, false
-	}
 	return body, ownerFilter, false, ownerBound
+}
+
+type openAIResponsesContinuationFallback struct {
+	body       []byte
+	ownerBound bool
+	activated  bool
+}
+
+func hasOpenAIResponsesToolOutputs(body []byte) bool {
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() {
+		return false
+	}
+	if !input.IsArray() {
+		return false
+	}
+	hasToolOutput := false
+	input.ForEach(func(_, item gjson.Result) bool {
+		if isOpenAIResponsesToolOutputType(item.Get("type").String()) {
+			hasToolOutput = true
+			return false // stop iteration
+		}
+		return true
+	})
+	return hasToolOutput
+}
+
+func activateOpenAIResponsesContinuationFallback(ctx context.Context, body []byte, sessionID string, alreadyActivated bool, reason string) (openAIResponsesContinuationFallback, bool) {
+	if alreadyActivated {
+		// 已经激活过降级剥离/历史回放，当前 body 已经是自愈后的版本，直接放行，绝不抛 409 死锁
+		return openAIResponsesContinuationFallback{body: body, activated: true}, true
+	}
+	if pendingID := pendingOpenAIResponsesContinuationID(body); pendingID != "" && !waitForOpenAIResponsesContinuation(ctx, body) {
+		return openAIResponsesContinuationFallback{body: body}, false
+	}
+	if canBuildOpenAIResponsesContinuationFallback(body, sessionID) {
+		fallback, ok := buildOpenAIResponsesContinuationFallback(body, sessionID)
+		if ok {
+			return openAIResponsesContinuationFallback{body: fallback, activated: true}, true
+		}
+	}
+	previousID := gjson.GetBytes(body, "previous_response_id").String()
+	if previousID == "" {
+		return openAIResponsesContinuationFallback{body: body, activated: true}, true
+	}
+	log.Printf("OpenAI Responses 续链历史不可验证，拒绝无状态切号 (previous_response_id=%s, session=%s, reason=%s)", previousID, sessionID, reason)
+	return openAIResponsesContinuationFallback{body: body}, false
 }
 
 func buildOpenAIResponsesContinuationFallback(body []byte, sessionID string) ([]byte, bool) {
@@ -330,7 +437,12 @@ func buildOpenAIResponsesContinuationFallback(body []byte, sessionID string) ([]
 	if !ok || len(current) == 0 {
 		return body, false
 	}
+	explicitPreviousID := gjson.GetBytes(body, "previous_response_id").String()
 	previousID := replayableOpenAIResponsesContinuationID(body, sessionID)
+	if explicitPreviousID != "" && previousID == "" {
+		return body, false
+
+	}
 	history, historyOk := openAIResponsesContinuity.materialize(previousID)
 	if !historyOk || len(history) == 0 {
 		ownerFilter, ownerBound := bindOpenAIResponsesContinuationOwner(body, sessionID, nil)
@@ -381,7 +493,14 @@ func canBuildOpenAIResponsesContinuationFallback(body []byte, sessionID string) 
 }
 
 func shouldReplayOpenAIResponsesContinuationBeforeUpstream(body []byte, account *auth.Account, sessionID string) bool {
-	if openAIResponsesContinuityMode == openAIResponsesContinuityModeUpstream || account == nil {
+	if account == nil {
+		return false
+	}
+	previousID := gjson.GetBytes(body, "previous_response_id").String()
+	if !account.IsOpenAIResponsesAPI() && previousID != "" {
+		return true
+	}
+	if openAIResponsesContinuityMode == openAIResponsesContinuityModeUpstream {
 		return false
 	}
 	if account.IsOpenAIResponsesAPI() {
@@ -389,13 +508,12 @@ func shouldReplayOpenAIResponsesContinuationBeforeUpstream(body []byte, account 
 		if isOfficialOpenAIResponsesBaseURL(baseURL) {
 			return false
 		}
-		previousID := gjson.GetBytes(body, "previous_response_id").String()
-		if previousID == "" {
-			previousID = openAIResponsesContinuity.getLatestReplayableResponseID(sessionID)
-		}
-		return openAIResponsesContinuity.isReplayable(previousID)
 	}
-	return false
+	if previousID == "" {
+		previousID = openAIResponsesContinuity.getLatestReplayableResponseID(sessionID)
+	}
+	entry, found := openAIResponsesContinuity.get(previousID)
+	return found && (entry.replayable || entry.pending)
 }
 
 func isOfficialOpenAIResponsesBaseURL(baseURL string) bool {
@@ -405,13 +523,36 @@ func isOfficialOpenAIResponsesBaseURL(baseURL string) bool {
 
 func replayableOpenAIResponsesContinuationID(body []byte, sessionID string) string {
 	previousID := gjson.GetBytes(body, "previous_response_id").String()
-	if previousID != "" && openAIResponsesContinuity.isReplayable(previousID) {
-		return previousID
+	if previousID != "" {
+		if openAIResponsesContinuity.isReplayable(previousID) {
+			return previousID
+		}
+		return ""
 	}
 	return openAIResponsesContinuity.getLatestReplayableResponseID(sessionID)
 }
 
+func pendingOpenAIResponsesContinuationID(body []byte) string {
+	previousID := gjson.GetBytes(body, "previous_response_id").String()
+	if previousID == "" {
+		return ""
+	}
+	entry, found := openAIResponsesContinuity.get(previousID)
+	if !found || !entry.pending || entry.replayable {
+		return ""
+	}
+	return previousID
+}
 
+func waitForOpenAIResponsesContinuation(ctx context.Context, body []byte) bool {
+	previousID := gjson.GetBytes(body, "previous_response_id").String()
+	if previousID == "" {
+		return false
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, openAIResponsesContinuationWait)
+	defer cancel()
+	return openAIResponsesContinuity.waitUntilReplayable(waitCtx, previousID)
+}
 
 var openAIResponsesAutoCompleteToolOutputs = openAIResponsesAutoCompleteToolOutputsFromEnv(os.Getenv)
 
@@ -434,6 +575,9 @@ func normalizeMatchedOpenAIResponsesToolOutputs(items []json.RawMessage) ([]json
 		if isOpenAIResponsesToolOutputType(itemType) {
 			callID := openAIResponsesToolCorrelationID(parsed)
 			if callID != "" {
+				if _, duplicate := providedOutputs[callID]; duplicate {
+					return nil, false
+				}
 				providedOutputs[callID] = struct{}{}
 			}
 		}
@@ -462,10 +606,12 @@ func normalizeMatchedOpenAIResponsesToolOutputs(items []json.RawMessage) ([]json
 		if !isOpenAIResponsesToolOutputType(actualType) {
 			normalized = append(normalized, item)
 			expectedType, isCall := openAIResponsesToolOutputType(actualType)
-			if openAIResponsesAutoCompleteToolOutputs && isCall && openAIResponsesToolCallRequiresOutput(parsed) {
+			if isCall {
 				callID := openAIResponsesToolCorrelationID(parsed)
 				if callID != "" {
-					if _, hasMatchingOutput := providedOutputs[callID]; !hasMatchingOutput {
+					if _, hasMatchingOutput := providedOutputs[callID]; hasMatchingOutput {
+						delete(requiredOutputs, callID)
+					} else if openAIResponsesAutoCompleteToolOutputs && openAIResponsesToolCallRequiresOutput(parsed) {
 						syntheticOutput := buildSyntheticOpenAIResponsesToolOutput(expectedType, callID)
 						normalized = append(normalized, syntheticOutput)
 						seenOutputs[callID] = struct{}{}
@@ -507,6 +653,14 @@ func buildSyntheticOpenAIResponsesToolOutput(expectedType, callID string) json.R
 			"type":    expectedType,
 			"call_id": callID,
 			"output":  "[System: Auto-completed tool output for seamless account switch]",
+		})
+		return msg
+	case "web_search_call_output":
+		msg, _ := json.Marshal(map[string]any{
+			"type":    expectedType,
+			"call_id": callID,
+			"output":  []any{},
+			"status":  "completed",
 		})
 		return msg
 	case "tool_search_call_output":
@@ -570,6 +724,9 @@ func openAIResponsesToolCorrelationID(item gjson.Result) string {
 	if id := item.Get("id").String(); id != "" {
 		return id
 	}
+	if toolCallID := item.Get("tool_call_id").String(); toolCallID != "" {
+		return toolCallID
+	}
 	return ""
 }
 
@@ -587,6 +744,8 @@ func openAIResponsesToolOutputType(callType string) (string, bool) {
 		return "custom_tool_call_output", true
 	case "mcp_tool_call":
 		return "mcp_tool_call_output", true
+	case "web_search_call":
+		return "web_search_call_output", true
 	default:
 		return "", false
 	}
@@ -595,7 +754,8 @@ func openAIResponsesToolOutputType(callType string) (string, bool) {
 func isOpenAIResponsesToolOutputType(itemType string) bool {
 	switch itemType {
 	case "function_call_output", "tool_call_output", "local_shell_call_output",
-		"tool_search_call_output", "custom_tool_call_output", "mcp_tool_call_output":
+		"tool_search_call_output", "custom_tool_call_output", "mcp_tool_call_output",
+		"web_search_call_output":
 		return true
 	default:
 		return false
@@ -672,7 +832,8 @@ func AppendPendingOpenAIResponsesOutput(responseID string, requestBody []byte, i
 }
 
 func trackOpenAIResponsesContinuationSSEEvent(event gjson.Result, requestBody []byte, sessionID string, account *auth.Account, responseID string) string {
-	switch event.Get("type").String() {
+	eventType := event.Get("type").String()
+	switch eventType {
 	case "response.created":
 		responseID = event.Get("response.id").String()
 		if responseID != "" {
@@ -685,8 +846,43 @@ func trackOpenAIResponsesContinuationSSEEvent(event gjson.Result, requestBody []
 		if responseID != "" {
 			AppendPendingOpenAIResponsesOutput(responseID, requestBody, event.Get("item"))
 		}
+	case "response.completed":
+		if responseID == "" {
+			responseID = event.Get("response.id").String()
+		}
+		if responseID != "" {
+			cacheOpenAIResponsesContinuation(requestBody, []byte(event.Raw), account, sessionID)
+		}
+	case "response.failed", "response.cancelled":
+		if responseID == "" {
+			responseID = event.Get("response_id").String()
+		}
+		if responseID != "" {
+			finalState := continuationStateFailed
+			if eventType == "response.cancelled" {
+				finalState = continuationStateCancelled
+			}
+			input, _ := openAIResponsesInputItems(requestBody)
+			openAIResponsesContinuity.finalizeContinuation(responseID, finalState, input, nil)
+		}
 	}
 	return responseID
+}
+
+func FinalizeInterruptedOpenAIResponsesContinuation(responseID string, requestBody []byte) {
+	if responseID == "" {
+		return
+	}
+	input, _ := openAIResponsesInputItems(requestBody)
+	openAIResponsesContinuity.finalizeContinuation(responseID, continuationStateInterruptedReplayable, input, nil)
+}
+
+func CancelPendingOpenAIResponsesContinuation(responseID string, requestBody []byte) {
+	if responseID == "" {
+		return
+	}
+	input, _ := openAIResponsesInputItems(requestBody)
+	openAIResponsesContinuity.finalizeContinuation(responseID, continuationStateCancelled, input, nil)
 }
 
 func cacheOpenAIResponsesContinuation(requestBody, responseData []byte, account *auth.Account, sessionID string) {
@@ -706,19 +902,27 @@ func cacheOpenAIResponsesContinuation(requestBody, responseData []byte, account 
 	baseURL, _ := account.OpenAIResponsesCredentials()
 	parentID := gjson.GetBytes(requestBody, "previous_response_id").String()
 	if parentID == "" && sessionID != "" {
-		if pending, found := openAIResponsesContinuity.get(responseID); found {
+		if pending, found := openAIResponsesContinuity.get(responseID); found && pending.parentID != "" {
 			parentID = pending.parentID
-		} else if latest := openAIResponsesContinuity.getLatestReplayableResponseID(sessionID); latest != responseID {
-			parentID = latest
+		} else {
+			latest := openAIResponsesContinuity.getLatestReplayableResponseID(sessionID)
+			if latest != responseID {
+				parentID = latest
+			}
 		}
 	}
-	openAIResponsesContinuity.store(responseID, parentID, sessionID, openAIResponsesContinuation{
-		accountID: account.ID(),
-		baseURL:   normalizeContinuationBaseURL(baseURL),
-		sessionID: sessionID,
-		input:     input,
-		output:    output,
-	})
+	openAIResponsesContinuity.finalizeContinuationWithParent(
+		responseID, parentID, sessionID, account.ID(),
+		normalizeContinuationBaseURL(baseURL), continuationStateCompleted, input, output,
+	)
+}
+
+func FailPendingOpenAIResponsesContinuation(responseID string, requestBody []byte) {
+	if responseID == "" {
+		return
+	}
+	input, _ := openAIResponsesInputItems(requestBody)
+	openAIResponsesContinuity.finalizeContinuation(responseID, continuationStateFailed, input, nil)
 }
 
 func parentOpenAIResponsesHistory(requestBody []byte) ([]json.RawMessage, bool) {
@@ -835,15 +1039,11 @@ func completeReplayableOpenAIResponsesItem(item gjson.Result) (json.RawMessage, 
 
 func validOpenAIResponsesFunctionCallItem(item gjson.Result) bool {
 	callID := item.Get("call_id")
-	if callID.Type != gjson.String || strings.TrimSpace(callID.String()) == "" {
-		return false
-	}
 	name := item.Get("name")
-	if name.Type != gjson.String || strings.TrimSpace(name.String()) == "" {
-		return false
-	}
 	arguments := item.Get("arguments")
-	return arguments.Type == gjson.String && json.Valid([]byte(arguments.String()))
+	return callID.Type == gjson.String && strings.TrimSpace(callID.String()) != "" &&
+		name.Type == gjson.String && strings.TrimSpace(name.String()) != "" &&
+		arguments.Type == gjson.String && json.Valid([]byte(arguments.String()))
 }
 
 func openAIResponsesItemStableKey(item json.RawMessage) string {
@@ -907,28 +1107,34 @@ func (registry *openAIResponsesContinuityRegistry) registerPending(responseID, p
 		return
 	}
 	if parentID == "" && sessionID != "" {
-		parentID = registry.getLatestReplayableResponseID(sessionID)
+		registry.getLatestReplayableResponseID(sessionID)
 	}
 	registry.mu.Lock()
+	if parentID == "" && sessionID != "" {
+		parentID = registry.sessionLatestReplayable[sessionID]
+	}
 	now := registry.now()
 	existing, found := registry.entries[responseID]
 	if !found {
+		operationSeq := int64(0)
+		if sessionID != "" {
+			operationSeq = registry.nextOperationSeqLocked(sessionID, now)
+		}
 		entry := openAIResponsesContinuation{
-			accountID:  accountID,
-			baseURL:    baseURL,
-			parentID:   parentID,
-			sessionID:  sessionID,
-			createdAt:  now,
-			accessedAt: now,
-			pending:    true,
+			accountID:    accountID,
+			baseURL:      baseURL,
+			parentID:     parentID,
+			sessionID:    sessionID,
+			createdAt:    now,
+			accessedAt:   now,
+			pending:      true,
+			state:        continuationStatePending,
+			operationSeq: operationSeq,
 		}
 		registry.entries[responseID] = entry
 	} else if existing.sessionID == "" && sessionID != "" {
 		existing.sessionID = sessionID
 		registry.entries[responseID] = existing
-	}
-	if sessionID != "" {
-		registry.sessionLatest[sessionID] = responseID
 	}
 	storedEntry, retained := registry.entries[responseID]
 	persistence := registry.persistence
@@ -939,10 +1145,58 @@ func (registry *openAIResponsesContinuityRegistry) registerPending(responseID, p
 	}
 }
 
+func (registry *openAIResponsesContinuityRegistry) nextOperationSeqLocked(sessionID string, now time.Time) int64 {
+	next := registry.sessionSequence[sessionID] + 1
+	if candidate := now.UnixNano(); candidate > next {
+		next = candidate
+	}
+	registry.sessionSequence[sessionID] = next
+	return next
+}
+
+func (registry *openAIResponsesContinuityRegistry) waitUntilReplayable(ctx context.Context, responseID string) bool {
+	if responseID == "" {
+		return false
+	}
+	registry.ensureLoaded(responseID)
+	for {
+		registry.mu.Lock()
+		entry, found := registry.entries[responseID]
+		if found && entry.replayable {
+			registry.mu.Unlock()
+			return true
+		}
+		if !found || !entry.pending {
+			registry.mu.Unlock()
+			return false
+		}
+		ready := registry.waiters[responseID]
+		if ready == nil {
+			ready = make(chan struct{})
+			registry.waiters[responseID] = ready
+		}
+		registry.mu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ready:
+		}
+	}
+}
+
+func (registry *openAIResponsesContinuityRegistry) signalWaitersLocked(responseID string) {
+	ready := registry.waiters[responseID]
+	if ready == nil {
+		return
+	}
+	close(ready)
+	delete(registry.waiters, responseID)
+}
+
 func (registry *openAIResponsesContinuityRegistry) appendPendingOutput(responseID string, input []json.RawMessage, output json.RawMessage) bool {
 	registry.mu.Lock()
 	now := registry.now()
-	previousEvictions := registry.evictions
 	registry.purgeExpiredLocked(now)
 	entry, ok := registry.entries[responseID]
 	if !ok || !entry.pending {
@@ -953,35 +1207,149 @@ func (registry *openAIResponsesContinuityRegistry) appendPendingOutput(responseI
 		registry.mu.Unlock()
 		return true
 	}
-	entry.input = cloneRawMessages(input)
-	entry.output = appendClonedRawMessages(entry.output, []json.RawMessage{output})
-	if !registry.canStoreReplayableLocked(entry.parentID, entry.input, entry.output) {
-		registry.mu.Unlock()
-		return false
+	if len(input) > 0 {
+		entry.input = cloneRawMessages(input)
 	}
-	registry.totalBytes -= entry.size
-	entry.replayable = true
+	previousSize := entry.size
+	entry.output = appendClonedRawMessages(entry.output, []json.RawMessage{output})
 	entry.accessedAt = now
 	entry.size = rawMessagesSize(entry.input) + rawMessagesSize(entry.output)
+	entry.state = continuationStatePending
+	entry.replayable = false
+	registry.entries[responseID] = entry
+	registry.totalBytes += entry.size - previousSize
+	persistence := registry.persistence
+	registry.mu.Unlock()
+	if persistence != nil {
+		registry.persist(persistence, responseID, entry, nil, false)
+	}
+	return true
+}
+
+func (registry *openAIResponsesContinuityRegistry) finalizeContinuation(responseID string, finalState string, input []json.RawMessage, output []json.RawMessage) {
+	registry.finalizeContinuationWithParent(responseID, "", "", 0, "", finalState, input, output)
+}
+
+func (registry *openAIResponsesContinuityRegistry) finalizeContinuationWithParent(responseID, parentID, sessionID string, accountID int64, baseURL string, finalState string, input []json.RawMessage, output []json.RawMessage) {
+	if responseID == "" {
+		return
+	}
+	if finalState == "" {
+		finalState = continuationStateCompleted
+	}
+	registry.mu.Lock()
+	now := registry.now()
+	previousEvictions := registry.evictions
+	registry.purgeExpiredLocked(now)
+
+	existing, found := registry.entries[responseID]
+	if found && !existing.pending && existing.state != "" {
+		registry.mu.Unlock()
+		return
+	}
+	createdAt := now
+	operationSeq := int64(0)
+
+	if found {
+		if !existing.createdAt.IsZero() {
+			createdAt = existing.createdAt
+		}
+		if parentID == "" {
+			parentID = existing.parentID
+		}
+		if sessionID == "" {
+			sessionID = existing.sessionID
+		}
+		if accountID == 0 {
+			accountID = existing.accountID
+		}
+		if baseURL == "" {
+			baseURL = existing.baseURL
+		}
+		operationSeq = existing.operationSeq
+	}
+	if parentID == "" && sessionID != "" {
+		if latest := registry.sessionLatestReplayable[sessionID]; latest != responseID {
+			parentID = latest
+		}
+	}
+
+	mergedInput := cloneRawMessages(input)
+	if len(mergedInput) == 0 && found {
+		mergedInput = existing.input
+	}
+	mergedOutput := cloneRawMessages(output)
+	if len(mergedOutput) == 0 && found {
+		mergedOutput = existing.output
+	} else if len(mergedOutput) > 0 && found && len(existing.output) > 0 {
+		mergedOutput = cloneRawMessages(existing.output)
+		for _, item := range output {
+			if !containsOpenAIResponsesItem(mergedOutput, item) {
+				mergedOutput = append(mergedOutput, cloneRawMessages([]json.RawMessage{item})...)
+			}
+		}
+	}
+
+	entry := openAIResponsesContinuation{
+		accountID:    accountID,
+		baseURL:      baseURL,
+		parentID:     parentID,
+		sessionID:    sessionID,
+		input:        mergedInput,
+		output:       mergedOutput,
+		createdAt:    createdAt,
+		accessedAt:   now,
+		pending:      false,
+		state:        finalState,
+		operationSeq: operationSeq,
+	}
+	if entry.operationSeq == 0 && sessionID != "" {
+		entry.operationSeq = registry.nextOperationSeqLocked(sessionID, createdAt)
+	}
+
+	isReplayableState := isReplayableContinuationState(finalState)
+	if isReplayableState && registry.canStoreReplayableLocked(parentID, entry.input, entry.output) {
+		entry.replayable = true
+		entry.size = rawMessagesSize(entry.input) + rawMessagesSize(entry.output)
+		if parentID != "" {
+			registry.touchAncestorsLocked(parentID, now)
+		}
+	} else {
+		entry.replayable = false
+		if !isReplayableState {
+			entry.input = nil
+			entry.output = nil
+			entry.size = 0
+		} else {
+			entry.size = rawMessagesSize(entry.input) + rawMessagesSize(entry.output)
+		}
+	}
+
+	if found {
+		registry.totalBytes -= existing.size
+	}
 	registry.entries[responseID] = entry
 	registry.totalBytes += entry.size
-	registry.touchAncestorsLocked(entry.parentID, now)
-	registry.enforceLimitsLocked()
-	storedEntry, retained := registry.entries[responseID]
-	if retained && storedEntry.sessionID != "" && storedEntry.replayable {
-		registry.sessionLatestReplayable[storedEntry.sessionID] = responseID
+
+	if sessionID != "" {
+		registry.recomputeSessionHeadsLocked(sessionID)
 	}
+
+	registry.signalWaitersLocked(responseID)
+	registry.enforceLimitsLocked()
+
 	persistence := registry.persistence
-	ancestorIDs := registry.ancestorIDsLocked(entry.parentID)
-	cleanup := registry.evictions > previousEvictions || now.Sub(registry.lastCleanup) >= openAIResponsesContinuityCleanupInterval
-	if cleanup {
+	ancestorIDs := registry.ancestorIDsLocked(parentID)
+	storedEntry, retained := registry.entries[responseID]
+	cleanupPersistence := registry.evictions > previousEvictions || now.Sub(registry.lastCleanup) >= openAIResponsesContinuityCleanupInterval
+	if cleanupPersistence {
 		registry.lastCleanup = now
 	}
 	registry.mu.Unlock()
+
 	if persistence != nil && retained {
-		registry.persist(persistence, responseID, storedEntry, ancestorIDs, cleanup)
+		registry.persist(persistence, responseID, storedEntry, ancestorIDs, cleanupPersistence)
 	}
-	return retained
 }
 
 func (registry *openAIResponsesContinuityRegistry) store(responseID, parentID, sessionID string, entry openAIResponsesContinuation) {
@@ -990,6 +1358,8 @@ func (registry *openAIResponsesContinuityRegistry) store(responseID, parentID, s
 	}
 	if parentID != "" {
 		registry.ensureLoaded(parentID)
+	} else if sessionID != "" {
+		registry.getLatestReplayableResponseID(sessionID)
 	}
 	entry.input = cloneRawMessages(entry.input)
 	entry.output = cloneRawMessages(entry.output)
@@ -1009,11 +1379,20 @@ func (registry *openAIResponsesContinuityRegistry) store(responseID, parentID, s
 	if parentID == "" && found && existing.parentID != "" {
 		parentID = existing.parentID
 	}
+	if parentID == "" && sessionID != "" {
+		if latest := registry.sessionLatestReplayable[sessionID]; latest != responseID {
+			parentID = latest
+		}
+	}
 
 	entry.createdAt = createdAt
 	entry.accessedAt = now
 	entry.sessionID = sessionID
 	entry.pending = false
+	entry.state = continuationStateCompleted
+	if entry.operationSeq == 0 && sessionID != "" {
+		entry.operationSeq = registry.nextOperationSeqLocked(sessionID, createdAt)
+	}
 	entry.parentID = ""
 	entry.replayable = registry.canStoreReplayableLocked(parentID, entry.input, entry.output)
 	if entry.replayable {
@@ -1031,11 +1410,9 @@ func (registry *openAIResponsesContinuityRegistry) store(responseID, parentID, s
 	registry.entries[responseID] = entry
 	registry.totalBytes += entry.size
 	if sessionID != "" {
-		registry.sessionLatest[sessionID] = responseID
-		if entry.replayable {
-			registry.sessionLatestReplayable[sessionID] = responseID
-		}
+		registry.recomputeSessionHeadsLocked(sessionID)
 	}
+	registry.signalWaitersLocked(responseID)
 	registry.enforceLimitsLocked()
 	persistence := registry.persistence
 	ancestorIDs := registry.ancestorIDsLocked(parentID)
@@ -1073,23 +1450,65 @@ func (registry *openAIResponsesContinuityRegistry) getLatestResponse(sessionID s
 		return "", openAIResponsesContinuation{}, false
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), openAIResponsesContinuityDBTimeout)
-	defer cancel()
-
-	row, ok, err := persistence.GetLatestResponseBySessionID(ctx, sessionID)
-	if err != nil || !ok || now.Sub(row.AccessedAt) > registry.limits.ttl {
-		return "", openAIResponsesContinuation{}, false
+	responseID := registry.restoreSessionHead(sessionID, false)
+	if responseID == "" {
+		ctx, cancel := context.WithTimeout(context.Background(), openAIResponsesContinuityDBTimeout)
+		defer cancel()
+		row, ok, err := persistence.GetLatestReplayableResponseBySessionID(ctx, sessionID)
+		if err != nil || !ok || now.Sub(row.AccessedAt) > registry.limits.ttl {
+			return "", openAIResponsesContinuation{}, false
+		}
+		responseID = row.ResponseID
+		registry.ensureLoaded(responseID)
+		_ = persistence.UpsertResponsesContinuationHead(ctx, sessionID, responseID, responseID, row.OperationSeq)
 	}
-
-	registry.ensureLoaded(row.ResponseID)
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
-	entry, ok = registry.entries[row.ResponseID]
+	entry, ok := registry.entries[responseID]
 	if ok {
-		registry.sessionLatest[sessionID] = row.ResponseID
-		return row.ResponseID, entry, true
+		registry.sessionLatest[sessionID] = responseID
+		return responseID, entry, true
 	}
 	return "", openAIResponsesContinuation{}, false
+}
+
+// recomputeSessionHeadsLocked keeps the committed head independent from the
+// latest allocated operation. Pending/failed/cancelled operations never hide a
+// valid completed branch, while a later completed branch deterministically wins.
+func (registry *openAIResponsesContinuityRegistry) recomputeSessionHeadsLocked(sessionID string) {
+	latestID := ""
+	latestSeq := int64(0)
+	intentSeq := registry.sessionSequence[sessionID]
+	for responseID, entry := range registry.entries {
+		if entry.sessionID != sessionID || !entry.replayable {
+			continue
+		}
+		if entry.operationSeq > latestSeq || (entry.operationSeq == latestSeq && responseID > latestID) {
+			latestID = responseID
+			latestSeq = entry.operationSeq
+		}
+	}
+	if latestSeq < intentSeq && registry.hasPendingOperationAfterLocked(sessionID, latestSeq) {
+		return
+	}
+	if latestID == "" {
+		delete(registry.sessionLatest, sessionID)
+		delete(registry.sessionLatestReplayable, sessionID)
+		registry.sessionHeadSequence[sessionID] = 0
+		return
+	}
+	registry.sessionLatest[sessionID] = latestID
+	registry.sessionLatestReplayable[sessionID] = latestID
+	registry.sessionHeadSequence[sessionID] = latestSeq
+}
+
+func (registry *openAIResponsesContinuityRegistry) hasPendingOperationAfterLocked(sessionID string, operationSeq int64) bool {
+	for _, entry := range registry.entries {
+		if entry.sessionID == sessionID && entry.pending && entry.operationSeq > operationSeq {
+			return true
+		}
+	}
+	return false
 }
 
 func (registry *openAIResponsesContinuityRegistry) getLatestReplayableResponseID(sessionID string) string {
@@ -1108,6 +1527,9 @@ func (registry *openAIResponsesContinuityRegistry) getLatestReplayableResponseID
 		return ""
 	}
 
+	if responseID = registry.restoreSessionHead(sessionID, true); responseID != "" {
+		return responseID
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), openAIResponsesContinuityDBTimeout)
 	defer cancel()
 	row, ok, err := persistence.GetLatestReplayableResponseBySessionID(ctx, sessionID)
@@ -1119,9 +1541,55 @@ func (registry *openAIResponsesContinuityRegistry) getLatestReplayableResponseID
 		return ""
 	}
 	registry.mu.Lock()
+	registry.sessionLatest[sessionID] = row.ResponseID
 	registry.sessionLatestReplayable[sessionID] = row.ResponseID
+	registry.sessionHeadSequence[sessionID] = row.OperationSeq
+	if row.OperationSeq > registry.sessionSequence[sessionID] {
+		registry.sessionSequence[sessionID] = row.OperationSeq
+	}
 	registry.mu.Unlock()
+	_ = persistence.UpsertResponsesContinuationHead(ctx, sessionID, row.ResponseID, row.ResponseID, row.OperationSeq)
 	return row.ResponseID
+}
+
+func (registry *openAIResponsesContinuityRegistry) restoreSessionHead(sessionID string, replayableOnly bool) string {
+	registry.mu.Lock()
+	persistence := registry.persistence
+	registry.mu.Unlock()
+	if persistence == nil || sessionID == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), openAIResponsesContinuityDBTimeout)
+	defer cancel()
+	latestID, replayableID, operationSeq, ok, err := persistence.GetResponsesContinuationHead(ctx, sessionID)
+	if err != nil {
+		registry.recordPersistenceFailure()
+		return ""
+	}
+	if !ok {
+		return ""
+	}
+	responseID := latestID
+	if replayableOnly {
+		responseID = replayableID
+	}
+	if responseID == "" || !registry.ensureLoaded(responseID) {
+		return ""
+	}
+	if replayableOnly && !registry.isReplayable(responseID) {
+		return ""
+	}
+	registry.mu.Lock()
+	if operationSeq >= registry.sessionHeadSequence[sessionID] {
+		registry.sessionLatest[sessionID] = latestID
+		registry.sessionLatestReplayable[sessionID] = replayableID
+		registry.sessionHeadSequence[sessionID] = operationSeq
+	}
+	if operationSeq > registry.sessionSequence[sessionID] {
+		registry.sessionSequence[sessionID] = operationSeq
+	}
+	registry.mu.Unlock()
+	return responseID
 }
 
 func (registry *openAIResponsesContinuityRegistry) ancestorIDsLocked(responseID string) []string {
@@ -1154,12 +1622,26 @@ func (registry *openAIResponsesContinuityRegistry) persist(db responsesContinuit
 		ResponseID: responseID, ParentID: entry.parentID, SessionID: entry.sessionID,
 		AccountID: entry.accountID, BaseURL: entry.baseURL,
 		InputJSON: inputJSON, OutputJSON: outputJSON,
-		Replayable: entry.replayable, CreatedAt: entry.createdAt,
+		Replayable: entry.replayable, State: entry.state, OperationSeq: entry.operationSeq, CreatedAt: entry.createdAt,
 		AccessedAt: entry.accessedAt, SizeBytes: entry.size,
 	}
-	if err := db.UpsertResponsesContinuation(ctx, &row); err != nil {
+	latestRespID, latestReplayableID := "", ""
+	headSeq := int64(0)
+	if entry.sessionID != "" {
+		latestRespID, latestReplayableID, headSeq = registry.getSessionHeads(entry.sessionID)
+	}
+	persistErr := error(nil)
+	if transactional, ok := db.(transactionalResponsesContinuityPersistence); ok {
+		persistErr = transactional.CommitResponsesContinuation(ctx, &row, latestRespID, latestReplayableID, headSeq)
+	} else {
+		persistErr = db.UpsertResponsesContinuation(ctx, &row)
+		if persistErr == nil && entry.sessionID != "" && latestReplayableID != "" {
+			persistErr = db.UpsertResponsesContinuationHead(ctx, entry.sessionID, latestRespID, latestReplayableID, headSeq)
+		}
+	}
+	if persistErr != nil {
 		registry.recordPersistenceFailure()
-		log.Printf("Responses 续链持久化失败，已降级为内存缓存: %v", err)
+		log.Printf("Responses 续链持久化失败，已降级为内存缓存: %v", persistErr)
 		return
 	}
 	if err := db.TouchResponsesContinuations(ctx, ancestorIDs, entry.accessedAt); err != nil {
@@ -1169,6 +1651,12 @@ func (registry *openAIResponsesContinuityRegistry) persist(db responsesContinuit
 	if cleanup {
 		registry.schedulePersistenceCleanup(db, entry.accessedAt)
 	}
+}
+
+func (registry *openAIResponsesContinuityRegistry) getSessionHeads(sessionID string) (latestResponseID, latestReplayableID string, operationSeq int64) {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	return registry.sessionLatest[sessionID], registry.sessionLatestReplayable[sessionID], registry.sessionHeadSequence[sessionID]
 }
 
 func (registry *openAIResponsesContinuityRegistry) schedulePersistenceCleanup(db responsesContinuityPersistence, accessedAt time.Time) {
@@ -1249,8 +1737,13 @@ func (registry *openAIResponsesContinuityRegistry) chainUsageLocked(responseID s
 		}
 		seen[responseID] = struct{}{}
 		entry, ok := registry.entries[responseID]
-		if !ok || !entry.replayable {
+		if !ok {
 			return 0, 0, false
+		}
+		if !entry.replayable {
+			if entry.pending || (entry.state != continuationStateCompleted && entry.state != continuationStateInterruptedReplayable) || !registry.canStoreReplayableLocked(entry.parentID, entry.input, entry.output) {
+				return 0, 0, false
+			}
 		}
 		items += len(entry.input) + len(entry.output)
 		bytes += entry.size
@@ -1279,8 +1772,13 @@ func (registry *openAIResponsesContinuityRegistry) materialize(responseID string
 		}
 		seen[currentID] = struct{}{}
 		entry, ok := registry.entries[currentID]
-		if !ok || !entry.replayable {
+		if !ok {
 			return nil, false
+		}
+		if !entry.replayable {
+			if entry.pending || (entry.state != continuationStateCompleted && entry.state != continuationStateInterruptedReplayable) || !registry.canStoreReplayableLocked(entry.parentID, entry.input, entry.output) {
+				return nil, false
+			}
 		}
 		path = append(path, entry)
 		totalItems += len(entry.input) + len(entry.output)
@@ -1308,11 +1806,11 @@ func (registry *openAIResponsesContinuityRegistry) isReplayable(responseID strin
 	defer registry.mu.Unlock()
 	now := registry.now()
 	registry.purgeExpiredLocked(now)
-	_, _, ok := registry.chainUsageLocked(responseID)
-	if ok {
+	_, _, chainOk := registry.chainUsageLocked(responseID)
+	if chainOk {
 		registry.touchAncestorsLocked(responseID, now)
 	}
-	return ok
+	return chainOk
 }
 
 func (registry *openAIResponsesContinuityRegistry) touchAncestorsLocked(responseID string, now time.Time) {
@@ -1402,6 +1900,7 @@ func (registry *openAIResponsesContinuityRegistry) removeSubtreeLocked(responseI
 		if entry.sessionID != "" && registry.sessionLatestReplayable[entry.sessionID] == entryID {
 			delete(registry.sessionLatestReplayable, entry.sessionID)
 		}
+		registry.signalWaitersLocked(entryID)
 		delete(registry.entries, entryID)
 		if countEviction {
 			registry.evictions++
@@ -1430,9 +1929,15 @@ func (registry *openAIResponsesContinuityRegistry) recordPersistenceFailure() {
 
 func (registry *openAIResponsesContinuityRegistry) reset() {
 	registry.mu.Lock()
+	for responseID := range registry.waiters {
+		registry.signalWaitersLocked(responseID)
+	}
 	registry.entries = make(map[string]openAIResponsesContinuation)
 	registry.sessionLatest = make(map[string]string)
 	registry.sessionLatestReplayable = make(map[string]string)
+	registry.sessionSequence = make(map[string]int64)
+	registry.sessionHeadSequence = make(map[string]int64)
+	registry.waiters = make(map[string]chan struct{})
 	registry.totalBytes = 0
 	registry.evictions = 0
 	registry.persistence = nil

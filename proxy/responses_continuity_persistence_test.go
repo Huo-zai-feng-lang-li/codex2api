@@ -52,6 +52,18 @@ func (blockingResponsesContinuityPersistence) GetLatestReplayableResponseBySessi
 	return database.ResponsesContinuationRow{}, false, nil
 }
 
+func (blockingResponsesContinuityPersistence) UpsertResponsesContinuationHead(context.Context, string, string, string, int64) error {
+	return nil
+}
+
+func (blockingResponsesContinuityPersistence) CommitResponsesContinuation(ctx context.Context, row *database.ResponsesContinuationRow, _, _ string, _ int64) error {
+	return blockingResponsesContinuityPersistence{}.UpsertResponsesContinuation(ctx, row)
+}
+
+func (blockingResponsesContinuityPersistence) GetResponsesContinuationHead(context.Context, string) (string, string, int64, bool, error) {
+	return "", "", 0, false, nil
+}
+
 func (blockingResponsesContinuityPersistence) TouchResponsesContinuations(context.Context, []string, time.Time) error {
 	return nil
 }
@@ -78,6 +90,18 @@ func (*controlledCleanupResponsesContinuityPersistence) GetLatestResponseBySessi
 
 func (*controlledCleanupResponsesContinuityPersistence) GetLatestReplayableResponseBySessionID(context.Context, string) (database.ResponsesContinuationRow, bool, error) {
 	return database.ResponsesContinuationRow{}, false, nil
+}
+
+func (*controlledCleanupResponsesContinuityPersistence) UpsertResponsesContinuationHead(context.Context, string, string, string, int64) error {
+	return nil
+}
+
+func (persistence *controlledCleanupResponsesContinuityPersistence) CommitResponsesContinuation(ctx context.Context, row *database.ResponsesContinuationRow, _, _ string, _ int64) error {
+	return persistence.UpsertResponsesContinuation(ctx, row)
+}
+
+func (*controlledCleanupResponsesContinuityPersistence) GetResponsesContinuationHead(context.Context, string) (string, string, int64, bool, error) {
+	return "", "", 0, false, nil
 }
 
 func (*controlledCleanupResponsesContinuityPersistence) TouchResponsesContinuations(context.Context, []string, time.Time) error {
@@ -184,6 +208,50 @@ func TestOpenAIResponsesContinuityRestoresReplayableHeadBehindPendingRows(t *tes
 	history, ok := second.materialize("resp_replayable")
 	if !ok || len(history) != 2 {
 		t.Fatalf("restored replayable history = %s, ok=%v", mustMarshalRawMessages(history), ok)
+	}
+}
+
+func TestOpenAIResponsesContinuityRestoresCompletedHeadAfterLaterPendingFails(t *testing.T) {
+	ctx := context.Background()
+	db, err := database.New("sqlite", filepath.Join(t.TempDir(), "codex2api.db"))
+	if err != nil {
+		t.Fatalf("database.New: %v", err)
+	}
+	defer db.Close()
+
+	limits := openAIResponsesContinuityLimits{
+		ttl: time.Hour, maxEntries: 20, maxItems: 20,
+		maxItemBytes: 1 << 20, maxBytes: 2 << 20,
+	}
+	first := newOpenAIResponsesContinuityRegistry(limits)
+	if err := first.setPersistence(ctx, db); err != nil {
+		t.Fatalf("setPersistence(first): %v", err)
+	}
+	const sessionID = "session-pending-failed"
+	first.store("resp_parent", "", sessionID, openAIResponsesContinuation{
+		input:  []json.RawMessage{json.RawMessage(`{"type":"message","role":"user","content":"root"}`)},
+		output: []json.RawMessage{json.RawMessage(`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"root"}]}`)},
+	})
+	first.registerPending("resp_completed", "resp_parent", sessionID, 7, "https://relay.example")
+	first.registerPending("resp_failed", "resp_parent", sessionID, 7, "https://relay.example")
+	if !first.appendPendingOutput("resp_completed", []json.RawMessage{json.RawMessage(`{"type":"message","role":"user","content":"completed"}`)}, json.RawMessage(`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"completed"}]}`)) {
+		t.Fatal("append completed pending output")
+	}
+	first.finalizeContinuation("resp_completed", continuationStateCompleted, nil, nil)
+	if got := first.getLatestReplayableResponseID(sessionID); got != "resp_parent" {
+		t.Fatalf("head while later request is pending = %q, want resp_parent", got)
+	}
+	first.finalizeContinuation("resp_failed", continuationStateFailed, nil, nil)
+	if got := first.getLatestReplayableResponseID(sessionID); got != "resp_completed" {
+		t.Fatalf("head after later request failed = %q, want resp_completed", got)
+	}
+
+	second := newOpenAIResponsesContinuityRegistry(limits)
+	if err := second.setPersistence(ctx, db); err != nil {
+		t.Fatalf("setPersistence(second): %v", err)
+	}
+	if got := second.getLatestReplayableResponseID(sessionID); got != "resp_completed" {
+		t.Fatalf("restored head after later request failed = %q, want resp_completed", got)
 	}
 }
 
