@@ -48,8 +48,8 @@ test('refreshes request logs only while the request log tab is active and active
   assert.match(logsPanelSource, /REQUEST_LOGS_ACTIVE_REFRESH_INTERVAL_MS\s*=\s*3_000/)
   assert.match(logsPanelSource, /useVisiblePolling\(\s*refreshLogsSilently,\s*REQUEST_LOGS_ACTIVE_REFRESH_INTERVAL_MS/s)
   assert.match(logsPanelSource, /enabled:\s*autoRefreshWhen/)
-  assert.match(dashboardSource, /<UsageLogsPanel[\s\S]*autoRefreshWhen=\{true\}/)
-  assert.doesNotMatch(dashboardSource, /<UsageLogsPanel[\s\S]*autoRefreshWhen=\{activeRequests\.length > 0\}/)
+  assert.match(dashboardSource, /<UsageLogsPanel[\s\S]*autoRefreshWhen=\{activeRequests\.length > 0\}/)
+  assert.doesNotMatch(dashboardSource, /<UsageLogsPanel[\s\S]*autoRefreshWhen=\{true\}/)
 })
 
 test('keeps request tab and range controls aligned with the request log title on the left', () => {

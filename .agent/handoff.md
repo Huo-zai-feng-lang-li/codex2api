@@ -1,8 +1,8 @@
-# 最新接续状态 (2026-08-02 00:28)
+# 最新接续状态 (2026-08-02 03:36)
 
 ## 核心进展
-- Bug 修复型：Responses 续链、切号和持久化容量治理已完成到源码与运行态。当前服务 PID `27124`，运行路径 `C:\Users\Administrator\Desktop\codex2api\codex2api.exe`，运行 EXE SHA256 为 `E17301BB23C6E301F4122C28B724F39278A7A8C5368452880536F68158CFD9F8`。
-- `/health` 已复验：`status=ok`、`available=27/45`、`responses_memory.inflight_requests=0`、`continuity_persistent=true`、`continuity_persistence_failures=0`。
+- 重新编译与服务部署已完成。前端客户端包增量编译 (`vite build`) 完成并更新嵌入，后端 Go 单元测试 (`go test ./...`) 100% 通过。当前服务 PID `2376`，运行路径 `C:\Users\Administrator\Desktop\codex2api\codex2api.exe`，运行 EXE SHA256 为 `7FD3CE524344BD4B4E5DD62089BB05BB628EFCDDCA73DE56A085903411729BBC`。
+- `/health` 已复验：`status=ok`、`available=25/45`、`responses_memory.inflight_requests=0`、`continuity_persistent=true`、`continuity_persistence_failures=0`。
 - 续链持久化垃圾已清理并压缩：不可回放终态 payload 已归零，悬空 `responses_continuity_heads` 已归零，SQLite 主库从约 85 MB 压缩到约 16 MB。
 
 ## 核心动机与背景 (Motivation & Background)

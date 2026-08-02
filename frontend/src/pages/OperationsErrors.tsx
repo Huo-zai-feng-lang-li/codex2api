@@ -367,12 +367,9 @@ export function OperationsErrorsPanel({ autoRefresh = true, showChrome = false, 
 
         <Card>
           <CardContent className="p-6">
-            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-              <div className="flex flex-wrap items-center gap-3">
-                <h3 className="text-base font-semibold text-foreground">{t('opsErrors.tableTitle')}</h3>
-                {headerAddon}
-                {showChrome && <p className="basis-full text-sm text-muted-foreground">{t('opsErrors.tableDesc')}</p>}
-              </div>
+            <div className="mb-4 flex flex-wrap items-center gap-3">
+              <h3 className="whitespace-nowrap text-base font-semibold leading-8 text-foreground">{t('opsErrors.tableTitle')}</h3>
+              {headerAddon}
               <div className="inline-flex rounded-lg border border-border bg-muted/50 p-0.5">
                 {ERROR_TIME_RANGES.map((key) => (
                   <button
@@ -389,6 +386,7 @@ export function OperationsErrorsPanel({ autoRefresh = true, showChrome = false, 
                   </button>
                 ))}
               </div>
+              {showChrome && <p className="basis-full text-sm text-muted-foreground">{t('opsErrors.tableDesc')}</p>}
             </div>
 
             <div className="toolbar-surface mb-4 flex flex-wrap items-center gap-2">

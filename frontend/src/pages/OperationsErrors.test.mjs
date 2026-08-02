@@ -85,6 +85,12 @@ test('exports an embeddable panel with optional visible polling', () => {
   assert.match(source, /showChrome && \([\s\S]*<OpsTabs \/>/)
 })
 
+test('keeps embedded error tab controls aligned with the table title on the left', () => {
+  assert.match(source, /<div className="mb-4 flex flex-wrap items-center gap-3/)
+  assert.match(source, /<h3[\s\S]*>\{t\('opsErrors\.tableTitle'\)\}<\/h3>\s*\{headerAddon\}\s*<div className="inline-flex/)
+  assert.doesNotMatch(source, /<div className="mb-4 flex flex-wrap items-center justify-between gap-3/)
+})
+
 test('drives error table headers and cells from persisted ordered columns', () => {
   assert.match(source, /usePersistedTableColumns\('codex2api:ops-errors:columns'/)
   assert.match(source, /<ColumnSettingsDropdown/)

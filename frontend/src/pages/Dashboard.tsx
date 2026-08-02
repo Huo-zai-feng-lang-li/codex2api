@@ -243,7 +243,7 @@ export default function Dashboard() {
             <ActiveRequestsPanel requests={activeRequests} />
             {activeRequestTab === 'usage_logs' && (
               <UsageLogsPanel
-                autoRefreshWhen={true}
+                autoRefreshWhen={activeRequests.length > 0}
                 headerAddon={requestTabs}
               />
             )}
