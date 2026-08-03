@@ -219,7 +219,7 @@ export default function Dashboard() {
               {activeRequestTab === 'usage_logs' ? (
                 <div key="usage_logs" className="animate-in fade-in duration-200">
                   <UsageLogsPanel
-                    autoRefreshWhen={true}
+                    autoRefreshWhen={activeRequests.length > 0}
                     headerAddon={requestTabs}
                   />
                 </div>

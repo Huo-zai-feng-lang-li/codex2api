@@ -43,13 +43,14 @@ test('keeps operations error details lazy and manual inside dashboard tabs', () 
   assert.doesNotMatch(dashboardSource, /description:\s*t\('dashboard\./)
 })
 
-test('refreshes request logs while the active request log tab is visible', () => {
+test('refreshes request logs every 3 seconds only while active requests exist', () => {
   assert.match(logsPanelSource, /interface UsageLogsPanelProps[\s\S]*autoRefreshWhen\?: boolean/)
   assert.match(logsPanelSource, /REQUEST_LOGS_ACTIVE_REFRESH_INTERVAL_MS\s*=\s*3_000/)
   assert.match(logsPanelSource, /useVisiblePolling\(\s*refreshLogsSilently,\s*REQUEST_LOGS_ACTIVE_REFRESH_INTERVAL_MS/s)
   assert.match(logsPanelSource, /enabled:\s*autoRefreshWhen/)
-  assert.match(logsPanelSource, /immediateOnVisible:\s*true/)
-  assert.match(dashboardSource, /<UsageLogsPanel[\s\S]*autoRefreshWhen=\{true\}/)
+  assert.match(logsPanelSource, /immediateOnVisible:\s*false/)
+  assert.match(logsPanelSource, /const refreshWhenVisible[\s\S]*?loadLogs\(\)[\s\S]*?addEventListener\('visibilitychange',\s*refreshWhenVisible\)/s)
+  assert.match(dashboardSource, /<UsageLogsPanel[\s\S]*autoRefreshWhen=\{activeRequests\.length\s*>\s*0\}/)
 })
 
 test('keeps request tab and range controls aligned with the request log title on the left', () => {

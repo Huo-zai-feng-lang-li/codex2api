@@ -119,13 +119,19 @@ export default function UsageLogsPanel({ autoRefreshWhen = false, headerAddon }:
   }, [fetchLogs])
 
   useEffect(() => {
-    void loadLogs()
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') void loadLogs()
+    }
+
+    refreshWhenVisible()
+    document.addEventListener('visibilitychange', refreshWhenVisible)
+    return () => document.removeEventListener('visibilitychange', refreshWhenVisible)
   }, [loadLogs])
 
   useVisiblePolling(
     refreshLogsSilently,
     REQUEST_LOGS_ACTIVE_REFRESH_INTERVAL_MS,
-    { enabled: autoRefreshWhen, immediateOnVisible: true },
+    { enabled: autoRefreshWhen, immediateOnVisible: false },
   )
 
   useEffect(() => {

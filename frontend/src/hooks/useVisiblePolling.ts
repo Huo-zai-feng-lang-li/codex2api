@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react'
+import { createVisiblePollingController } from './visiblePollingController'
 
 interface VisiblePollingOptions {
   enabled?: boolean
@@ -39,24 +40,18 @@ export function useVisiblePolling(
   useEffect(() => {
     if (!enabled || intervalMs <= 0) return
 
-    const timer = window.setInterval(runIfVisible, intervalMs)
-    const handleVisible = () => {
-      if (document.visibilityState === 'visible' && immediateOnVisible) {
-        runIfVisible()
-      }
-    }
-    const handleFocus = () => {
-      if (immediateOnVisible) {
-        runIfVisible()
-      }
-    }
-
-    document.addEventListener('visibilitychange', handleVisible)
-    window.addEventListener('focus', handleFocus)
+    const controller = createVisiblePollingController({
+      intervalMs,
+      immediateOnVisible,
+      isVisible: isDocumentVisible,
+      run: runIfVisible,
+      setTimer: (callback, delay) => window.setInterval(callback, delay),
+      clearTimer: (timer) => window.clearInterval(timer),
+    })
+    document.addEventListener('visibilitychange', controller.handleVisibilityChange)
     return () => {
-      window.clearInterval(timer)
-      document.removeEventListener('visibilitychange', handleVisible)
-      window.removeEventListener('focus', handleFocus)
+      controller.dispose()
+      document.removeEventListener('visibilitychange', controller.handleVisibilityChange)
     }
   }, [enabled, immediateOnVisible, intervalMs, runIfVisible])
 }

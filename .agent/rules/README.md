@@ -23,7 +23,8 @@ Codex 桌面端走 `GET /responses` (WebSocket)，其他客户端走 `POST /v1/r
 - **硬性闭环门槛**：绝不能单靠 `go test` 单元断言自嗨。**必须由发包机器人实测包 A 和包 B 均返回 `HTTP 200 OK`，且系统控制台 0 报错、无 409 死锁，才算真正改好闭环！**
 
 ### 1.5 优雅部署与在途流量排空铁律
-- **强制规则**：热替换新二进制前，必须核对 `/health` 的 `responses_memory.inflight_requests == 0`；优雅关闭旧 PID 后再原子替换 EXE 并拉起新服务，禁止强杀导致在途连接断裂。
+- **强制规则**：热替换新二进制前，必须先完成新产物构建，再核对 `/health` 的 `responses_memory.inflight_requests == 0`。Windows 本地热替换允许在排空后强制终止当前项目路径对应的精确 PID，禁止按进程名批量强杀；随后必须原子替换 EXE、拉起新服务，并确认健康响应端口归属新 PID，失败时恢复旧二进制。
+- **Windows 本地热替换入口**：确认项目根目录、构建依赖与配置路径无误后，可以在项目根目录执行 `cmd /c build-and-restart.bat`。脚本负责先构建临时产物、排空在途请求、精确停止旧 PID、替换与失败回滚；命令执行结束后仍须核验退出码、新进程、`GET http://127.0.0.1:18080/health`、前端构建产物及 `logs/start.err.log`。
 
 ### 1.6 续链持久化容量治理铁律
 - **强制规则**：`responses_continuity` 仅允许 replayable 节点保存完整 input/output；failed、cancelled 等不可回放节点只能保留路由和状态元数据，禁止大体积垃圾占用续链配额。
