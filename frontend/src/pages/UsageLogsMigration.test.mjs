@@ -37,19 +37,19 @@ test('does not couple request log loading to dashboard polling', () => {
 
 test('keeps operations error details lazy and manual inside dashboard tabs', () => {
   assert.match(dashboardSource, /const OperationsErrorsPanel = lazy\(/)
-  assert.match(dashboardSource, /activeRequestTab === 'error_details'[\s\S]*<OperationsErrorsPanel[\s\S]*autoRefresh=\{false\}[\s\S]*headerAddon=\{requestTabs\}/)
+  assert.match(dashboardSource, /key="error_details"[\s\S]*<OperationsErrorsPanel[\s\S]*autoRefresh=\{false\}[\s\S]*headerAddon=\{requestTabs\}/)
   assert.doesNotMatch(dashboardSource, /getOpsErrors|getOpsErrorSummary/)
   assert.doesNotMatch(dashboardSource, /requestRecordsDesc|errorDetailsDesc/)
   assert.doesNotMatch(dashboardSource, /description:\s*t\('dashboard\./)
 })
 
-test('refreshes request logs only while the request log tab is active and active requests exist', () => {
+test('refreshes request logs while the active request log tab is visible', () => {
   assert.match(logsPanelSource, /interface UsageLogsPanelProps[\s\S]*autoRefreshWhen\?: boolean/)
   assert.match(logsPanelSource, /REQUEST_LOGS_ACTIVE_REFRESH_INTERVAL_MS\s*=\s*3_000/)
   assert.match(logsPanelSource, /useVisiblePolling\(\s*refreshLogsSilently,\s*REQUEST_LOGS_ACTIVE_REFRESH_INTERVAL_MS/s)
   assert.match(logsPanelSource, /enabled:\s*autoRefreshWhen/)
-  assert.match(dashboardSource, /<UsageLogsPanel[\s\S]*autoRefreshWhen=\{activeRequests\.length > 0\}/)
-  assert.doesNotMatch(dashboardSource, /<UsageLogsPanel[\s\S]*autoRefreshWhen=\{true\}/)
+  assert.match(logsPanelSource, /immediateOnVisible:\s*true/)
+  assert.match(dashboardSource, /<UsageLogsPanel[\s\S]*autoRefreshWhen=\{true\}/)
 })
 
 test('keeps request tab and range controls aligned with the request log title on the left', () => {
