@@ -327,7 +327,7 @@ export default function Layout({ children }: PropsWithChildren) {
                   onClick={() => setShowVersionPopover((prev) => !prev)}
                   className="inline-flex items-center gap-1 rounded px-1 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted/80 hover:text-foreground"
                 >
-                  <span>v{__APP_VERSION__}</span>
+                  <span>v{__APP_VERSION__.replace(/^v/i, '')}</span>
                   {hasUpdate && (
                     <span className="relative flex size-2 shrink-0">
                       <span className="absolute inline-flex size-full animate-ping rounded-full bg-destructive/60 opacity-75" />
