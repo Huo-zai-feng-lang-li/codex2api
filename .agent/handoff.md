@@ -1,71 +1,64 @@
-# 最新接续状态 (2026-08-02 03:36)
+# 最新接续状态 (2026-08-03 13:40)
 
 ## 核心进展
-- 重新编译与服务部署已完成。前端客户端包增量编译 (`vite build`) 完成并更新嵌入，后端 Go 单元测试 (`go test ./...`) 100% 通过。当前服务 PID `2376`，运行路径 `C:\Users\Administrator\Desktop\codex2api\codex2api.exe`，运行 EXE SHA256 为 `7FD3CE524344BD4B4E5DD62089BB05BB628EFCDDCA73DE56A085903411729BBC`。
-- `/health` 已复验：`status=ok`、`available=25/45`、`responses_memory.inflight_requests=0`、`continuity_persistent=true`、`continuity_persistence_failures=0`。
-- 续链持久化垃圾已清理并压缩：不可回放终态 payload 已归零，悬空 `responses_continuity_heads` 已归零，SQLite 主库从约 85 MB 压缩到约 16 MB。
+- 已完成本轮防封关键缺陷修复：WSS ALPN/ALPS 自洽、代理失败禁直连、代理拨号取消、账号画像隔离、HTTP/WS UA 与 Version 复用，以及启动脚本默认启用稳定画像/WS UA。
+- 阶段计划已更新：`.agent/plan-账号防封全景端到端测试.md`。相关 uTLS/WS 文件原本已有用户暂存改动，本轮仅做增量修改，未重置或覆盖暂存内容。
+- 当前运行服务 PID `23724`，路径 `C:\Users\Administrator\Desktop\codex2api\codex2api.exe`，SHA256 `2D8EA5086BDBC67164A3862752F4E1BD7724F6D12EF46E77DBDF9DC649F35890`；监听 `127.0.0.1:18080` 与 OAuth 回调端口 `127.0.0.1:1455`。
+- 当前 `/health`：`status=ok`、`available=3`、`continuity_persistent=true`、`continuity_persistence_failures=3`；数据库有 45 个未删除 Responses API 账号，其中 12 个启用、1 个启用但 error，43 个未配置单账号代理、2 个配置代理。
 
 ## 核心动机与背景 (Motivation & Background)
-- 用户关注：账号 `rate_limited/payment_required/401/403/Disabled/错误状态` 时是否能丝滑换号；换号、WS 降级、重启恢复时是否还会静默丢上下文并诱发“当前会话未提供终端或工作区文件访问权限”。
-- 根因分两层：
-  - 调度层：严格会话绑定曾把长期不可调度状态当作普通等待，导致池里有号也可能卡住。
-  - 续链层：跨账号续接不能依赖上游原 `previous_response_id`，必须由本地完整历史物化后再剥离指针；历史不完整时只能显式失败。
-- 持久化层新增问题：旧库里大量不可回放终态节点占用配额，并存在悬空 head，影响重启恢复和清理效率。
+- 用户关心的不是“代码里是否用了 uTLS”，而是真实上游看到的跨层画像是否自洽、稳定并按账号隔离；本轮不评价所有账号共用同一出口 IP。
+- 根因已数字化复现：
+  - TLS 层使用 uTLS v1.8.2 的 `HelloChrome_Auto`，当前映射 Chrome 133；公开回显实测 TLS 1.3、HTTP/2，JA3=`1e0f7585d3e4a977ac6efe7021f88062`，JA4=`t13d1516h2_8daaf6152771_d8a2da3f94cd`。
+  - HTTP/2 仍由 Go `x/net/http2` 发出，实测 SETTINGS 与伪头顺序为 Go 画像（Akamai 顺序 `a,m,p,s`），形成“Chrome TLS + Go H2”的跨层混合指纹。
+  - WSS 原先用 Chrome ClientHello 报价 `h2,http/1.1`，gorilla/websocket 却执行 HTTP/1.1 Upgrade；现已用 WSS 专用 spec 固定 `http/1.1` 并移除 ALPS 新旧码点。
+  - 启动脚本现已设置 `CODEX_WS_SEND_USER_AGENT=true` 与 `STABILIZE_DEVICE_PROFILE=true`；HTTP/WS 共用同一账号画像和版本解析。
+  - uTLS 非空代理配置解析失败现显式报错；HTTP CONNECT/SOCKS/WSS 拨号尊重 context 取消，空代理仍直连。
+- 真实链路取证：
+  - 本地 `POST /v1/responses` 低频真实请求返回 HTTP 200、`completed`。
+  - 本地 WebSocket 入站单轮与两连包均 `response.completed`；两连包三个新增 usage rows 全部记录 `https:` 上游，说明当前 endpoint 已命中 HTTP preference/fallback，真实 WSS 缺陷被 HTTP 降级掩盖，不能据此判定 WSS 已通过。
+  - 最近一天已有 22 条 `wss://api.daseinai.xyz/v1/responses`、状态 598 的记录，与公开 WSS 协议复现方向一致。
 
 ## 关键设计与实现 (Implementation & Decisions)
-- `auth/store.go`
-  - `rate_limited`、`payment_required`、`StatusError`、Disabled、DispatchPaused、Banned、账号删除：不等待绑定账号，解绑后切换号池。
-  - 普通短暂 Cooling、并发占满、短时不可调度：继续等待原绑定账号。
-  - 严格会话无候选账号时不再空等 30 秒，会触发恢复探针并快速返回。
-- `proxy/handler.go`、`proxy/responses_ws.go`、`proxy/retry_exclusions.go`
-  - HTTP 与 WebSocket 对称使用严格亲和和失败账号排除；解绑后不会重新挑中刚失败账号。
-  - owner 不可用、第三方无状态续链、WS 转 HTTP 时，必须先激活完整本地历史回放；失败返回 `continuation_context_unavailable`。
-- `proxy/responses_continuity.go`
-  - 只有完整历史和工具调用状态可验证时才物化历史并删除 `previous_response_id`。
-  - 不可回放终态不再保留大体积 input/output。
-  - 滑动 TTL 默认改为 24 小时，并支持 `CODEX_RESPONSES_CONTINUITY_TTL_HOURS`。
-- `database/responses_continuity.go`
-  - `PruneResponsesContinuations` / `TrimResponsesContinuations` 在事务内清理节点，并定向修复或删除悬空 head。
-  - Trim 先瘦身遗留不可回放 payload，再按容量淘汰，避免无效数据挤占 64 MiB 配额。
-- `.agent/rules/README.md`
-  - 已固化 HTTP/WS 双通道、切号完整历史、持久化容量治理、TTL 配置、显式失败边界，防止后续 agent 改回危险语义。
+- 修复目标必须是一个版本化、跨层一致的协议档案，而不是继续堆独立开关：
+  - WSS：单独固定 ALPN 为 `http/1.1`，确保 gorilla Upgrade 与 TLS 协商一致；HTTP uTLS 仍允许 `h2`。
+  - HTTP/2：先用回归测试锁定当前 SETTINGS/伪头顺序；若目标是完整 Chrome H2 画像，需要可控 SETTINGS、流控和 header order 的实现，不能仅靠 uTLS。
+  - Header/设备画像：HTTP 与 WS 共用同一解析结果，保持 `User-Agent`、`Version`、`Originator`、`X-Stainless-*` 同账号稳定；禁止把下游任意 UA 直接拼成上游画像。
+  - 账号隔离：连接池键与画像缓存必须包含账号/代理/会话维度；代理配置错误不得静默直连。
+  - 续链/换号：任何传输修复都不能改变 `proxy/responses_ws.go` 的完整历史回放、owner 绑定、HTTP preference、失败账号排除与显式失败语义。
+- 已按 TDD 完成 RED/GREEN：WSS ALPN、ALPS、无代理旁路、代理取消、账号画像隔离、HTTP/WS UA/Version 复用均有回归测试。
+- 现有暂存改动涉及 `proxy/executor.go`、`proxy/usage_wham.go`、`proxy/utls_transport.go`、`proxy/wsrelay/manager.go`，以及其他前后端/启动脚本文件；不要重置、覆盖或重新暂存用户已有改动。
+- 旧的 Responses 续链设计仍是强约束：HTTP/WS 双通道对称；owner 不可用或 WS 转 HTTP 前必须物化完整本地历史；历史不完整返回 `continuation_context_unavailable`；默认滑动 TTL 24 小时。
 
 ## 验证证据
-- `go test ./proxy -run 'TestResponses(NoAvailableAccountFailsFastWithoutCancelledContext|RequestTriggersRecoveryProbeWhenNoDispatchableAccount)$|TestPrepareOpenAIResponsesWebSocketContinuationKeepsOwnerThenReplayFallback' -count=1`：PASS。
-- `go test ./database -run 'ResponsesContinuity|LatestReplayableResponse' -count=1`：PASS。
-- `go test ./proxy -run '^TestOpenAIResponsesContinuity|^TestResponsesMemoryLimitsReadEnvironment$' -count=1`：PASS。
-- `go test ./proxy -count=1`：PASS。
-- `go test ./... -count=1`：PASS，全部包通过。
-- `go vet ./...`：PASS。
-- `git diff --check`：PASS，仅有既有 LF/CRLF 提示。
-- 数据备份：`data\codex2api.db.pre-continuity-cleanup-20260802-001210.bak`。
-- 数据清理后复验：
-  - `terminal_non_replayable_rows=54`
-  - `terminal_non_replayable_bytes=0`
-  - `dangling_latest=0`
-  - `dangling_replayable=0`
-  - `heads=3`
-  - `db_file_bytes=16003072`
+- 公开 uTLS 回显：HTTP 200；TLS 1.3；`RESP_PROTO=HTTP/2.0`；上述 JA3/JA4 已记录。
+- 修复后公开 WSS 回显（经 `127.0.0.1:51081`）：HTTP `101`，ALPN=`http/1.1`。
+- `go test ./... -count=1`：全部包 PASS；`go vet ./...`：无输出；`git diff --check`：无空白错误，仅 LF/CRLF 提示。
+- 验证构建 SHA256：`2CECF500C07A374C39718E6A53D7D2C1A872AE48103D141CE98757D1B3236930`；验证文件已删除。
+- 真实 HTTP：200/`completed`；真实本地 WS 两连包两轮均 `response.completed`，但 usage 上游均为 HTTPS，证明是 HTTP 路径/降级，不是 WSS 通过。
+- CodeGraph：338 个文件、8571 个节点、23437 条边；关键调用链为 `ResponsesWebSocket -> forwardResponsesWebSocketTurn -> ExecuteOpenAIResponsesWebSocketRequest/HTTP fallback`。
+- 外网工具状态：`agent-reach` CLI 本机缺失；内置 web 搜索返回 404。已切换为 `127.0.0.1:51081` 代理直取、公开协议回显、本地依赖源码与真实链路交叉取证。
 
 ## 待办事项 (Next Steps)
-- [ ] 可选：用户用真实外部账号做一次 A -> B 两连包验收：首包拿 `response_id`，让账号 A 进入 `rate_limited/payment_required` 或不可用，再用同会话 `previous_response_id` 发续包，确认自动切到账号 B 且工具/终端/工作区上下文不断。
-- [ ] 若真实验收仍出现“当前会话未提供终端或工作区文件访问权限”，优先查上游/客户端权限状态；代理层当前不会生成这句，也不会在历史不完整时静默新会话。
-
-## 前端仪表盘请求明细 Tab (2026-08-02)
-- 仪表盘请求记录与错误明细共用同一个列表卡片内的小 Tab，默认请求记录；错误明细嵌入时不显示系统运维顶部导航、页面副标题和摘要卡。
-- 请求记录只在 Tab 激活、页面可见且存在活跃请求时每 3 秒静默刷新；错误明细仅在切换打开时加载，不启用自动轮询。
-- 关键文件：`frontend/src/pages/Dashboard.tsx`、`frontend/src/components/UsageLogsPanel.tsx`、`frontend/src/pages/OperationsErrors.tsx`。
+- [x] WSS uTLS 固定 HTTP/1.1，移除 h2 ALPS，并覆盖两条 WSS 调用链。
+- [x] 代理配置错误显式失败，代理拨号支持 context 取消；空代理保持直连。
+- [x] HTTP/WS 共用账号画像、UA 与 Version；跨账号缓存按上游账号身份隔离。
+- [x] 全量测试、vet、diff、构建和公开 WSS 探针通过；无测试孤儿进程或临时产物。
+- [ ] 用户用新构建替换当前 18080 旧进程后，执行真实 HTTP/WS 两连包验收。
+- [ ] 若继续追求“完整 Chrome HTTP/2”，需引入可控 SETTINGS/流控/伪头顺序实现；当前仍是 Chrome TLS + Go H2，不作完整 Chrome 声明。
 
 ## 关键上下文
 - 目录: `C:\Users\Administrator\Desktop\codex2api`
 - 主要文件:
   - `C:\Users\Administrator\Desktop\codex2api\.agent\rules\README.md`
-  - `C:\Users\Administrator\Desktop\codex2api\.agent\plan-Responses续链WS闭环.md`
-  - `C:\Users\Administrator\Desktop\codex2api\auth\store.go`
-  - `C:\Users\Administrator\Desktop\codex2api\database\responses_continuity.go`
-  - `C:\Users\Administrator\Desktop\codex2api\database\responses_continuity_test.go`
-  - `C:\Users\Administrator\Desktop\codex2api\proxy\responses_continuity.go`
-  - `C:\Users\Administrator\Desktop\codex2api\proxy\responses_continuity_test.go`
-  - `C:\Users\Administrator\Desktop\codex2api\proxy\responses_ws.go`
-  - `C:\Users\Administrator\Desktop\codex2api\proxy\handler.go`
-  - `C:\Users\Administrator\Desktop\codex2api\proxy\retry_exclusions.go`
+  - `C:\Users\Administrator\Desktop\codex2api\.agent\plan-账号防封全景端到端测试.md`
+  - `C:\Users\Administrator\Desktop\codex2api\proxy\utls_transport.go`：`NewUTLSTransport`、`NewUTLSNetDialTLSContext`、`IsUTLSEnabled`
+  - `C:\Users\Administrator\Desktop\codex2api\proxy\executor.go`：`newCodexTransport`、`applyCodexRequestHeaders`、`ExecuteOpenAIResponsesWebSocketRequest`
+  - `C:\Users\Administrator\Desktop\codex2api\proxy\device_profile.go`：`ResolveDeviceProfile`、`ApplyDeviceProfileHeaders`
+  - `C:\Users\Administrator\Desktop\codex2api\proxy\wsrelay\executor.go`：`prepareWebsocketHeaders`
+  - `C:\Users\Administrator\Desktop\codex2api\proxy\wsrelay\manager.go`：`createConnection`
+  - `C:\Users\Administrator\Desktop\codex2api\proxy\responses_ws.go`：`forwardResponsesWebSocketTurn`、transport preference/fallback
+  - `C:\Users\Administrator\Desktop\codex2api\auth\utls_client.go`：auth uTLS + Go HTTP/2 混合画像
+  - `C:\Users\Administrator\Desktop\codex2api\proxy\executor_test.go`
+  - `C:\Users\Administrator\Desktop\codex2api\proxy\device_profile_test.go`
+  - `C:\Users\Administrator\Desktop\codex2api\proxy\wsrelay\executor_test.go`

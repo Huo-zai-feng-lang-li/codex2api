@@ -87,7 +87,7 @@ func queryWhamUsageWithURL(ctx context.Context, account *auth.Account, proxyURL,
 		req.Header.Set("chatgpt-account-id", accountID)
 	}
 
-	client := &http.Client{Transport: newCodexStandardTransport(proxyURL)}
+	client := &http.Client{Transport: newCodexTransport(proxyURL)}
 
 	resp, err := client.Do(req)
 	if err != nil {

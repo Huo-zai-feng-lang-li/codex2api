@@ -14,17 +14,30 @@ taskkill /F /IM codex2api.exe 2>nul 1>nul
 timeout /t 1 /nobreak >nul
 
 :: [2] Build
-echo [2/4] Building...
+echo [2/4] Building Frontend and Go backend...
+pushd frontend
+call npm run build
+if %errorlevel% neq 0 (
+    echo FRONTEND BUILD FAILED!
+    popd
+    pause
+    exit /b 1
+)
+popd
 go build -o codex2api.exe .
 if %errorlevel% neq 0 (
-    echo BUILD FAILED! Check code errors above.
+    echo BACKEND BUILD FAILED! Check code errors above.
     pause
     exit /b 1
 )
 echo       Build OK!
 
-:: [3] Ensure log dir
+REM Ensure log dir and set environment variables
 if not exist logs mkdir logs
+set CODEX_TRANSPORT_MODE=utls
+set CODEX_FINGERPRINT_DEBUG=true
+set CODEX_WS_SEND_USER_AGENT=true
+set STABILIZE_DEVICE_PROFILE=true
 
 :: [4] Start service (redirect stdout/stderr to log files)
 echo [3/4] Starting service...

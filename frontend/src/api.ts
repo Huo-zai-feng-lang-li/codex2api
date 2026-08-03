@@ -54,6 +54,19 @@ import type {
   AccountGroup,
   AccountGroupsResponse,
   BackgroundUploadResponse,
+  StatsResponse,
+  SetupHintsResponse,
+  CPAExportEntry,
+  SystemSettings,
+  UpdateAccountSchedulerRequest,
+  UpdateAPIKeyRequest,
+  UpdateOpenAIResponsesAccountRequest,
+  UsageLogsResponse,
+  UsageLogsPagedResponse,
+  UsageStats,
+  AccountGroup,
+  AccountGroupsResponse,
+  BackgroundUploadResponse,
   CreateAccountGroupRequest,
   UpdateAccountGroupRequest,
 } from './types'
@@ -61,7 +74,19 @@ import { createSSEParser } from './lib/sse'
 
 const BASE = '/api/admin'
 export const ADMIN_AUTH_REQUIRED_EVENT = 'codex2api:admin-auth-required'
+export const API_LOADING_EVENT = 'codex2api:api-loading-change'
 const ADMIN_AUTH_RESET_KEY = 'admin_auth_reset_at'
+
+let activeApiRequestCount = 0
+function notifyLoadingChange() {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(API_LOADING_EVENT, { detail: { count: activeApiRequestCount } }))
+  }
+}
+
+export function getActiveApiRequestCount() {
+  return activeApiRequestCount
+}
 
 export function getAdminKey(): string {
   return localStorage.getItem('admin_key') ?? ''
@@ -103,71 +128,92 @@ function extractAdminErrorMessage(body: string, status: number): string {
 }
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const headers = new Headers(options.headers)
-  const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData
-  if (options.body !== undefined && options.body !== null && !isFormData && !headers.has('Content-Type')) {
-    headers.set('Content-Type', 'application/json')
-  }
-
-  const adminKey = getAdminKey()
-  if (adminKey) {
-    headers.set('X-Admin-Key', adminKey)
-  }
-
-  const res = await fetch(BASE + path, {
-    ...options,
-    cache: options.cache ?? 'no-store',
-    headers,
-  })
-
-  if (!res.ok) {
-    const body = await res.text()
-    if (res.status === 401) {
-      resetAdminAuthState()
+  activeApiRequestCount++
+  notifyLoadingChange()
+  try {
+    const headers = new Headers(options.headers)
+    const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData
+    if (options.body !== undefined && options.body !== null && !isFormData && !headers.has('Content-Type')) {
+      headers.set('Content-Type', 'application/json')
     }
-    throw new Error(extractAdminErrorMessage(body, res.status))
-  }
 
-  return (await res.json()) as T
+    const adminKey = getAdminKey()
+    if (adminKey) {
+      headers.set('X-Admin-Key', adminKey)
+    }
+
+    const res = await fetch(BASE + path, {
+      ...options,
+      cache: options.cache ?? 'no-store',
+      headers,
+    })
+
+    if (!res.ok) {
+      const body = await res.text()
+      if (res.status === 401) {
+        resetAdminAuthState()
+      }
+      throw new Error(extractAdminErrorMessage(body, res.status))
+    }
+
+    return (await res.json()) as T
+  } finally {
+    activeApiRequestCount = Math.max(0, activeApiRequestCount - 1)
+    notifyLoadingChange()
+  }
 }
 
 async function requestPublic<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const res = await fetch(path, {
-    ...options,
-    cache: options.cache ?? 'no-store',
-  })
+  activeApiRequestCount++
+  notifyLoadingChange()
+  try {
+    const res = await fetch(path, {
+      ...options,
+      cache: options.cache ?? 'no-store',
+    })
 
-  if (!res.ok) {
-    const body = await res.text()
-    throw new Error(extractAdminErrorMessage(body, res.status))
+    if (!res.ok) {
+      const body = await res.text()
+      throw new Error(extractAdminErrorMessage(body, res.status))
+    }
+
+    return (await res.json()) as T
+  } finally {
+    activeApiRequestCount = Math.max(0, activeApiRequestCount - 1)
+    notifyLoadingChange()
   }
-
-  return (await res.json()) as T
 }
 
 async function requestBlob(path: string, options: RequestInit = {}): Promise<Blob> {
-  const headers = new Headers(options.headers)
+  activeApiRequestCount++
+  notifyLoadingChange()
+  try {
+    const headers = new Headers(options.headers)
 
-  const adminKey = getAdminKey()
-  if (adminKey) {
-    headers.set('X-Admin-Key', adminKey)
-  }
-
-  const res = await fetch(BASE + path, {
-    ...options,
-    cache: options.cache ?? 'no-store',
-    headers,
-  })
-
-  if (!res.ok) {
-    const body = await res.text()
-    if (res.status === 401) {
-      resetAdminAuthState()
+    const adminKey = getAdminKey()
+    if (adminKey) {
+      headers.set('X-Admin-Key', adminKey)
     }
-    throw new Error(extractAdminErrorMessage(body, res.status))
-  }
 
-  return res.blob()
+    const res = await fetch(BASE + path, {
+      ...options,
+      cache: options.cache ?? 'no-store',
+      headers,
+    })
+
+    if (!res.ok) {
+      const body = await res.text()
+      if (res.status === 401) {
+        resetAdminAuthState()
+      }
+      throw new Error(extractAdminErrorMessage(body, res.status))
+    }
+
+    return res.blob()
+  } finally {
+    activeApiRequestCount = Math.max(0, activeApiRequestCount - 1)
+    notifyLoadingChange()
+  }
 }
 
 export interface ActiveRequestsSnapshot {

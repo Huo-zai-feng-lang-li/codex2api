@@ -83,6 +83,18 @@ type deviceProfile struct {
 	HasVersion     bool
 }
 
+// CodexVersion returns the version encoded by the pinned User-Agent profile.
+func (p deviceProfile) CodexVersion(fallback string) string {
+	if p.HasVersion {
+		return strings.Join([]string{
+			strconv.Itoa(p.Version.major),
+			strconv.Itoa(p.Version.minor),
+			strconv.Itoa(p.Version.patch),
+		}, ".")
+	}
+	return strings.TrimSpace(fallback)
+}
+
 type deviceProfileCacheEntry struct {
 	profile deviceProfile
 	expire  time.Time
@@ -257,16 +269,23 @@ func firstNonEmptyHeader(headers http.Header, name, fallback string) string {
 }
 
 // deviceProfileScopeKey 生成设备指纹作用域键
-// 优先使用 apiKey（细粒度控制），其次是 auth ID（账号级），最后是 global
+// 优先按上游账号隔离；无账号身份时再退回调用方 API key，最后使用 global。
 func deviceProfileScopeKey(account *auth.Account, apiKey string) string {
-	switch {
-	case strings.TrimSpace(apiKey) != "":
-		return "api_key:" + strings.TrimSpace(apiKey)
-	case account != nil && account.ID() != 0:
-		return "auth:" + strconv.FormatInt(account.ID(), 10)
-	default:
-		return "global"
+	if account != nil {
+		if id := account.ID(); id != 0 {
+			return "auth:" + strconv.FormatInt(id, 10)
+		}
+		account.Mu().RLock()
+		accountID := strings.TrimSpace(account.AccountID)
+		account.Mu().RUnlock()
+		if accountID != "" {
+			return "account_id:" + accountID
+		}
 	}
+	if apiKey = strings.TrimSpace(apiKey); apiKey != "" {
+		return "api_key:" + apiKey
+	}
+	return "global"
 }
 
 func deviceProfileCacheKey(account *auth.Account, apiKey string) string {

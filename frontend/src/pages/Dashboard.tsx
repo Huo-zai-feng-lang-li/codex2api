@@ -73,37 +73,31 @@ function DashboardRequestTabs({
 }) {
   const { t } = useTranslation()
   const tabs: Array<{ key: DashboardRequestTab; label: string }> = [
-    {
-      key: 'usage_logs',
-      label: t('dashboard.requestRecords'),
-    },
-    {
-      key: 'error_details',
-      label: t('dashboard.errorDetails'),
-    },
+    { key: 'usage_logs', label: t('dashboard.requestRecords') },
+    { key: 'error_details', label: t('dashboard.errorDetails') },
   ]
 
   return (
     <div className="inline-flex shrink-0 rounded-lg border border-border bg-muted/50 p-0.5" role="tablist" aria-label={t('dashboard.requestDetailsTabs')}>
-        {tabs.map((tab) => {
-          const selected = activeTab === tab.key
-          return (
-            <button
-              key={tab.key}
-              type="button"
-              role="tab"
-              aria-selected={selected}
-              onClick={() => onTabChange(tab.key)}
-              className={`rounded-md px-2.5 py-1 text-xs font-medium transition-all duration-200 ${
-                selected
-                  ? 'bg-background text-foreground shadow-sm'
-                  : 'text-muted-foreground hover:text-foreground'
-              }`}
-            >
-              {tab.label}
-            </button>
-          )
-        })}
+      {tabs.map((tab) => {
+        const selected = activeTab === tab.key
+        return (
+          <button
+            key={tab.key}
+            type="button"
+            role="tab"
+            aria-selected={selected}
+            onClick={() => onTabChange(tab.key)}
+            className={`rounded-md px-2.5 py-1 text-xs font-medium transition-all duration-200 ${
+              selected
+                ? 'bg-background text-foreground shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            {tab.label}
+          </button>
+        )
+      })}
     </div>
   )
 }
@@ -119,12 +113,8 @@ export default function Dashboard() {
   const [chartLoading, setChartLoading] = useState(true)
   const chartAbort = useRef<AbortController | null>(null)
 
-  // 仅加载轻量级统计数据（秒级响应）
   const loadDashboardStats = useCallback(async () => {
-    const [stats, usageStats] = await Promise.all([
-      api.getStats(),
-      api.getUsageStats(),
-    ])
+    const [stats, usageStats] = await Promise.all([api.getStats(), api.getUsageStats()])
     return { stats, usageStats }
   }, [])
 
@@ -136,7 +126,6 @@ export default function Dashboard() {
     load: loadDashboardStats,
   })
 
-  // 加载服务端聚合的图表数据（12~48 个聚合点，非原始行）
   const loadChartData = useCallback(async () => {
     chartAbort.current?.abort()
     const controller = new AbortController()
@@ -154,21 +143,16 @@ export default function Dashboard() {
     } catch {
       // 静默容错
     } finally {
-      if (!controller.signal.aborted) {
-        setChartLoading(false)
-      }
+      if (!controller.signal.aborted) setChartLoading(false)
     }
   }, [timeRange])
 
-  // 首次加载 + timeRange 变更时重新拉取图表数据
-  useEffect(() => {
-    void loadChartData()
-  }, [loadChartData])
+  useEffect(() => { void loadChartData() }, [loadChartData])
 
-  // 仅在 1h（实时）模式下启用自动刷新
   useVisiblePolling(async () => {
     await Promise.all([reloadSilently(), loadChartData()])
   }, DASHBOARD_REFRESH_INTERVAL_MS, { enabled: timeRange === '1h' })
+
   useVisiblePolling(
     refreshActiveRequests,
     ACTIVE_REQUESTS_REFRESH_INTERVAL_MS,
@@ -212,20 +196,8 @@ export default function Dashboard() {
         {/* Account status */}
         <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-4 mb-6">
           <StatCard metricId="total" icon={icons.total} iconClass="blue" label={t('dashboard.totalAccounts')} value={total} />
-          <StatCard
-            metricId="available"
-            icon={icons.available}
-            iconClass="green"
-            label={t('dashboard.available')}
-            value={available}
-          />
-          <StatCard
-            metricId="rate-limited"
-            icon={icons.rateLimited}
-            iconClass="amber"
-            label={t('dashboard.rateLimited')}
-            value={rateLimited}
-          />
+          <StatCard metricId="available" icon={icons.available} iconClass="green" label={t('dashboard.available')} value={available} />
+          <StatCard metricId="rate-limited" icon={icons.rateLimited} iconClass="amber" label={t('dashboard.rateLimited')} value={rateLimited} />
           <StatCard metricId="error" icon={icons.error} iconClass="red" label={t('dashboard.error')} value={errorCount} />
           <StatCard metricId="today-requests" icon={icons.requests} iconClass="purple" label={t('dashboard.todayRequests')} value={todayRequests} />
         </div>
@@ -241,20 +213,28 @@ export default function Dashboard() {
               latencyLoading={latencyLoading}
             />
             <ActiveRequestsPanel requests={activeRequests} />
-            {activeRequestTab === 'usage_logs' && (
-              <UsageLogsPanel
-                autoRefreshWhen={activeRequests.length > 0}
-                headerAddon={requestTabs}
-              />
-            )}
-            {activeRequestTab === 'error_details' && (
-              <Suspense fallback={<RequestTabSkeleton />}>
-                <OperationsErrorsPanel
-                  autoRefresh={false}
-                  headerAddon={requestTabs}
-                />
-              </Suspense>
-            )}
+
+            {/* 稳定基底容器：设置 min-h 保底并配合淡入动画，避免空数据或高度变动引发布局跳跃 */}
+            <div className="min-h-[440px] transition-all duration-200">
+              {activeRequestTab === 'usage_logs' ? (
+                <div key="usage_logs" className="animate-in fade-in duration-200">
+                  <UsageLogsPanel
+                    autoRefreshWhen={activeRequests.length > 0}
+                    headerAddon={requestTabs}
+                  />
+                </div>
+              ) : (
+                <div key="error_details" className="animate-in fade-in duration-200">
+                  <Suspense fallback={<RequestTabSkeleton />}>
+                    <OperationsErrorsPanel
+                      autoRefresh={false}
+                      headerAddon={requestTabs}
+                    />
+                  </Suspense>
+                </div>
+              )}
+            </div>
+
             <Suspense fallback={<ChartsSkeleton />}>
               <DashboardUsageCharts
                 chartData={chartData}

@@ -371,6 +371,7 @@ func ExecuteOpenAIResponsesRequest(ctx context.Context, account *auth.Account, r
 			}
 		}
 	}
+	logCodexFingerprintDebug("openai_responses", account, proxyURL, req.Header)
 
 	resp, err := getPooledClient(account, proxyURL).Do(req)
 	if err != nil {
@@ -410,7 +411,10 @@ func ExecuteOpenAIResponsesWebSocketRequest(ctx context.Context, account *auth.A
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 	}
-	if strings.TrimSpace(proxyURL) != "" {
+
+	if IsUTLSEnabled() {
+		dialer.NetDialTLSContext = NewUTLSNetDialTLSContext(proxyURL)
+	} else if strings.TrimSpace(proxyURL) != "" {
 		proxyURLParsed, err := url.Parse(proxyURL)
 		if err != nil {
 			return nil, ErrInternalError("解析代理地址失败", err)
@@ -581,13 +585,6 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	return resp, nil
 }
 
-func codexVersionFromProfile(profile deviceProfile, fallback string) string {
-	if profile.HasVersion {
-		return fmt.Sprintf("%d.%d.%d", profile.Version.major, profile.Version.minor, profile.Version.patch)
-	}
-	return strings.TrimSpace(fallback)
-}
-
 func codexVersionFromUserAgent(userAgent, fallback string) string {
 	if version, ok := parseCodexCLIVersion(userAgent); ok {
 		return fmt.Sprintf("%d.%d.%d", version.major, version.minor, version.patch)
@@ -667,7 +664,7 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 	usedGeneratedHeaders := false
 	if IsDeviceProfileStabilizationEnabled(deviceCfg) {
 		profile = ResolveDeviceProfile(account, apiKey, downstreamHeaders, deviceCfg)
-		version = codexVersionFromProfile(profile, strings.TrimSpace(deviceCfg.PackageVersion))
+		version = profile.CodexVersion(strings.TrimSpace(deviceCfg.PackageVersion))
 		if strings.TrimSpace(profile.UserAgent) != "" {
 			req.Header.Set("User-Agent", profile.UserAgent)
 		}

@@ -348,34 +348,46 @@ func TestExtractDeviceProfile(t *testing.T) {
 
 func TestDeviceProfileScopeKey(t *testing.T) {
 	tests := []struct {
-		name   string
+		name    string
 		account *auth.Account
-		apiKey string
-		want   string
+		apiKey  string
+		want    string
 	}{
 		{
-			name:   "nil account, empty api key",
+			name:    "nil account, empty api key",
 			account: nil,
-			apiKey: "",
-			want:   "global",
+			apiKey:  "",
+			want:    "global",
 		},
 		{
-			name:   "nil account, with api key",
+			name:    "nil account, with api key",
 			account: nil,
-			apiKey: "sk-test123",
-			want:   "api_key:sk-test123",
+			apiKey:  "sk-test123",
+			want:    "api_key:sk-test123",
 		},
 		{
-			name:   "with account, empty api key",
+			name:    "with account, empty api key",
 			account: &auth.Account{},
-			apiKey: "",
-			want:   "global",
+			apiKey:  "",
+			want:    "global",
 		},
 		{
-			name:   "api key takes priority over account",
+			name:    "api key scopes account without identity",
 			account: &auth.Account{}, // account.ID() == 0
-			apiKey: "sk-priority",
-			want:   "api_key:sk-priority",
+			apiKey:  "sk-priority",
+			want:    "api_key:sk-priority",
+		},
+		{
+			name:    "database account takes priority over shared api key",
+			account: &auth.Account{DBID: 42, AccountID: "acct-42"},
+			apiKey:  "shared-api-key",
+			want:    "auth:42",
+		},
+		{
+			name:    "upstream account id takes priority over shared api key",
+			account: &auth.Account{AccountID: "acct-42"},
+			apiKey:  "shared-api-key",
+			want:    "account_id:acct-42",
 		},
 	}
 
@@ -653,10 +665,10 @@ func TestMapStainlessOS(t *testing.T) {
 
 	// 验证已知映射
 	validOS := map[string]bool{
-		"MacOS":        true,
-		"Windows":      true,
-		"Linux":        true,
-		"FreeBSD":      true,
+		"MacOS":   true,
+		"Windows": true,
+		"Linux":   true,
+		"FreeBSD": true,
 	}
 
 	// 如果不是已知值，应该以 "Other::" 开头
@@ -674,9 +686,9 @@ func TestMapStainlessArch(t *testing.T) {
 
 	// 验证已知映射
 	validArch := map[string]bool{
-		"x64":  true,
+		"x64":   true,
 		"arm64": true,
-		"x86":  true,
+		"x86":   true,
 	}
 
 	// 如果不是已知值，应该以 "other::" 开头

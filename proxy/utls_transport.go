@@ -5,10 +5,10 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -29,11 +29,15 @@ import (
 // utlsRoundTripper 实现 http.RoundTripper 接口
 // 使用 utls 模拟 Chrome 浏览器的 TLS 指纹以绕过 TLS 指纹检测
 type utlsRoundTripper struct {
-	mu         sync.Mutex
+	mu          sync.Mutex
 	connections map[string]*http2.ClientConn // HTTP/2 连接池，按 host 索引
 	pending     map[string]*sync.Cond        // 防止重复连接创建
-	dialer     xproxy.Dialer                 // 底层拨号器（支持代理）
+	dialer      xproxy.Dialer                // 底层拨号器（支持代理）
 }
+
+type failedDialer struct{ err error }
+
+func (d failedDialer) Dial(_, _ string) (net.Conn, error) { return nil, d.err }
 
 // NewUTLSTransport 创建使用 Chrome TLS 指纹的 RoundTripper
 // 支持 HTTP(S) 和 SOCKS5 代理
@@ -43,8 +47,7 @@ func NewUTLSTransport(proxyURL string) http.RoundTripper {
 	if proxyURL != "" {
 		d, err := buildProxyDialer(proxyURL)
 		if err != nil {
-			log.Printf("[UTLS] 代理配置失败，回退直连: proxy=%s err=%v", proxyURL, err)
-			dialer = xproxy.Direct
+			dialer = failedDialer{err: fmt.Errorf("uTLS 代理配置无效: %w", err)}
 		} else {
 			dialer = d
 		}
@@ -91,11 +94,23 @@ type httpConnectDialer struct {
 
 // Dial 通过 HTTP CONNECT 隧道连接到目标地址
 func (d *httpConnectDialer) Dial(network, addr string) (net.Conn, error) {
+	return d.DialContext(context.Background(), network, addr)
+}
+
+func (d *httpConnectDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	// 1. 建立到代理服务器的 TCP 连接
-	conn, err := net.DialTimeout("tcp", d.proxyAddr, 10*time.Second)
+	conn, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, d.proxyAddr)
 	if err != nil {
 		return nil, fmt.Errorf("连接代理服务器失败: %w", err)
 	}
+	deadline := time.Now().Add(10 * time.Second)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	_ = conn.SetDeadline(deadline)
+	stopCancellation := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
+	defer stopCancellation()
+	defer func() { _ = conn.SetDeadline(time.Time{}) }()
 
 	// 2. 发送 CONNECT 请求建立隧道
 	connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n", addr, addr)
@@ -106,6 +121,9 @@ func (d *httpConnectDialer) Dial(network, addr string) (net.Conn, error) {
 
 	if _, err := conn.Write([]byte(connectReq)); err != nil {
 		conn.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("发送 CONNECT 请求失败: %w", err)
 	}
 
@@ -114,6 +132,9 @@ func (d *httpConnectDialer) Dial(network, addr string) (net.Conn, error) {
 	resp, err := http.ReadResponse(br, nil)
 	if err != nil {
 		conn.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("读取代理响应失败: %w", err)
 	}
 	resp.Body.Close()
@@ -143,6 +164,9 @@ func (c *bufferedConn) Read(b []byte) (int, error) {
 // buildHTTPProxyDialer 创建 HTTP CONNECT 代理拨号器
 func buildHTTPProxyDialer(u *url.URL) (xproxy.Dialer, error) {
 	addr := u.Host
+	if addr == "" {
+		return nil, fmt.Errorf("代理地址不能为空")
+	}
 	if !strings.Contains(addr, ":") {
 		if u.Scheme == "https" {
 			addr += ":443"
@@ -179,45 +203,39 @@ func buildSOCKS5Dialer(u *url.URL) (xproxy.Dialer, error) {
 }
 
 // getOrCreateConnection 获取或创建 HTTP/2 连接
-// 使用 sync.Cond 防止同一 host 的重复连接创建
+// 使用 sync.Cond 防止同一 host 的重复连接创建（标准 single-flight 模式）
 func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*http2.ClientConn, error) {
+	var cond *sync.Cond
+
 	t.mu.Lock()
-
-	// 检查是否已有可用连接
-	if h2Conn, ok := t.connections[host]; ok && h2Conn.CanTakeNewRequest() {
-		t.mu.Unlock()
-		return h2Conn, nil
-	}
-
-	// 检查是否有其他 goroutine 正在创建连接
-	if cond, ok := t.pending[host]; ok {
-		// 等待其他 goroutine 完成（循环重试，避免虚假唤醒）
-		for {
-			cond.Wait()
-			// 再次检查连接是否可用
-			if h2Conn, ok := t.connections[host]; ok && h2Conn.CanTakeNewRequest() {
-				t.mu.Unlock()
-				return h2Conn, nil
-			}
-			// 如果 pending 已移除，说明创建完成（可能失败），跳出循环自己创建
-			if _, still := t.pending[host]; !still {
-				break
-			}
+	for {
+		// 1. 检查是否已有可用连接
+		if h2Conn, ok := t.connections[host]; ok && h2Conn.CanTakeNewRequest() {
+			t.mu.Unlock()
+			return h2Conn, nil
 		}
+
+		// 2. 检查是否有其他 goroutine 正在创建连接
+		if pendingCond, ok := t.pending[host]; ok {
+			// 等待当前创建者完成，唤醒后自动重新循环校验
+			pendingCond.Wait()
+			continue
+		}
+
+		// 3. 没有其他 goroutine 在创建，由当前 goroutine 标记负责创建
+		cond = sync.NewCond(&t.mu)
+		t.pending[host] = cond
+		t.mu.Unlock()
+		break
 	}
 
-	// 标记此 host 正在创建连接
-	cond := sync.NewCond(&t.mu)
-	t.pending[host] = cond
-	t.mu.Unlock()
-
-	// 在锁外创建连接
+	// 4. 在锁外创建连接
 	h2Conn, err := t.createConnection(host, addr)
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	// 移除 pending 标记并唤醒一个等待者（Signal 而非 Broadcast，避免惊群）
+	// 5. 移除 pending 标记并广播通知所有等待者
 	delete(t.pending, host)
 	cond.Broadcast()
 
@@ -225,12 +243,18 @@ func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*http2.Clie
 		return nil, err
 	}
 
-	// 关闭旧连接（如果存在且不可用）
+	// 6. 检查在锁外建连期间，是否有其他 Goroutine 已经率先创建了可用连接
 	if oldConn, ok := t.connections[host]; ok {
-		go oldConn.Close() // 异步关闭，避免阻塞
+		if oldConn.CanTakeNewRequest() {
+			// 别人已经建好了有效连接，关闭我们重复创建的连接，使用别人的有效连接
+			go h2Conn.Close()
+			return oldConn, nil
+		}
+		// 旧连接确实不可用，异步关闭旧连接
+		go oldConn.Close()
 	}
 
-	// 存储新连接
+	// 7. 存储新连接
 	t.connections[host] = h2Conn
 	return h2Conn, nil
 }
@@ -245,8 +269,10 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 	}
 
 	// 2. 配置 TLS
+	skipVerify := strings.ToLower(strings.TrimSpace(os.Getenv("CODEX_TLS_SKIP_VERIFY"))) == "true"
 	tlsConfig := &utls.Config{
-		ServerName: host,
+		ServerName:         host,
+		InsecureSkipVerify: skipVerify,
 	}
 
 	// 3. 使用 utls 握手（Chrome 指纹）
@@ -290,7 +316,7 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 
 	resp, err := h2Conn.RoundTrip(req)
 	if err != nil {
-		// 连接失败，从缓存中移除并关闭连接
+		// 连接失败，从缓存中清理失效连接并关闭
 		t.mu.Lock()
 		if cached, ok := t.connections[hostname]; ok && cached == h2Conn {
 			delete(t.connections, hostname)
@@ -343,3 +369,84 @@ func (c *uTLSHTTPClientWrapper) CloseIdleConnections() {
 	c.transport.CloseIdleConnections()
 }
 
+// IsUTLSEnabled 返回当前环境是否启用了 uTLS Chrome 指纹模式
+func IsUTLSEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CODEX_TRANSPORT_MODE"))) {
+	case "utls", "utls_chrome", "chrome":
+		return true
+	default:
+		return false
+	}
+}
+
+func websocketClientHelloSpec() (utls.ClientHelloSpec, error) {
+	spec, err := utls.UTLSIdToSpec(utls.HelloChrome_Auto)
+	if err != nil {
+		return utls.ClientHelloSpec{}, fmt.Errorf("创建 WebSocket Chrome ClientHello 失败: %w", err)
+	}
+
+	extensions := spec.Extensions[:0]
+	for _, extension := range spec.Extensions {
+		switch typed := extension.(type) {
+		case *utls.ALPNExtension:
+			typed.AlpnProtocols = []string{"http/1.1"}
+			extensions = append(extensions, typed)
+		case *utls.ApplicationSettingsExtension, *utls.ApplicationSettingsExtensionNew:
+			// ALPS 仅适用于 HTTP/2；WSS 必须保持 HTTP/1.1 Upgrade。
+		default:
+			extensions = append(extensions, extension)
+		}
+	}
+	spec.Extensions = extensions
+	return spec, nil
+}
+
+// NewUTLSNetDialTLSContext 创建用于 WebSocket WSS 连接的 uTLS 拨号器
+func NewUTLSNetDialTLSContext(proxyURL string) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			host = addr
+		}
+
+		var dialer xproxy.Dialer = xproxy.Direct
+		if strings.TrimSpace(proxyURL) != "" {
+			d, err := buildProxyDialer(proxyURL)
+			if err != nil {
+				return nil, fmt.Errorf("WebSocket uTLS 代理配置无效: %w", err)
+			}
+			dialer = d
+		}
+
+		contextDialer, ok := dialer.(xproxy.ContextDialer)
+		if !ok {
+			return nil, fmt.Errorf("WebSocket uTLS 代理拨号器不支持上下文取消")
+		}
+		rawConn, err := contextDialer.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, fmt.Errorf("WebSocket TCP 连接失败: %w", err)
+		}
+
+		skipVerify := strings.ToLower(strings.TrimSpace(os.Getenv("CODEX_TLS_SKIP_VERIFY"))) == "true"
+		tlsConfig := &utls.Config{
+			ServerName:         host,
+			InsecureSkipVerify: skipVerify,
+		}
+
+		spec, err := websocketClientHelloSpec()
+		if err != nil {
+			rawConn.Close()
+			return nil, err
+		}
+		tlsConn := utls.UClient(rawConn, tlsConfig, utls.HelloCustom)
+		if err := tlsConn.ApplyPreset(&spec); err != nil {
+			rawConn.Close()
+			return nil, fmt.Errorf("应用 WebSocket Chrome ClientHello 失败: %w", err)
+		}
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			rawConn.Close()
+			return nil, fmt.Errorf("WebSocket uTLS 握手失败: %w", err)
+		}
+		return tlsConn, nil
+	}
+}

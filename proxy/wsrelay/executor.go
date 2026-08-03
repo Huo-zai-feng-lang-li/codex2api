@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -101,7 +100,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	}
 
 	// 准备请求头
-	headers := e.prepareWebsocketHeaders(accessToken, accountIDStr, sessionID, apiKey, deviceCfg, ginHeaders)
+	headers := e.prepareWebsocketHeaders(account, accessToken, accountIDStr, sessionID, apiKey, deviceCfg, ginHeaders)
 
 	// Resin 反代：注入账号身份头
 	if proxy.IsResinEnabled() {
@@ -186,7 +185,7 @@ func (e *Executor) prepareWebsocketBody(body []byte, sessionID string) []byte {
 }
 
 // prepareWebsocketHeaders 准备 WebSocket 请求头
-func (e *Executor) prepareWebsocketHeaders(accessToken, accountID, sessionID, apiKey string, deviceCfg *proxy.DeviceProfileConfig, ginHeaders http.Header) http.Header {
+func (e *Executor) prepareWebsocketHeaders(account *auth.Account, accessToken, accountID, sessionID, apiKey string, deviceCfg *proxy.DeviceProfileConfig, ginHeaders http.Header) http.Header {
 	headers := http.Header{}
 
 	// 认证头
@@ -196,17 +195,10 @@ func (e *Executor) prepareWebsocketHeaders(accessToken, accountID, sessionID, ap
 	headers.Set("OpenAI-Beta", responsesWebsocketBetaHeader)
 
 	if shouldSendWebsocketUserAgent() {
-		account := &auth.Account{}
-		if accountID != "" {
-			account.AccountID = accountID
-			if id, err := strconv.ParseInt(accountID, 10, 64); err == nil {
-				account.DBID = id
-			}
-		}
 		if proxy.IsDeviceProfileStabilizationEnabled(deviceCfg) {
 			profile := proxy.ResolveDeviceProfile(account, apiKey, ginHeaders, deviceCfg)
 			headers.Set("User-Agent", profile.UserAgent)
-			if version := strings.TrimSpace(profile.PackageVersion); version != "" {
+			if version := profile.CodexVersion(deviceCfg.PackageVersion); version != "" {
 				headers.Set("Version", version)
 			}
 		} else if userAgent := strings.TrimSpace(ginHeaders.Get("User-Agent")); proxy.IsCodexOfficialClientByHeaders(userAgent, ginHeaders.Get("Originator")) && userAgent != "" {

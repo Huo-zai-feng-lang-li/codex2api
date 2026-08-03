@@ -1123,3 +1123,10 @@
 .dark [class*="shadow-"] {
   --tw-shadow-color: hsl(0 0% 0% / 0.22);
 }
+
+/* Global loading bar animation */
+@keyframes loading-bar-slide {
+  0%   { transform: translateX(-100%); }
+  60%  { transform: translateX(0%); }
+  100% { transform: translateX(100%); }
+}

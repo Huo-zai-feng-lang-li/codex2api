@@ -7,10 +7,43 @@ import (
 	"testing"
 	"time"
 
+	"github.com/codex2api/auth"
 	"github.com/codex2api/proxy"
 	"github.com/gorilla/websocket"
 	"github.com/tidwall/gjson"
 )
+
+func TestPrepareWebsocketHeadersReusesHTTPAccountDeviceProfile(t *testing.T) {
+	t.Setenv("CODEX_WS_SEND_USER_AGENT", "true")
+	account := &auth.Account{DBID: 424242, AccountID: "acct-profile-parity"}
+	cfg := &proxy.DeviceProfileConfig{
+		UserAgent:              "codex_cli_rs/0.117.0",
+		PackageVersion:         "0.117.0",
+		RuntimeVersion:         "0.117.0",
+		OS:                     "MacOS",
+		Arch:                   "arm64",
+		StabilizeDeviceProfile: true,
+	}
+	httpProfile := proxy.ResolveDeviceProfile(account, "shared-api-key", http.Header{
+		"User-Agent": []string{"codex_cli_rs/0.118.0 (Ubuntu 24.04; x86_64)"},
+	}, cfg)
+
+	headers := NewExecutor().prepareWebsocketHeaders(
+		account,
+		"token-123",
+		account.AccountID,
+		"session-123",
+		"shared-api-key",
+		cfg,
+		http.Header{},
+	)
+	if got := headers.Get("User-Agent"); got != httpProfile.UserAgent {
+		t.Fatalf("WebSocket User-Agent = %q, want HTTP profile %q", got, httpProfile.UserAgent)
+	}
+	if got := headers.Get("Version"); got != "0.118.0" {
+		t.Fatalf("WebSocket Version = %q, want HTTP profile version 0.118.0", got)
+	}
+}
 
 func TestPrepareWebsocketHeadersUsesConfiguredDefaultsAndBetaFeatures(t *testing.T) {
 	t.Setenv("CODEX_WS_SEND_USER_AGENT", "true")
@@ -28,7 +61,7 @@ func TestPrepareWebsocketHeadersUsesConfiguredDefaultsAndBetaFeatures(t *testing
 		"Originator": []string{"custom-originator"},
 	}
 
-	headers := exec.prepareWebsocketHeaders("token-123", "42", "session-123", "api-key-1", cfg, ginHeaders)
+	headers := exec.prepareWebsocketHeaders(&auth.Account{DBID: 42, AccountID: "42"}, "token-123", "42", "session-123", "api-key-1", cfg, ginHeaders)
 
 	if got := headers.Get("Authorization"); got != "Bearer token-123" {
 		t.Fatalf("Authorization = %q", got)
@@ -68,7 +101,7 @@ func TestPrepareWebsocketHeadersOmitsUserAgentByDefault(t *testing.T) {
 		"X-Responsesapi-Include-Timing-Metrics": []string{"true"},
 	}
 
-	headers := exec.prepareWebsocketHeaders("token-123", "42", "session-123", "api-key-1", nil, ginHeaders)
+	headers := exec.prepareWebsocketHeaders(&auth.Account{DBID: 42, AccountID: "42"}, "token-123", "42", "session-123", "api-key-1", nil, ginHeaders)
 
 	if got := headers.Get("User-Agent"); got != "" {
 		t.Fatalf("User-Agent = %q, want empty", got)
