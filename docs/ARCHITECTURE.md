@@ -293,23 +293,30 @@ func TranslateStreamChunk(data []byte, model, chunkID string) ([]byte, bool)
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 冷却机制
+### 冷却机制与多上游语义分类 (v2.2.8+)
 
 ```go
 // 冷却类型与时长
 type CooldownRule struct {
-    RateLimited  time.Duration  // 429 限流: 从响应头解析或按套餐推断
+    RateLimited  time.Duration  // 429 限流: 从响应头解析、语义分类或按套餐推断
     Unauthorized time.Duration  // 401 未授权: 5分钟 ~ 24小时
     Timeout      time.Duration  // 超时: 15分钟
     ServerError  time.Duration  // 5xx 错误: 15分钟
 }
 
-// 套餐类型冷却策略
+// 官方 Codex 套餐冷却策略
 const (
     FreeCooldown     = 7 * 24 * time.Hour  // Free 套餐 429: 7天
     TeamCooldown5h   = 5 * time.Hour       // Team 5h 窗口用完: 5小时
     TeamCooldown7d   = 7 * 24 * time.Hour  // Team 7d 窗口用完: 7天
 )
+
+// 第三方/聚合上游通用语义分类策略 (matchGenericUpstreamRateLimit)
+// 1. 日配额耗尽 (Daily Limit): 对齐至次日午夜 00:00:05，彻底消除每 5 分钟无效轮询探测
+// 2. 周配额耗尽 (Weekly Limit): 7 天 (7*24h) 深度冷却
+// 3. 欠费/额度耗尽 (Insufficient Quota): 标记 payment_required，休眠 24 小时
+// 4. 短时频控 (RPM/TPM): 1 分钟快速自愈退避
+// 5. 兜底未知 429: 5 分钟指数退避
 ```
 
 ---
