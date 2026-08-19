@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## v2.2.8 - 2026-08-19
+
+### Improvements
+
+- **Multi-upstream rate limit semantic classifier.** Added `matchGenericUpstreamRateLimit` and `isDailyLimitExceeded` to automatically classify rate limit errors from third-party relays and aggregate gateways (such as OneAPI, NewAPI, etc.).
+- **Midnight alignment for Daily Limit.** Daily quota exhausted errors (`daily usage limit exceeded`, `daily_limit_exceeded`, etc.) now dynamically compute and align account cooldowns to the next local midnight (00:00:05), completely eliminating repetitive 5-minute probe loops on exhausted accounts.
+- **403 daily limit interception.** Intercepted 403 HTTP status responses carrying daily limit error payloads in `ApplyUpstreamAccountFailure` to ensure proper midnight alignment instead of generic payment required penalties.
+- **Weekly & Quota exhaust handling.** Automatically map weekly limit errors to 7-day cooldowns, and balance/quota exhaustion errors to 24-hour payment required sleep state.
+
 ## v2.2.7 - 2026-08-02
 
 ### Improvements

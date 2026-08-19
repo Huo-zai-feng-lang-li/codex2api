@@ -58,11 +58,12 @@ func (v Version) Compare(other Version) int {
 }
 
 // CurrentVersion is the current API version
-var CurrentVersion = Version{Major: 1, Minor: 1, Patch: 0}
+var CurrentVersion = Version{Major: 2, Minor: 2, Patch: 8}
 
 // SupportedVersions lists all supported API versions
 var SupportedVersions = []Version{
-	{Major: 1, Minor: 1, Patch: 0},
+	{Major: 2, Minor: 2, Patch: 8},
+	{Major: 2, Minor: 2, Patch: 7},
 	{Major: 1, Minor: 0, Patch: 0},
 }
 
