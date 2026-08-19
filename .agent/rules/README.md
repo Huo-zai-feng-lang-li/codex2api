@@ -31,6 +31,28 @@ Codex 桌面端走 `GET /responses` (WebSocket)，其他客户端走 `POST /v1/r
 - **清理一致性**：Prune/Trim 删除续链节点后，必须在同一事务内修复或删除悬空的 `responses_continuity_heads`；禁止留下指向不存在节点的会话头。
 - **保留时间**：续链采用最后访问时间驱动的滑动 TTL，默认 24 小时，可通过 `CODEX_RESPONSES_CONTINUITY_TTL_HOURS` 调整。历史无法完整恢复时必须显式失败，禁止静默按新会话续接。
 
+### 1.7 语义化版本与发版四位一体铁律
+- **版本源权威性**：系统版本严格遵循语义化版本号（SemVer）。主干版本以 `git tag`（如 `git describe --tags`）与根目录 `CHANGELOG.md` 为唯一权威事实源，**严禁闭门造车或随意重置版本号！**
+- **四位一体联动**：凡涉及功能发版或版本号升级，**必须同时联动更新以下 4 处**，漏更任意一处视为发布未完成：
+  1. `CHANGELOG.md`：新增对应版本号（如 `## v2.2.8 - YYYY-MM-DD`）及改动明细。
+  2. `frontend/package.json`：同步更新 `"version": "X.Y.Z"`。
+  3. `api/middleware.go`：同步更新 `CurrentVersion = Version{Major: X, Minor: Y, Patch: Z}`。
+  4. `git tag -a vX.Y.Z`：打上带注释的规范 Git 版本标签。
+
+### 1.8 架构文档与计划归档同步铁律 (Doc-as-Code)
+- **先计划后动手**：进行多步骤重构、新功能开发或复杂 Bug 修复前，**必须先在 `.agent/` 目录下创建 `plan-任务名称(中文).md`** 梳理核心目标与实施步骤。
+- **架构文档强一致**：任何涉及核心机制（如限流冷却策略、调度评分算法、代理池路由、续链持久化）的改动，**必须同步更新 `docs/ARCHITECTURE.md` 等对应设计文档**，杜绝“代码已改、文档落后”。
+- **跨会话接续归档**：任务收尾或阶段性交付时，**必须即时更新 `.agent/handoff.md`**，记录最新代码状态、测试凭证与后续待办。
+
+### 1.9 多上游错误语义与时钟对齐铁律
+- **杜绝盲目固定退避**：处理第三方中转或聚合网关（OneAPI / NewAPI 等）报错时，严禁使用盲目固定的 5 分钟短时退避导致大量无效探测轮询。
+- **时钟与语义对齐标准**：
+  - **日配额超限（Daily Limit）**：动态计算并精准锁定冷却至 **次日午夜 00:00:05**。
+  - **周配额超限（Weekly Limit）**：锁定冷却至 **7 天（`7*24h`）**。
+  - **欠费 / 额度耗尽（Insufficient Quota）**：标记 `payment_required` 并休眠 **24 小时**。
+  - **短时高频（RPM / TPM）**：执行 **1 分钟** 快速自愈退避。
+  - **通用/未知 429 报错**：维持安全兜底（5 分钟指数退避），确保与官方 Codex Header 机制 100% 兼容。
+
 ---
 
 ## 2. 零容忍红线（杜绝反复修、假宣称修好）
@@ -71,6 +93,9 @@ main.go (入口)
 - [ ] `alreadyActivated == true` 时是否安全放行而未触发 409？
 - [ ] **【硬性门槛】是否已编写发包机器人模拟真实链路（首包 -> 续问包），并实测获得两连包 HTTP 200 OK？**
 - [ ] `go test ./... -count=1` 与 `go vet ./...` 是否全过？
+- [ ] 版本号是否与 `git tag` & `CHANGELOG.md` 顺延对齐？（四位一体：`CHANGELOG.md` + `package.json` + `middleware.go` + `git tag`）
+- [ ] `docs/ARCHITECTURE.md` 是否同步补充了最新机制与设计改动？
+- [ ] `.agent/plan-*.md` 计划文档与 `.agent/handoff.md` 是否已完成归档？
 - [ ] 代码修复好了之后，如果想要更新服务和exe，直接执行这个脚本就可以build-and-restart.bat
 
 ---
