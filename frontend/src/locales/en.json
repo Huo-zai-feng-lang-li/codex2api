@@ -101,7 +101,9 @@
     "hoursAgoLong": "{{count}} hours ago",
     "hoursAgoCompact": "{{count}}h ago",
     "daysAgoLong": "{{count}} days ago",
-    "daysAgoCompact": "{{count}}d ago"
+    "daysAgoCompact": "{{count}}d ago",
+    "updateAvailable": "Update available",
+    "latest": "Latest"
   },
   "auth": {
     "title": "Admin Panel",

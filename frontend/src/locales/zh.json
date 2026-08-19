@@ -101,7 +101,9 @@
     "hoursAgoLong": "{{count}} 小时前",
     "hoursAgoCompact": "{{count}}h 前",
     "daysAgoLong": "{{count}} 天前",
-    "daysAgoCompact": "{{count}}d 前"
+    "daysAgoCompact": "{{count}}d 前",
+    "updateAvailable": "发现新版本",
+    "latest": "已是最新"
   },
   "auth": {
     "title": "管理后台",

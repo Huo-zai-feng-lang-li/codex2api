@@ -229,7 +229,9 @@ export default function Layout({ children }: PropsWithChildren) {
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [showVersionPopover])
 
-  const releaseURL = latestVersion ? `${CODEX2API_GITHUB_URL}/releases/tag/v${latestVersion}` : null
+  const releaseURL = hasUpdate && latestVersion
+    ? `${CODEX2API_GITHUB_URL}/releases/tag/v${latestVersion}`
+    : `${CODEX2API_GITHUB_URL}/releases`
 
   const isNavActive = useCallback(
     (item: NavDef) => {
@@ -362,8 +364,8 @@ export default function Layout({ children }: PropsWithChildren) {
                       <div className="mt-2 text-xs text-muted-foreground">
                         {t('common.currentVersion', { version: __APP_VERSION__ })}
                       </div>
-                      {latestVersion && (
-                        <div className="mt-1 text-[11px] text-muted-foreground">
+                      {hasUpdate && latestVersion && (
+                        <div className="mt-1 text-[11px] font-medium text-destructive">
                           {t('common.latestVersion', { version: latestVersion })}
                         </div>
                       )}
