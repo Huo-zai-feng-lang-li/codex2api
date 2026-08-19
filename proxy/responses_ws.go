@@ -243,6 +243,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	var lastStatusCode int
 	var lastBody []byte
 	retryExclusions := newRetryAccountExclusions()
+	accountPoolRecheckDone := false
 	invalidEncryptedContentRetried := false
 	continuationFallbackActivated := continuationReplayed
 	continuationOwnerAccountID := openAIResponsesContinuationOwnerAccountID(continuationCacheBody, sessionID)
@@ -283,7 +284,7 @@ accountAttempts:
 		pick := h.nextRetryAccountPickForSession(c.Request.Context(), selectionAffinityKey, apiKeyID, retryExclusions, accountFilter)
 		account, stickyProxyURL := pick.account, pick.proxyURL
 		if account == nil {
-			if continuationOwnerBound {
+			if continuationOwnerBound && rateLimitRetries == 0 {
 				activation, ok := activateOpenAIResponsesContinuationFallback(c.Request.Context(), continuationCacheBody, sessionID, continuationFallbackActivated, "response_owner_unavailable")
 				if ok {
 					rawBody = activation.body
@@ -306,6 +307,13 @@ accountAttempts:
 				apiErr = api.NewAPIError(api.ErrCodeRateLimitReached, "本地账号调度队列已满，请稍后重试", api.ErrorTypeRateLimit)
 				_ = writeResponsesWSMessage(conn, buildResponseFailedEvent(http.StatusTooManyRequests, apiErr.Message))
 				return nil
+			}
+			if !accountPoolRecheckDone && rateLimitRetries > 0 {
+				accountPoolRecheckDone = true
+				if h.recheckAccountsAfterExhaustion(c.Request.Context(), effectiveModel) {
+					retryExclusions = newRetryAccountExclusions()
+					continue accountAttempts
+				}
 			}
 			statusCode, finalErr := responsesWSFinalAccountError(lastStatusCode, lastBody, effectiveModel)
 			_ = writeResponsesWSMessage(conn, buildResponseFailedEvent(statusCode, finalErr.Message))
@@ -481,7 +489,7 @@ accountAttempts:
 					h.logUpstreamCyberPolicy(c, "/v1/responses", model, errBody)
 					decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, effectiveModel)
 					shouldRetry := false
-					if transport.fallbackTTL == 0 {
+					if transport.fallbackTTL == 0 || resp.StatusCode == http.StatusTooManyRequests {
 						shouldRetry = shouldRetryHTTPStatus(resp.StatusCode, &generalRetries, &rateLimitRetries, maxRetries, maxRateLimitRetries)
 					}
 					h.logUsageForRequest(c, &database.UsageLogInput{
@@ -553,7 +561,12 @@ accountAttempts:
 
 				if shouldRetryErr, ok := err.(*responsesWSCloseError); ok && shouldRetryErr.code == websocket.CloseTryAgainLater {
 					retryExclusions.MarkHard(account.ID())
-					if shouldRetryRequestError(err, &generalRetries, maxRetries) {
+					if shouldRetryResponsesWSCloseError(err, &generalRetries, &rateLimitRetries, maxRetries, maxRateLimitRetries) {
+						if shouldRetryErr.status == http.StatusTooManyRequests {
+							h.unbindResponsesSessionAffinity(affinityKey, account, shouldRetryErr.status)
+							lastStatusCode = shouldRetryErr.status
+							lastBody = []byte(shouldRetryErr.reason)
+						}
 						continue accountAttempts
 					}
 					statusCode := shouldRetryErr.status
@@ -710,7 +723,12 @@ accountAttempts:
 				} else {
 					retryExclusions.MarkHard(account.ID())
 				}
-				if shouldRetryRequestError(err, &generalRetries, maxRetries) {
+				if shouldRetryResponsesWSCloseError(err, &generalRetries, &rateLimitRetries, maxRetries, maxRateLimitRetries) {
+					if shouldRetryErr.status == http.StatusTooManyRequests {
+						h.unbindResponsesSessionAffinity(affinityKey, account, shouldRetryErr.status)
+						lastStatusCode = shouldRetryErr.status
+						lastBody = []byte(shouldRetryErr.reason)
+					}
 					continue
 				}
 				statusCode := shouldRetryErr.status
@@ -1054,6 +1072,9 @@ func isOpenAIResponsesWebSocketUnsupported(status int, body []byte) bool {
 	if status != http.StatusBadRequest {
 		return false
 	}
+	if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(body, "error.code").String()), "empty_request_body") {
+		return true
+	}
 	message := strings.ToLower(strings.TrimSpace(string(body)))
 	if message == "" {
 		return true
@@ -1154,6 +1175,21 @@ func newResponsesWSCloseErrorWithStatus(code int, reason string, err error, stat
 		closeErr.upstreamCloseCode = upstreamCloseCode[0]
 	}
 	return closeErr
+}
+
+func responsesWSCloseErrorStatus(err error) int {
+	var closeErr *responsesWSCloseError
+	if errors.As(err, &closeErr) {
+		return closeErr.status
+	}
+	return 0
+}
+
+func shouldRetryResponsesWSCloseError(err error, generalRetries, rateLimitRetries *int, maxGeneralRetries, maxRateLimitRetries int) bool {
+	if responsesWSCloseErrorStatus(err) == http.StatusTooManyRequests {
+		return shouldRetryHTTPStatus(http.StatusTooManyRequests, nil, rateLimitRetries, 0, maxRateLimitRetries)
+	}
+	return shouldRetryRequestError(err, generalRetries, maxGeneralRetries)
 }
 
 func responsesWebSocketCloseCode(err error) int {

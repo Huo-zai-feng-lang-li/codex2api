@@ -71,6 +71,7 @@ main.go (入口)
 - [ ] `alreadyActivated == true` 时是否安全放行而未触发 409？
 - [ ] **【硬性门槛】是否已编写发包机器人模拟真实链路（首包 -> 续问包），并实测获得两连包 HTTP 200 OK？**
 - [ ] `go test ./... -count=1` 与 `go vet ./...` 是否全过？
+- [ ] 代码修复好了之后，如果想要更新服务和exe，直接执行这个脚本就可以build-and-restart.bat
 
 ---
 

@@ -140,6 +140,7 @@ func (h *Handler) Messages(c *gin.Context) {
 	var lastStatusCode int
 	var lastBody []byte
 	retryExclusions := newRetryAccountExclusions()
+	accountPoolRecheckDone := false
 
 	var lastUpstreamCancel context.CancelFunc
 	var activeEnd func()
@@ -159,6 +160,13 @@ func (h *Handler) Messages(c *gin.Context) {
 		}
 		account, stickyProxyURL := h.nextRetryAccountForSession(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter)
 		if account == nil {
+			if !accountPoolRecheckDone && rateLimitRetries > 0 {
+				accountPoolRecheckDone = true
+				if h.recheckAccountsAfterExhaustion(c.Request.Context(), effectiveModel) {
+					retryExclusions = newRetryAccountExclusions()
+					continue
+				}
+			}
 			if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
 				sendAnthropicError(c, http.StatusTooManyRequests, "rate_limit_error", "All accounts rate limited")
 				return

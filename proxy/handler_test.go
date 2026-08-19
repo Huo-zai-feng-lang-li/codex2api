@@ -2501,14 +2501,92 @@ func TestClassify429Header7dUsesAccountCooldown(t *testing.T) {
 	}
 }
 
+func TestClassify429DailyLimitExceededAlignsToNextMidnight(t *testing.T) {
+	// 设定特定测试时间：2026-08-19 14:30:00
+	loc := time.Local
+	testNow := time.Date(2026, 8, 19, 14, 30, 0, 0, loc)
+	body := []byte(`{"error":{"message":"daily usage limit exceeded","type":"daily_limit","code":"daily_limit_exceeded"}}`)
+	
+	decision := classify429RateLimit(&auth.Account{PlanType: "team"}, body, nil, testNow, "gpt-5.4")
+	if decision.Scope != rateLimitScopeAccount || decision.Reason != "rate_limited" {
+		t.Fatalf("decision = %#v, want rate_limited account cooldown", decision)
+	}
+	expectedMidnight := time.Date(2026, 8, 20, 0, 0, 5, 0, loc)
+	if !decision.ResetAt.Equal(expectedMidnight) {
+		t.Fatalf("decision.ResetAt = %v, want %v", decision.ResetAt, expectedMidnight)
+	}
+	expectedDuration := 9*time.Hour + 30*time.Minute + 5*time.Second
+	if decision.Cooldown != expectedDuration {
+		t.Fatalf("decision.Cooldown = %v, want %v", decision.Cooldown, expectedDuration)
+	}
+}
+
+func TestClassify429WeeklyLimitExceededUses7Days(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	body := []byte(`{"error":{"message":"weekly limit exceeded for account"}}`)
+	
+	decision := classify429RateLimit(&auth.Account{PlanType: "team"}, body, nil, now, "gpt-5.4")
+	if decision.Scope != rateLimitScopeAccount || decision.Reason != "rate_limited_7d" {
+		t.Fatalf("decision = %#v, want rate_limited_7d", decision)
+	}
+	if decision.Cooldown != 7*24*time.Hour {
+		t.Fatalf("decision.Cooldown = %v, want 7 days", decision.Cooldown)
+	}
+}
+
+func TestClassify429InsufficientQuotaUsesPaymentRequired(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	body := []byte(`{"error":{"message":"insufficient_user_quota: 额度用完了，请充值"}}`)
+	
+	decision := classify429RateLimit(&auth.Account{PlanType: "team"}, body, nil, now, "gpt-5.4")
+	if decision.Scope != rateLimitScopeAccount || decision.Reason != "payment_required" {
+		t.Fatalf("decision = %#v, want payment_required", decision)
+	}
+	if decision.Cooldown != 24*time.Hour {
+		t.Fatalf("decision.Cooldown = %v, want 24 hours", decision.Cooldown)
+	}
+}
+
+func TestClassify429RPMUses1Minute(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	body := []byte(`{"error":{"message":"Requests per minute limit exceeded (RPM 60)"}}`)
+	
+	decision := classify429RateLimit(&auth.Account{PlanType: "team"}, body, nil, now, "gpt-5.4")
+	if decision.Scope != rateLimitScopeAccount || decision.Reason != "rate_limited" {
+		t.Fatalf("decision = %#v, want rate_limited", decision)
+	}
+	if decision.Cooldown != 1*time.Minute {
+		t.Fatalf("decision.Cooldown = %v, want 1 minute", decision.Cooldown)
+	}
+}
+
+func TestApplyUpstreamAccountFailure403DailyLimitExceededAlignsToNextMidnight(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: 88, AccessToken: "at", Status: auth.StatusReady}
+	body := []byte(`{"error":"上游返回 403: daily usage limit exceeded"}`)
+
+	if !ApplyUpstreamAccountFailure(store, account, http.StatusForbidden, body, nil, "gpt-5.4") {
+		t.Fatal("ApplyUpstreamAccountFailure() = false, want true")
+	}
+	reason, until := account.GetCooldownSnapshot()
+	if reason != "rate_limited" {
+		t.Fatalf("CooldownReason = %q, want rate_limited", reason)
+	}
+	now := time.Now()
+	expectedMidnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 5, 0, now.Location())
+	if until.Sub(expectedMidnight).Abs() > 2*time.Second {
+		t.Fatalf("until = %v, want approx %v", until, expectedMidnight)
+	}
+}
+
 func TestShouldRetryHTTPStatusSplitsRateLimitBudget(t *testing.T) {
 	generalRetries := 0
 	rateLimitRetries := 0
 	if !shouldRetryHTTPStatus(http.StatusTooManyRequests, &generalRetries, &rateLimitRetries, 2, 1) {
 		t.Fatal("first 429 should consume rate-limit retry budget")
 	}
-	if shouldRetryHTTPStatus(http.StatusTooManyRequests, &generalRetries, &rateLimitRetries, 2, 1) {
-		t.Fatal("second 429 should be blocked by rate-limit retry budget")
+	if !shouldRetryHTTPStatus(http.StatusTooManyRequests, &generalRetries, &rateLimitRetries, 2, 1) {
+		t.Fatal("second 429 should continue until account selection is exhausted")
 	}
 	if !shouldRetryHTTPStatus(http.StatusServiceUnavailable, &generalRetries, &rateLimitRetries, 2, 1) {
 		t.Fatal("503 should still use general retry budget")
@@ -2522,8 +2600,8 @@ func TestShouldRetryHTTPStatusSplitsRateLimitBudget(t *testing.T) {
 	if !shouldRetryHTTPStatus(http.StatusPaymentRequired, &generalRetries, &rateLimitRetries, 2, 1) {
 		t.Fatal("402 account-level upstream failure should retry without exposing provider quota to client")
 	}
-	if generalRetries != 2 || rateLimitRetries != 1 {
-		t.Fatalf("budgets = general %d rate %d, want 2/1", generalRetries, rateLimitRetries)
+	if generalRetries != 2 || rateLimitRetries != 2 {
+		t.Fatalf("budgets = general %d rate %d, want 2/2", generalRetries, rateLimitRetries)
 	}
 }
 

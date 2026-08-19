@@ -799,15 +799,6 @@ export default function Settings() {
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, max_retries: parseInt(e.target.value) || 0 }))}
                   />
                 </SettingField>
-                <SettingField label={t('settings.maxRateLimitRetries')} description={t('settings.maxRateLimitRetriesRange')}>
-                  <Input
-                    type="number"
-                    min={0}
-                    max={10}
-                    value={settingsForm.max_rate_limit_retries}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, max_rate_limit_retries: parseInt(e.target.value) || 0 }))}
-                  />
-                </SettingField>
                 <SettingField label={t('settings.dispatchQueueLimit')} description={t('settings.dispatchQueueLimitRange')}>
                   <Input
                     type="number"

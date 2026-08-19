@@ -433,6 +433,12 @@ func (h *Handler) GetStats(c *gin.Context) {
 		switch acc.RuntimeStatus() {
 		case "rate_limited", "usage_exhausted", "payment_required":
 			rateLimitedCount++
+			continue
+		case "unauthorized", "error":
+			continue
+		}
+		if atomic.LoadInt32(&acc.Disabled) == 0 && len(acc.ActiveModelCooldowns()) > 0 {
+			rateLimitedCount++
 		}
 	}
 	errCount := 0

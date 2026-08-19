@@ -255,6 +255,7 @@ func TestOpenAIResponsesWebSocketUnsupportedClassification(t *testing.T) {
 		{name: "upgrade required", status: http.StatusUpgradeRequired, want: true},
 		{name: "not found", status: http.StatusNotFound, want: true},
 		{name: "blank bad request", status: http.StatusBadRequest, body: " \n\t", want: true},
+		{name: "empty request body", status: http.StatusBadRequest, body: `{"error":{"code":"empty_request_body","type":"invalid_request_error","message":"Request body is empty."}}`, want: true},
 		{name: "explicit unsupported", status: http.StatusBadRequest, body: `{"error":{"message":"websocket is not supported"}}`, want: true},
 		{name: "valid bad request", status: http.StatusBadRequest, body: `{"error":{"message":"invalid previous_response_id"}}`, want: false},
 		{name: "server failure", status: http.StatusBadGateway, body: "websocket unavailable", want: false},

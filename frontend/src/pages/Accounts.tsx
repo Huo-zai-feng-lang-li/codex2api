@@ -28,7 +28,11 @@ import type {
 import { getErrorMessage } from "../utils/error";
 import { formatCompactEmail } from "../lib/utils";
 import { formatRelativeTime, formatBeijingTime } from "../utils/time";
-import { countNormalAccounts, isNormalAccount } from "./accountAvailability";
+import {
+  countNormalAccounts,
+  isModelLimitedAccount,
+  isNormalAccount,
+} from "./accountAvailability";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -979,7 +983,18 @@ export default function Accounts() {
         account.status !== "unauthorized" &&
         account.status !== "error" &&
         account.enabled !== false &&
-        (isRateLimitedAccount(account) || isPaymentRequiredAccount(account)),
+        (isRateLimitedAccount(account) ||
+          isPaymentRequiredAccount(account) ||
+          isModelLimitedAccount(account)),
+    ).length;
+    const modelLimitedAccounts = accounts.filter(
+      (account) =>
+        account.status !== "unauthorized" &&
+        account.status !== "error" &&
+        account.enabled !== false &&
+        !isRateLimitedAccount(account) &&
+        !isPaymentRequiredAccount(account) &&
+        isModelLimitedAccount(account),
     ).length;
     const normalAccounts = countNormalAccounts(accounts);
     return {
@@ -989,6 +1004,7 @@ export default function Accounts() {
       rateLimited5hAccounts: rateLimitedWindowStats.fiveHour,
       rateLimited7dAccounts: rateLimitedWindowStats.sevenDay,
       paymentRequiredAccounts,
+      modelLimitedAccounts,
       abnormalAccounts,
       bannedAccounts,
       errorAccounts,
@@ -1014,6 +1030,7 @@ export default function Accounts() {
     rateLimited5hAccounts,
     rateLimited7dAccounts,
     paymentRequiredAccounts,
+    modelLimitedAccounts,
     abnormalAccounts,
     bannedAccounts,
     errorAccounts,
@@ -1049,7 +1066,11 @@ export default function Accounts() {
             account.enabled === false
           )
             return false;
-          if (!isRateLimitedAccount(account) && !isPaymentRequiredAccount(account))
+          if (
+            !isRateLimitedAccount(account) &&
+            !isPaymentRequiredAccount(account) &&
+            !isModelLimitedAccount(account)
+          )
             return false;
           break;
         case "abnormal":
@@ -2846,6 +2867,7 @@ export default function Accounts() {
                 { label: "5h", value: rateLimited5hAccounts },
                 { label: "7d", value: rateLimited7dAccounts },
                 { label: t("status.payment_required"), value: paymentRequiredAccounts },
+                { label: t("accounts.modelLimitedShort"), value: modelLimitedAccounts },
               ]}
             />
             <CompactStat

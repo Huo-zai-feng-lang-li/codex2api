@@ -47,6 +47,17 @@ test('legacy responses still exclude active model cooldowns', async () => {
   assert.equal(isNormalAccount(account), false)
 })
 
+test('active model cooldowns belong to the limited account bucket', async () => {
+  const { isModelLimitedAccount } = await loadModule()
+
+  assert.equal(isModelLimitedAccount({
+    model_cooldowns: [{ model: 'gpt-5.6-sol', reason: 'rate_limited_model', remaining_seconds: 60 }],
+  }), true)
+  assert.equal(isModelLimitedAccount({
+    model_cooldowns: [{ model: 'gpt-5.6-sol', reason: 'rate_limited_model', remaining_seconds: 0, reset_at: '2020-01-01T00:00:00Z' }],
+  }), false)
+})
+
 test('normal count and normal rows share exactly one predicate', async () => {
   const { countNormalAccounts, isNormalAccount } = await loadModule()
   const accounts = [

@@ -72,7 +72,7 @@ func (h *Handler) unbindResponsesSessionAffinity(key string, account *auth.Accou
 	if h == nil || h.store == nil || account == nil {
 		return
 	}
-	if statusCode != http.StatusUnauthorized && statusCode != http.StatusForbidden && atomic.LoadInt32(&account.Disabled) == 0 {
+	if statusCode != http.StatusUnauthorized && statusCode != http.StatusForbidden && statusCode != http.StatusTooManyRequests && atomic.LoadInt32(&account.Disabled) == 0 {
 		return
 	}
 	h.store.UnbindSessionAffinity(key, account.ID())
@@ -1216,7 +1216,7 @@ func shouldRetryHTTPStatus(statusCode int, generalRetries *int, rateLimitRetries
 		return true
 	}
 	if statusCode == http.StatusTooManyRequests {
-		if rateLimitRetries == nil || *rateLimitRetries >= maxRateLimitRetries {
+		if rateLimitRetries == nil {
 			return false
 		}
 		*rateLimitRetries++
@@ -1411,6 +1411,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	var lastBody []byte
 	var lastRequestErr error
 	retryExclusions := newRetryAccountExclusions()
+	accountPoolRecheckDone := false
 	invalidEncryptedContentRetried := false
 	continuationFallbackRetried := false
 	var continuationFallbackLease *responsesFallbackLease
@@ -1475,7 +1476,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		pick := h.nextRetryAccountPickForSession(c.Request.Context(), selectionAffinityKey, apiKeyID, retryExclusions, accountFilter)
 		account, stickyProxyURL := pick.account, pick.proxyURL
 		if account == nil {
-			if continuationOwnerBound {
+			if continuationOwnerBound && rateLimitRetries == 0 {
 				switch activateContinuationFallback("response_owner_unavailable") {
 				case continuationFallbackActivated:
 					continue
@@ -1499,6 +1500,13 @@ func (h *Handler) Responses(c *gin.Context) {
 					},
 				})
 				return
+			}
+			if !accountPoolRecheckDone && rateLimitRetries > 0 {
+				accountPoolRecheckDone = true
+				if h.recheckAccountsAfterExhaustion(c.Request.Context(), effectiveModel) {
+					retryExclusions = newRetryAccountExclusions()
+					continue
+				}
 			}
 			if lastStatusCode > 0 && len(lastBody) > 0 {
 				h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
@@ -2603,6 +2611,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	var lastStatusCode int
 	var lastBody []byte
 	excludeAccounts := make(map[int64]bool)
+	accountPoolRecheckDone := false
 	invalidEncryptedContentRetried := false
 	var activeEnd func()
 	defer func() {
@@ -2620,6 +2629,13 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		if account == nil {
 			account, stickyProxyURL = h.store.WaitForSessionAvailableWithFilter(c.Request.Context(), affinityKey, 30*time.Second, apiKeyID, excludeAccounts, accountFilter)
 			if account == nil {
+				if !accountPoolRecheckDone && rateLimitRetries > 0 {
+					accountPoolRecheckDone = true
+					if h.recheckAccountsAfterExhaustion(c.Request.Context(), effectiveModel) {
+						excludeAccounts = make(map[int64]bool)
+						continue
+					}
+				}
 				if lastStatusCode > 0 && len(lastBody) > 0 {
 					h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
 					return
@@ -3020,6 +3036,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	var lastStatusCode int
 	var lastBody []byte
 	retryExclusions := newRetryAccountExclusions()
+	accountPoolRecheckDone := false
 
 	// 上游 ctx 生命周期：每次 attempt 开始前用新的 drainable ctx 替换，
 	// defer 兜底确保函数退出时上游被释放。
@@ -3041,6 +3058,13 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		}
 		account, stickyProxyURL := h.nextRetryAccountForSession(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter)
 		if account == nil {
+			if !accountPoolRecheckDone && rateLimitRetries > 0 {
+				accountPoolRecheckDone = true
+				if h.recheckAccountsAfterExhaustion(c.Request.Context(), effectiveModel) {
+					retryExclusions = newRetryAccountExclusions()
+					continue
+				}
+			}
 			if lastStatusCode > 0 && len(lastBody) > 0 {
 				h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
 				return
@@ -3732,6 +3756,124 @@ func responseHasCodex5hHeaders(resp *http.Response) bool {
 	return secondary.valid && codexWindowType(secondary.windowMin) == codexRateLimitWindow5h
 }
 
+// timeUntilNextMidnight 计算距离下一个午夜 00:00:05 的时长（多加 5 秒作为时钟冗余缓冲）
+func timeUntilNextMidnight(now time.Time) (time.Time, time.Duration) {
+	nextMidnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 5, 0, now.Location())
+	d := nextMidnight.Sub(now)
+	if d <= 0 {
+		d = 5 * time.Minute
+		nextMidnight = now.Add(d)
+	}
+	return nextMidnight, d
+}
+
+// extractAllErrorText 递归提取响应体中的各类错误文案
+func extractAllErrorText(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for _, key := range []string{"error.message", "error.code", "error.type", "message", "error", "detail", "details"} {
+		if str := gjson.GetBytes(body, key).String(); str != "" {
+			sb.WriteString(str)
+			sb.WriteString(" ")
+		}
+	}
+	if sb.Len() == 0 {
+		return string(body)
+	}
+	return sb.String()
+}
+
+// isDailyLimitExceeded 检查响应体是否属于日额度耗尽
+func isDailyLimitExceeded(body []byte) bool {
+	msg := strings.ToLower(extractAllErrorText(body))
+	if msg == "" {
+		return false
+	}
+	return strings.Contains(msg, "daily") ||
+		strings.Contains(msg, "每日") ||
+		strings.Contains(msg, "日额度") ||
+		strings.Contains(msg, "今日用量") ||
+		strings.Contains(msg, "今日配额") ||
+		strings.Contains(msg, "今日额度") ||
+		strings.Contains(msg, "当天额度")
+}
+
+// matchGenericUpstreamRateLimit 解析各类第三方中转、聚合网关等非标准 Codex 报错
+func matchGenericUpstreamRateLimit(body []byte, now time.Time) (codex429Decision, bool) {
+	if len(body) == 0 {
+		return codex429Decision{}, false
+	}
+
+	msg := strings.ToLower(extractAllErrorText(body))
+	if msg == "" {
+		return codex429Decision{}, false
+	}
+
+	// 1. 日配额耗尽 (Daily Limit)
+	if isDailyLimitExceeded(body) {
+		resetAt, cooldown := timeUntilNextMidnight(now)
+		return codex429Decision{
+			Scope:    rateLimitScopeAccount,
+			Reason:   "rate_limited",
+			ResetAt:  resetAt,
+			Cooldown: cooldown,
+		}, true
+	}
+
+	// 2. 周配额耗尽 (Weekly Limit)
+	if strings.Contains(msg, "weekly") ||
+		strings.Contains(msg, "每周") ||
+		strings.Contains(msg, "周额度") ||
+		strings.Contains(msg, "本周配额") ||
+		strings.Contains(msg, "本周额度") {
+		cooldown := 7 * 24 * time.Hour
+		resetAt := now.Add(cooldown)
+		return codex429Decision{
+			Scope:    rateLimitScopeAccount,
+			Reason:   "rate_limited_7d",
+			ResetAt:  resetAt,
+			Cooldown: cooldown,
+		}, true
+	}
+
+	// 3. 欠费/额度彻底耗尽 (Insufficient Quota)
+	if strings.Contains(msg, "insufficient") ||
+		(strings.Contains(msg, "quota") && strings.Contains(msg, "exhausted")) ||
+		strings.Contains(msg, "额度用完") ||
+		strings.Contains(msg, "余额不足") ||
+		strings.Contains(msg, "预扣费额度失败") ||
+		strings.Contains(msg, "upgrade your plan or add paid balance") {
+		cooldown := 24 * time.Hour
+		resetAt := now.Add(cooldown)
+		return codex429Decision{
+			Scope:    rateLimitScopeAccount,
+			Reason:   "payment_required",
+			ResetAt:  resetAt,
+			Cooldown: cooldown,
+		}, true
+	}
+
+	// 4. 短时频控 (RPM / TPM / Per Minute)
+	if strings.Contains(msg, "requests per min") ||
+		strings.Contains(msg, "rpm") ||
+		strings.Contains(msg, "tpm") ||
+		strings.Contains(msg, "rate limit reached for requests") ||
+		strings.Contains(msg, "too many requests per") {
+		cooldown := 1 * time.Minute
+		resetAt := now.Add(cooldown)
+		return codex429Decision{
+			Scope:    rateLimitScopeAccount,
+			Reason:   "rate_limited",
+			ResetAt:  resetAt,
+			Cooldown: cooldown,
+		}, true
+	}
+
+	return codex429Decision{}, false
+}
+
 func classify429RateLimit(account *auth.Account, body []byte, resp *http.Response, now time.Time, model string) codex429Decision {
 	if resetAt, ok := parseUsageLimitResetAt(body, now); ok {
 		reason := "usage_limit"
@@ -3758,6 +3900,11 @@ func classify429RateLimit(account *auth.Account, body []byte, resp *http.Respons
 			resetAt = now.Add(7 * 24 * time.Hour)
 		}
 		return codex429Decision{Scope: rateLimitScopeAccount, Reason: "rate_limited_7d", ResetAt: resetAt, Cooldown: resetAt.Sub(now)}
+	}
+
+	// 针对第三方中转、聚合网关等非标准 Codex header 的通用语义分类
+	if decision, matched := matchGenericUpstreamRateLimit(body, now); matched {
+		return decision
 	}
 
 	model = strings.TrimSpace(model)
@@ -3825,6 +3972,11 @@ func ApplyUpstreamAccountFailure(store *auth.Store, account *auth.Account, statu
 	case http.StatusPaymentRequired, http.StatusForbidden:
 		if IsDeactivatedWorkspaceError(body) {
 			store.MarkError(account, upstreamAccountErrorMessage(statusCode, body))
+			return true
+		}
+		if isDailyLimitExceeded(body) {
+			_, cooldown := timeUntilNextMidnight(time.Now())
+			store.MarkCooldownWithError(account, cooldown, "rate_limited", upstreamAccountErrorMessage(statusCode, body))
 			return true
 		}
 		store.MarkCooldownWithError(account, 6*time.Hour, "payment_required", upstreamAccountErrorMessage(statusCode, body))
@@ -3895,7 +4047,12 @@ func compute429Cooldown(account *auth.Account, body []byte, resp *http.Response)
 		return resetDuration
 	}
 
-	// 2. 没有精确重置时间，根据套餐类型 + 用量窗口推断
+	// 2. 通用第三方上游语义匹配
+	if decision, matched := matchGenericUpstreamRateLimit(body, time.Now()); matched {
+		return decision.Cooldown
+	}
+
+	// 3. 没有精确重置时间，根据套餐类型 + 用量窗口推断
 	planType := auth.NormalizePlanType(account.GetPlanType())
 
 	switch planType {

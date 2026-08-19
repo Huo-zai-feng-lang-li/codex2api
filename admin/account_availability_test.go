@@ -25,14 +25,36 @@ func TestAccountListAvailabilityMatchesDashboardStats(t *testing.T) {
 	ctx := context.Background()
 	readyID := insertAvailabilityTestAccount(t, ctx, db, "ready")
 	limitedID := insertAvailabilityTestAccount(t, ctx, db, "limited")
+	modelLimitedID := insertAvailabilityTestAccount(t, ctx, db, "model-limited")
+	overlapLimitedID := insertAvailabilityTestAccount(t, ctx, db, "overlap-limited")
+	abnormalModelLimitedID := insertAvailabilityTestAccount(t, ctx, db, "abnormal-model-limited")
 	if err := db.SetCooldown(ctx, limitedID, "rate_limited", time.Now().Add(-time.Minute)); err != nil {
 		t.Fatalf("SetCooldown() error = %v", err)
+	}
+	if err := db.SetCooldown(ctx, overlapLimitedID, "rate_limited", time.Now().Add(-time.Minute)); err != nil {
+		t.Fatalf("SetCooldown(overlap) error = %v", err)
 	}
 
 	store := auth.NewStore(db, cache.NewMemory(1), nil)
 	if err := store.Init(ctx); err != nil {
 		t.Fatalf("Store.Init() error = %v", err)
 	}
+	modelLimited := store.FindByID(modelLimitedID)
+	if modelLimited == nil {
+		t.Fatalf("model-limited account %d not found in store", modelLimitedID)
+	}
+	store.MarkModelCooldown(modelLimited, "gpt-5.6-sol", time.Minute, "rate_limited_model")
+	overlapLimited := store.FindByID(overlapLimitedID)
+	if overlapLimited == nil {
+		t.Fatalf("overlap-limited account %d not found in store", overlapLimitedID)
+	}
+	store.MarkModelCooldown(overlapLimited, "gpt-5.6-sol", time.Minute, "rate_limited_model")
+	abnormalModelLimited := store.FindByID(abnormalModelLimitedID)
+	if abnormalModelLimited == nil {
+		t.Fatalf("abnormal-model-limited account %d not found in store", abnormalModelLimitedID)
+	}
+	store.MarkError(abnormalModelLimited, "test error")
+	store.MarkModelCooldown(abnormalModelLimited, "gpt-5.6-sol", time.Minute, "rate_limited_model")
 	handler := NewHandler(store, db, cache.NewMemory(1), nil, "")
 
 	gin.SetMode(gin.TestMode)
@@ -74,13 +96,21 @@ func TestAccountListAvailabilityMatchesDashboardStats(t *testing.T) {
 		t.Fatalf("GetStats status = %d, body = %s", statsRecorder.Code, statsRecorder.Body.String())
 	}
 	var stats struct {
-		Available int `json:"available"`
+		Available   int `json:"available"`
+		RateLimited int `json:"rate_limited"`
+		Error       int `json:"error"`
 	}
 	if err := json.Unmarshal(statsRecorder.Body.Bytes(), &stats); err != nil {
 		t.Fatalf("decode stats: %v", err)
 	}
 	if stats.Available != availableRows {
 		t.Fatalf("stats.available = %d, account rows = %d", stats.Available, availableRows)
+	}
+	if stats.RateLimited != 3 {
+		t.Fatalf("stats.rate_limited = %d, want quota + model + overlapping account once = 3", stats.RateLimited)
+	}
+	if stats.Error != 1 {
+		t.Fatalf("stats.error = %d, want abnormal model-limited account = 1", stats.Error)
 	}
 }
 

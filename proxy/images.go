@@ -1071,6 +1071,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 	var lastStatusCode int
 	var lastBody []byte
 	excludeAccounts := make(map[int64]bool)
+	accountPoolRecheckDone := false
 	var activeEnd func()
 	defer func() {
 		if activeEnd != nil {
@@ -1090,6 +1091,13 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 		if account == nil {
 			account, stickyProxyURL = h.store.WaitForSessionAvailableWithFilter(c.Request.Context(), "", 30*time.Second, apiKeyID, excludeAccounts, imageEligibleCooldownFilter(h, requestModel))
 			if account == nil {
+				if !accountPoolRecheckDone && rateLimitRetries > 0 {
+					accountPoolRecheckDone = true
+					if h.recheckAccountsAfterExhaustion(c.Request.Context(), requestModel, defaultImagesMainModel) {
+						excludeAccounts = make(map[int64]bool)
+						continue
+					}
+				}
 				if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
 					h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
 					return

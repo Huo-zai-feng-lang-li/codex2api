@@ -87,6 +87,24 @@ func maxFirstTokenTimeoutAccountAttempts() int {
 	return 1
 }
 
+func (h *Handler) recheckAccountsAfterExhaustion(ctx context.Context, models ...string) bool {
+	if h == nil || h.store == nil {
+		return false
+	}
+	recovered := h.store.ProbeAllAccounts(ctx)
+	for accountID := range recovered {
+		if account := h.store.FindByID(accountID); account != nil {
+			for _, model := range models {
+				h.store.ClearModelCooldown(account, model)
+			}
+		}
+	}
+	if len(recovered) > 0 {
+		log.Printf("请求账号池耗尽后全量复测成功，恢复账号数=%d", len(recovered))
+	}
+	return len(recovered) > 0
+}
+
 type retryAccountPick struct {
 	account      *auth.Account
 	proxyURL     string

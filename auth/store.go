@@ -1560,6 +1560,17 @@ func (a *Account) TryBeginRecoveryProbe() bool {
 	return true
 }
 
+func (a *Account) tryBeginRecoveryProbeWithCredentials() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.recoveryProbeInFlight || !a.hasRecoveryProbeCredentialLocked() {
+		return false
+	}
+	a.recoveryProbeInFlight = true
+	a.LastRecoveryProbeAt = time.Now()
+	return true
+}
+
 // FinishRecoveryProbe 结束一次恢复探测
 func (a *Account) FinishRecoveryProbe() {
 	a.mu.Lock()
@@ -4949,6 +4960,59 @@ func (s *Store) TriggerUsageProbeAsync() {
 // TriggerRecoveryProbeAsync 异步触发一次封禁账号恢复探测
 func (s *Store) TriggerRecoveryProbeAsync() {
 	_ = s.triggerRecoveryProbeAsync()
+}
+
+// ProbeAllAccounts synchronously runs the configured connection probe once for
+// every account with usable probe credentials and returns successful account IDs.
+func (s *Store) ProbeAllAccounts(ctx context.Context) map[int64]bool {
+	if s == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	s.usageProbeMu.RLock()
+	probeFn := s.recoveryProbe
+	if probeFn == nil {
+		probeFn = s.usageProbe
+	}
+	s.usageProbeMu.RUnlock()
+	if probeFn == nil {
+		return nil
+	}
+
+	successes := make(map[int64]bool)
+	var successesMu sync.Mutex
+	sem := make(chan struct{}, 2)
+	var wg sync.WaitGroup
+	for _, account := range s.Accounts() {
+		if account == nil || !account.tryBeginRecoveryProbeWithCredentials() {
+			continue
+		}
+
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(account *Account) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			defer account.FinishRecoveryProbe()
+
+			probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			if err := probeFn(probeCtx, account); err != nil {
+				log.Printf("[账号 %d] 请求耗尽后的全量复测失败: %v", account.DBID, err)
+				return
+			}
+
+			s.RecordManualTestSuccess(account, 0)
+			successesMu.Lock()
+			successes[account.DBID] = true
+			successesMu.Unlock()
+		}(account)
+	}
+	wg.Wait()
+	return successes
 }
 
 func (s *Store) triggerRecoveryProbeAsync() bool {
