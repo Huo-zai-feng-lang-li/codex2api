@@ -200,7 +200,7 @@ export default function Layout({ children }: PropsWithChildren) {
       if (!buttonRef.current) return
       const rect = buttonRef.current.getBoundingClientRect()
       setPopoverPos({
-        top: rect.top - 8,
+        top: rect.bottom + 8,
         left: rect.left,
       })
     }
@@ -344,7 +344,6 @@ export default function Layout({ children }: PropsWithChildren) {
                         position: 'fixed',
                         top: popoverPos.top,
                         left: popoverPos.left,
-                        transform: 'translateY(-100%)',
                       }}
                       className="z-[9999] w-64 rounded-lg border border-border bg-popover p-3 shadow-xl backdrop-blur-md animate-in fade-in zoom-in-95 duration-150"
                     >
