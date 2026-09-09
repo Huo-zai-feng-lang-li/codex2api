@@ -2413,3 +2413,81 @@ func TestTranslateRequest_NormalizesWebSearchPreviewToolType(t *testing.T) {
 		t.Fatalf("expected unknown field to be stripped; body=%s", got)
 	}
 }
+
+// ==================== OpenAI Responses 模型名映射测试 ====================
+
+func TestResolveOpenAIResponsesModel(t *testing.T) {
+	mappingJSON := `{"gpt-5.2":"free/glm-5.3-flash","gpt-5.4-mini":"free/gemini-3.8-flash"}`
+
+	tests := []struct {
+		name        string
+		model       string
+		mappingJSON string
+		expected    string
+	}{
+		{"命中映射", "gpt-5.2", mappingJSON, "free/glm-5.3-flash"},
+		{"命中另一个映射", "gpt-5.4-mini", mappingJSON, "free/gemini-3.8-flash"},
+		{"未命中映射返回原名", "gpt-5.4", mappingJSON, "gpt-5.4"},
+		{"空配置返回原名", "gpt-5.2", "", "gpt-5.2"},
+		{"空对象配置返回原名", "gpt-5.2", "{}", "gpt-5.2"},
+		{"空模型名返回空", "", mappingJSON, ""},
+		{"无效JSON返回原名", "gpt-5.2", "{invalid", "gpt-5.2"},
+		{"映射值为空字符串返回原名", "gpt-5.2", `{"gpt-5.2":""}`, "gpt-5.2"},
+		{"映射值含空格被trim", "gpt-5.2", `{"gpt-5.2":"  free/glm-5.3-flash  "}`, "free/glm-5.3-flash"},
+		{"模型名含空格被trim", "  gpt-5.2  ", mappingJSON, "free/glm-5.3-flash"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveOpenAIResponsesModel(tt.model, tt.mappingJSON)
+			if got != tt.expected {
+				t.Errorf("resolveOpenAIResponsesModel(%q, %q) = %q, want %q", tt.model, tt.mappingJSON, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestReplaceModelInJSONBody(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     []byte
+		newModel string
+		expected string
+	}{
+		{
+			name:     "正常替换model字段",
+			body:     []byte(`{"model":"gpt-5.2","input":"hello"}`),
+			newModel: "free/glm-5.3-flash",
+			expected: "free/glm-5.3-flash",
+		},
+		{
+			name:     "替换带斜杠的模型名",
+			body:     []byte(`{"model":"gpt-5.4-mini","stream":true}`),
+			newModel: "free/gemini-3.8-flash",
+			expected: "free/gemini-3.8-flash",
+		},
+		{
+			name:     "无model字段原样返回",
+			body:     []byte(`{"input":"hello"}`),
+			newModel: "free/glm-5.3-flash",
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := replaceModelInJSONBody(tt.body, tt.newModel)
+			if tt.expected == "" {
+				// 无 model 字段时应原样返回
+				if string(got) != string(tt.body) {
+					t.Errorf("replaceModelInJSONBody modified body without model field: got %s, want %s", got, tt.body)
+				}
+			} else {
+				model := gjson.GetBytes(got, "model").String()
+				if model != tt.expected {
+					t.Errorf("replaceModelInJSONBody model = %q, want %q; body=%s", model, tt.expected, got)
+				}
+			}
+		})
+	}
+}

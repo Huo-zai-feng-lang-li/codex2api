@@ -50,3 +50,5 @@ new-api/
 .gstack/
 nul
 tmp_*
+/tmp/
+/png/

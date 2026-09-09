@@ -786,6 +786,11 @@ func getHeaderCaseInsensitive(headers http.Header, keys ...string) string {
 	return ""
 }
 
+// sseIdleTimeout 保护流式请求首 token 之后上游突然卡住的情况。
+// 首 token 超时由 firstTokenTimeoutGuard 负责；此处保护流中间
+// 上游不发数据也不断开连接导致请求永久挂起、连接/goroutine 泄漏。
+const sseIdleTimeout = 120 * time.Second
+
 // ReadSSEStream 从上游 SSE 响应读取事件流
 // callback 返回 true 表示继续读取，false 表示停止
 func ReadSSEStream(body io.Reader, callback func(data []byte) bool) error {
@@ -818,9 +823,36 @@ func ReadSSEStream(body io.Reader, callback func(data []byte) bool) error {
 		return callback(data)
 	}
 
+	// idle 超时监控：首 token 之后如果上游超过 sseIdleTimeout 未发送
+	// 任何字节，主动关闭 body 中断阻塞中的 Read，避免请求永久挂起。
+	var lastReadAt atomic.Int64
+	var idleTimedOut atomic.Bool
+	lastReadAt.Store(time.Now().UnixNano())
+	idleStop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-idleStop:
+				return
+			case <-ticker.C:
+				if time.Since(time.Unix(0, lastReadAt.Load())) > sseIdleTimeout {
+					idleTimedOut.Store(true)
+					if closer, ok := body.(io.Closer); ok {
+						_ = closer.Close()
+					}
+					return
+				}
+			}
+		}
+	}()
+	defer close(idleStop)
+
 	for {
 		n, err := body.Read(buf)
 		if n > 0 {
+			lastReadAt.Store(time.Now().UnixNano())
 			lineBuf = append(lineBuf, buf[:n]...)
 
 			// 按行处理
@@ -879,6 +911,9 @@ func ReadSSEStream(body io.Reader, callback func(data []byte) bool) error {
 					return nil
 				}
 				return nil
+			}
+			if idleTimedOut.Load() {
+				return fmt.Errorf("upstream stream idle timeout after %v: %w", sseIdleTimeout, err)
 			}
 			return err
 		}

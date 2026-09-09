@@ -16,7 +16,7 @@ const (
 	MaxProxyURLLength      = 500
 	MaxTokenLength         = 8192
 	MaxHeaderSize          = 16 * 1024 // 16KB
-	AllowedModelPattern    = `^[a-zA-Z0-9._-]+$`
+	AllowedModelPattern    = `^[a-zA-Z0-9._/-]+$`
 	AllowedEndpointPattern = `^[a-zA-Z0-9/_-]+$`
 )
 

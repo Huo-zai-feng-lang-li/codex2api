@@ -4,8 +4,8 @@ cd /d "%~dp0"
 
 if not exist logs mkdir logs
 
-REM Enable Chrome TLS JA3 fingerprint masking and debug logging
-set CODEX_TRANSPORT_MODE=utls
+REM Transport mode defaults to standard or respects .env
+if not defined CODEX_TRANSPORT_MODE set CODEX_TRANSPORT_MODE=standard
 set CODEX_FINGERPRINT_DEBUG=true
 set CODEX_WS_SEND_USER_AGENT=true
 set STABILIZE_DEVICE_PROFILE=true

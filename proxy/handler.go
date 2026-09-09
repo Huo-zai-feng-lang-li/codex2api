@@ -1396,8 +1396,10 @@ func (h *Handler) Responses(c *gin.Context) {
 		return
 	}
 	effectiveModel := effectiveRequestModel(codexBody, model)
-	baseAccountFilter := accountFilterForResponsesModel(effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
-	baseAccountFilter = h.withModelCooldownFilter(effectiveModel, baseAccountFilter)
+	// 模型名映射：Codex GPT 模型名 → 多供应商模型名（仅影响 OpenAI Responses 账号转发，不影响 Codex 原生账号）
+	mappedModel := resolveOpenAIResponsesModel(effectiveModel, h.store.GetModelMapping())
+	baseAccountFilter := accountFilterForResponsesModel(mappedModel, modelIDInList(mappedModel, SupportedModelIDs(c.Request.Context(), h.db)))
+	baseAccountFilter = h.withModelCooldownFilter(mappedModel, baseAccountFilter)
 	accountFilter, continuationOwnerBound := bindOpenAIResponsesContinuationOwner(rawBody, sessionID, baseAccountFilter)
 	continuationOwnerAccountID := openAIResponsesContinuationOwnerAccountID(rawBody, sessionID)
 	selectionAffinityKey := responsesContinuationAffinityKey(rawBody, affinityKey)
@@ -1594,6 +1596,10 @@ func (h *Handler) Responses(c *gin.Context) {
 			if verdict := audit.InspectRequest(); writeUpstreamGuardBlock(c, verdict) {
 				h.store.Release(account)
 				return
+			}
+			// 模型名映射：转发前将 body 中的 Codex 模型名替换为实际的多供应商模型名
+			if mappedModel != effectiveModel {
+				preparedOpenAIResponsesBody = replaceModelInJSONBody(preparedOpenAIResponsesBody, mappedModel)
 			}
 			resp, reqErr := ExecuteOpenAIResponsesRequest(upstreamCtx, account, preparedOpenAIResponsesBody, proxyURL, downstreamHeaders)
 			attemptedUpstream = true
@@ -2600,8 +2606,10 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	if h.enforceAPIKeyLimitsAndReply(c, effectiveModel) {
 		return
 	}
-	accountFilter := accountFilterForResponsesModel(effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
-	accountFilter = h.withModelCooldownFilter(effectiveModel, accountFilter)
+	// 模型名映射：Codex GPT 模型名 → 多供应商模型名（仅影响 OpenAI Responses 账号转发）
+	mappedModel := resolveOpenAIResponsesModel(effectiveModel, h.store.GetModelMapping())
+	accountFilter := accountFilterForResponsesModel(mappedModel, modelIDInList(mappedModel, SupportedModelIDs(c.Request.Context(), h.db)))
+	accountFilter = h.withModelCooldownFilter(mappedModel, accountFilter)
 
 	// 带重试的上游请求
 	maxRetries := h.getMaxRetries()
@@ -2676,6 +2684,10 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			if verdict := audit.InspectRequest(); writeUpstreamGuardBlock(c, verdict) {
 				h.store.Release(account)
 				return
+			}
+			// 模型名映射：转发前将 body 中的 Codex 模型名替换为实际的多供应商模型名
+			if mappedModel != effectiveModel {
+				preparedOpenAIResponsesBody = replaceModelInJSONBody(preparedOpenAIResponsesBody, mappedModel)
 			}
 			resp, reqErr := ExecuteOpenAIResponsesRequest(c.Request.Context(), account, preparedOpenAIResponsesBody, proxyURL, downstreamHeaders)
 			durationMs := int(time.Since(start).Milliseconds())

@@ -213,6 +213,8 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		return newResponsesWSCloseError(websocket.ClosePolicyViolation, apiErr.Message, err)
 	}
 	effectiveModel := effectiveRequestModel(codexBody, model)
+	// 模型名映射：Codex GPT 模型名 → 多供应商模型名（仅影响 OpenAI Responses 账号转发）
+	mappedModel := resolveOpenAIResponsesModel(effectiveModel, h.store.GetModelMapping())
 	if status, msg := h.enforceAPIKeyLimits(c, effectiveModel); status != 0 {
 		errType := api.ErrorTypeRateLimit
 		errCode := api.ErrCodeRateLimitReached
@@ -227,8 +229,8 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		return newResponsesWSCloseError(closeCode, apiErr.Message, apiErr)
 	}
 
-	baseAccountFilter := accountFilterForResponsesModel(effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
-	baseAccountFilter = h.withModelCooldownFilter(effectiveModel, baseAccountFilter)
+	baseAccountFilter := accountFilterForResponsesModel(mappedModel, modelIDInList(mappedModel, SupportedModelIDs(c.Request.Context(), h.db)))
+	baseAccountFilter = h.withModelCooldownFilter(mappedModel, baseAccountFilter)
 	rawBody, accountFilter, continuationReplayed, continuationOwnerBound := prepareOpenAIResponsesWebSocketContinuation(continuationCacheBody, sessionID, baseAccountFilter)
 	selectionAffinityKey := responsesContinuationAffinityKey(rawBody, affinityKey)
 	if continuationReplayed {
@@ -409,8 +411,13 @@ accountAttempts:
 					h.store.Release(account)
 					return newResponsesWSCloseError(websocket.ClosePolicyViolation, upstreamGuardBlockMessage(verdict), nil)
 				}
+				// 模型名映射：转发前将 body 中的 Codex 模型名替换为实际的多供应商模型名
+				wsTransportBody := transport.body
+				if mappedModel != effectiveModel {
+					wsTransportBody = replaceModelInJSONBody(wsTransportBody, mappedModel)
+				}
 
-				resp, reqErr := transport.execute(upstreamCtx, account, transport.body, proxyURL, downstreamHeaders)
+				resp, reqErr := transport.execute(upstreamCtx, account, wsTransportBody, proxyURL, downstreamHeaders)
 				attemptedUpstream = true
 				durationMs := int(time.Since(transportStart).Milliseconds())
 				if reqErr == nil && transport.useWebSocket && resp != nil && resp.StatusCode != http.StatusOK {
@@ -606,7 +613,12 @@ accountAttempts:
 			h.store.Release(account)
 			return newResponsesWSCloseError(websocket.ClosePolicyViolation, upstreamGuardBlockMessage(verdict), nil)
 		}
-		resp, reqErr := ExecuteRequest(upstreamCtx, account, codexBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, !forceHTTPFallback)
+		// 模型名映射：转发前将 body 中的 Codex 模型名替换为实际的多供应商模型名
+		wsCodexBody := codexBody
+		if mappedModel != effectiveModel {
+			wsCodexBody = replaceModelInJSONBody(wsCodexBody, mappedModel)
+		}
+		resp, reqErr := ExecuteRequest(upstreamCtx, account, wsCodexBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, !forceHTTPFallback)
 		attemptedUpstream = true
 		durationMs := int(time.Since(start).Milliseconds())
 

@@ -140,9 +140,13 @@ func TestValidateModelName(t *testing.T) {
 	}{
 		{"gpt-5.4", false},
 		{"gpt-5-codex", false},
-		{"", false},                      // empty is allowed
-		{strings.Repeat("a", 101), true}, // too long
-		{"model<script>", true},          // invalid chars
+		{"free/gemini-3.8-flash", false},  // multi-vendor model with slash
+		{"deepseek/v4-pro", false},         // multi-vendor model with slash
+		{"claude/opus-5", false},           // multi-vendor model with slash
+		{"", false},                         // empty is allowed
+		{strings.Repeat("a", 101), true},   // too long
+		{"model<script>", true},             // invalid chars
+		{"model with space", true},          // space not allowed
 	}
 
 	for _, test := range tests {

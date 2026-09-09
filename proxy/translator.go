@@ -2771,3 +2771,41 @@ func ExtractToolCallsFromOutput(eventData []byte) []ToolCallResult {
 	})
 	return toolCalls
 }
+
+// ==================== OpenAI Responses 模型名映射 ====================
+
+// resolveOpenAIResponsesModel 将 Codex 模型名解析为实际的多供应商模型名。
+// 优先使用 model_mapping 动态配置（JSON: {"gpt-5.2": "free/glm-5.3-flash"}），
+// 未命中或配置无效时返回原名。映射仅影响 OpenAI Responses 账号的转发，
+// 不影响 Codex 原生账号（Refresh Token / Session Token）。
+func resolveOpenAIResponsesModel(model string, mappingJSON string) string {
+	model = strings.TrimSpace(model)
+	if model == "" || mappingJSON == "" || mappingJSON == "{}" {
+		return model
+	}
+	var mapping map[string]string
+	if err := json.Unmarshal([]byte(mappingJSON), &mapping); err != nil {
+		return model
+	}
+	if mapped, ok := mapping[model]; ok {
+		mapped = strings.TrimSpace(mapped)
+		if mapped != "" {
+			return mapped
+		}
+	}
+	return model
+}
+
+// replaceModelInJSONBody 替换 JSON 请求体中的 model 字段为新模型名。
+// 若原 body 中无 model 字段则原样返回。用于在转发到多供应商账号前
+// 将 Codex 模型名替换为实际的上游模型名。
+func replaceModelInJSONBody(body []byte, newModel string) []byte {
+	if !gjson.GetBytes(body, "model").Exists() {
+		return body
+	}
+	replaced, err := sjson.SetBytes(body, "model", newModel)
+	if err != nil {
+		return body
+	}
+	return replaced
+}
