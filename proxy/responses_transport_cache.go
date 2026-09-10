@@ -79,8 +79,9 @@ func (h *Handler) prefersResponsesHTTP(ctx context.Context, endpoint string) boo
 	}
 	// 本地 Antigravity 反代不支持 codex2api 的 OpenAI Responses WebSocket beta 协议
 	// (responses_websockets=2026-02-06)，强制走 HTTP POST 避免 101 握手后协议不匹配卡死
+	// 匹配所有 8045 端口的反代地址(127.0.0.1/localhost/局域网IP)
 	lowerEndpoint := strings.ToLower(endpoint)
-	if strings.Contains(lowerEndpoint, "127.0.0.1:8045") || strings.Contains(lowerEndpoint, "localhost:8045") {
+	if strings.Contains(lowerEndpoint, ":8045") {
 		return true
 	}
 	key := responsesTransportCacheKey(endpoint)
