@@ -122,7 +122,7 @@ del /Q "%NEW_PID_FILE%" 2>nul
 exit /b 1
 
 :stop_exact_pid
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$target=[IO.Path]::GetFullPath((Join-Path $env:CODEX_ROOT 'codex2api.exe')); try { $p=Get-Process -Id ([int]$env:TARGET_PID) -ErrorAction Stop; if([IO.Path]::GetFullPath($p.Path) -ne $target){exit 1}; $p.Kill(); if(-not $p.WaitForExit(5000)){exit 1}; exit 0 } catch { exit 1 }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$target=[IO.Path]::GetFullPath((Join-Path $env:CODEX_ROOT 'codex2api.exe')); try { $p=Get-Process -Id ([int]$env:TARGET_PID) -ErrorAction Stop; if([IO.Path]::GetFullPath($p.Path) -ne $target){exit 1}; & taskkill /F /T /PID $p.Id | Out-Null; $deadline=(Get-Date).AddSeconds(15); do { Start-Sleep -Milliseconds 500; $alive=Get-Process -Id $p.Id -ErrorAction SilentlyContinue } while($alive -and (Get-Date) -lt $deadline); if($alive){exit 1}; exit 0 } catch { exit 1 }"
 exit /b %ERRORLEVEL%
 
 :start_service
