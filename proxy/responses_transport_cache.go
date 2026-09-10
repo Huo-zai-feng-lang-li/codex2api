@@ -77,6 +77,12 @@ func (h *Handler) prefersResponsesHTTP(ctx context.Context, endpoint string) boo
 	if h == nil || h.cache == nil || strings.TrimSpace(endpoint) == "" {
 		return false
 	}
+	// 本地 Antigravity 反代不支持 codex2api 的 OpenAI Responses WebSocket beta 协议
+	// (responses_websockets=2026-02-06)，强制走 HTTP POST 避免 101 握手后协议不匹配卡死
+	lowerEndpoint := strings.ToLower(endpoint)
+	if strings.Contains(lowerEndpoint, "127.0.0.1:8045") || strings.Contains(lowerEndpoint, "localhost:8045") {
+		return true
+	}
 	key := responsesTransportCacheKey(endpoint)
 	cacheCtx, cancel := runtimeCacheContext(ctx)
 	raw, ok, err := h.cache.GetRuntime(cacheCtx, responsesTransportCacheNamespace, key)
