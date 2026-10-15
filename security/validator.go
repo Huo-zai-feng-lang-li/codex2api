@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -43,9 +44,6 @@ var (
 		regexp.MustCompile(`(?i)(OR|AND)\s+['"\d]\s*=\s*['"\d]`),
 	}
 
-	// Model name validation
-	modelNameRegex = regexp.MustCompile(AllowedModelPattern)
-
 	// Endpoint validation
 	endpointRegex = regexp.MustCompile(AllowedEndpointPattern)
 
@@ -65,6 +63,22 @@ var (
 	uuidPattern = regexp.MustCompile(`\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
 )
 
+// isForbiddenModelRune 返回模型名中禁止出现的字符。
+//
+// 空白与控制字符会破坏协议 / JSON 解析；引号、反斜杠、尖括号、反引号可能造成
+// 转义逃逸、XSS 或模板/命令注入。除此之外的字符（例如 + : @ ~ ! # ( ) [ ] { }
+// | ; , ? 等）一律允许，以兼容上游中转站各种"稀奇古怪"的模型 ID。
+func isForbiddenModelRune(r rune) bool {
+	if unicode.IsSpace(r) || unicode.IsControl(r) {
+		return true
+	}
+	switch r {
+	case '"', '\'', '`', '\\', '<', '>':
+		return true
+	}
+	return false
+}
+
 // ValidateModelName validates a model name parameter
 func ValidateModelName(model string) error {
 	if model == "" {
@@ -73,8 +87,10 @@ func ValidateModelName(model string) error {
 	if utf8.RuneCountInString(model) > MaxModelLength {
 		return &ValidationError{Field: "model", Message: "model name too long"}
 	}
-	if !modelNameRegex.MatchString(model) {
-		return &ValidationError{Field: "model", Message: "invalid model name format"}
+	for _, r := range model {
+		if isForbiddenModelRune(r) {
+			return &ValidationError{Field: "model", Message: "invalid model name format"}
+		}
 	}
 	return nil
 }

@@ -140,13 +140,28 @@ func TestValidateModelName(t *testing.T) {
 	}{
 		{"gpt-5.4", false},
 		{"gpt-5-codex", false},
-		{"free/gemini-3.8-flash", false},  // multi-vendor model with slash
-		{"deepseek/v4-pro", false},         // multi-vendor model with slash
-		{"claude/opus-5", false},           // multi-vendor model with slash
-		{"", false},                         // empty is allowed
-		{strings.Repeat("a", 101), true},   // too long
-		{"model<script>", true},             // invalid chars
-		{"model with space", true},          // space not allowed
+		{"free/gemini-3.8-flash", false}, // multi-vendor model with slash
+		{"deepseek/v4-pro", false},        // multi-vendor model with slash
+		{"claude/opus-5", false},          // multi-vendor model with slash
+		{"", false},                        // empty is allowed
+		// 放宽后允许的"稀奇古怪"但安全的模型 ID
+		{"gpt-6.1+preview", false},
+		{"model@20260101", false},
+		{"gpt-6:latest", false},
+		{"foo~bar!#1", false},
+		{"model(name)[v2]", false},
+		{"a&b=c|d;e?f", false},
+		{"gpt_6.1-sol/v2", false},
+		// 仍然拒绝：超长、危险/注入字符、空白、控制字符
+		{strings.Repeat("a", 101), true}, // too long
+		{"model<script>", true},           // angle brackets
+		{"model with space", true},       // space not allowed
+		{"model\tx", true},               // tab not allowed
+		{"model\nx", true},               // newline / control not allowed
+		{"model`x`", true},               // backtick not allowed
+		{"model\\name", true},            // backslash not allowed
+		{"model\"x\"", true},             // double quote not allowed
+		{"model'x'", true},               // single quote not allowed
 	}
 
 	for _, test := range tests {

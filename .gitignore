@@ -52,3 +52,10 @@ nul
 tmp_*
 /tmp/
 /png/
+
+# 数据库 / 备份（内含账号密钥，禁止提交）
+*.db
+*.db-shm
+*.db-wal
+*.db.bak*
+/data/
