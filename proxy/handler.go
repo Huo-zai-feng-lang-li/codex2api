@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -1749,7 +1750,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				log.Printf("OpenAI Responses 上游返回错误 (attempt %d, status %d): %s", attempt+1, resp.StatusCode, upstreamErrorLogBody(errBody))
 				logUpstreamError("/v1/responses", resp.StatusCode, model, account.ID(), errBody)
 				h.logUpstreamCyberPolicy(c, "/v1/responses", model, errBody)
-				decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, effectiveModel)
+				decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, cooldownModelFor(account, effectiveModel, mappedModel))
 				shouldRetry := shouldRetryHTTPStatus(resp.StatusCode, &generalRetries, &rateLimitRetries, maxRetries, maxRateLimitRetries)
 				h.logUsageForRequest(c, &database.UsageLogInput{
 					AccountID:         account.ID(),
@@ -1932,7 +1933,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			if len(terminalFailurePayload) > 0 {
 				outcome = classifyResponseFailedOutcome(terminalFailurePayload)
 				if !wroteAnyBody {
-					decision := h.applyCooldownForModel(account, outcome.logStatusCode, terminalFailurePayload, resp, effectiveModel)
+					decision := h.applyCooldownForModel(account, outcome.logStatusCode, terminalFailurePayload, resp, cooldownModelFor(account, effectiveModel, mappedModel))
 					if kind := upstreamErrorKind(outcome.logStatusCode, terminalFailurePayload, decision); kind != "" {
 						outcome.failureKind = kind
 					}
@@ -2074,7 +2075,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
 				h.unbindResponsesSessionAffinity(affinityKey, account, outcome.logStatusCode)
 			} else if outcome.logStatusCode == http.StatusOK {
-				h.store.ClearModelCooldown(account, effectiveModel)
+				h.store.ClearModelCooldown(account, cooldownModelFor(account, effectiveModel, mappedModel))
 				h.store.ReportRequestSuccessTTFT(account, time.Duration(firstTokenMs)*time.Millisecond, time.Duration(totalDuration)*time.Millisecond)
 			}
 			h.store.Release(account)
@@ -2185,7 +2186,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			log.Printf("上游返回错误 (attempt %d, status %d): %s", attempt+1, resp.StatusCode, upstreamErrorLogBody(errBody))
 			logUpstreamError("/v1/responses", resp.StatusCode, model, account.ID(), errBody)
 			h.logUpstreamCyberPolicy(c, "/v1/responses", model, errBody)
-			decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, effectiveModel)
+			decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, cooldownModelFor(account, effectiveModel, mappedModel))
 			shouldRetry := shouldRetryHTTPStatus(resp.StatusCode, &generalRetries, &rateLimitRetries, maxRetries, maxRateLimitRetries)
 			h.logUsageForRequest(c, &database.UsageLogInput{
 				AccountID:         account.ID(),
@@ -2413,7 +2414,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		if len(terminalFailurePayload) > 0 {
 			outcome = classifyResponseFailedOutcome(terminalFailurePayload)
 			if !wroteAnyBody {
-				decision := h.applyCooldownForModel(account, outcome.logStatusCode, terminalFailurePayload, resp, effectiveModel)
+				decision := h.applyCooldownForModel(account, outcome.logStatusCode, terminalFailurePayload, resp, cooldownModelFor(account, effectiveModel, mappedModel))
 				if kind := upstreamErrorKind(outcome.logStatusCode, terminalFailurePayload, decision); kind != "" {
 					outcome.failureKind = kind
 				}
@@ -2524,7 +2525,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
 			h.unbindResponsesSessionAffinity(affinityKey, account, outcome.logStatusCode)
 		} else if outcome.logStatusCode == http.StatusOK {
-			h.store.ClearModelCooldown(account, effectiveModel)
+			h.store.ClearModelCooldown(account, cooldownModelFor(account, effectiveModel, mappedModel))
 			h.store.ReportRequestSuccessTTFT(account, time.Duration(firstTokenMs)*time.Millisecond, time.Duration(totalDuration)*time.Millisecond)
 		}
 		h.store.Release(account)
@@ -2749,7 +2750,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				log.Printf("OpenAI Responses compact 上游返回错误 (attempt %d, status %d): %s", attempt+1, resp.StatusCode, upstreamErrorLogBody(errBody))
 				logUpstreamError("/v1/responses/compact", resp.StatusCode, model, account.ID(), errBody)
 				h.logUpstreamCyberPolicy(c, "/v1/responses/compact", model, errBody)
-				decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, effectiveModel)
+				decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, cooldownModelFor(account, effectiveModel, mappedModel))
 				shouldRetry := shouldRetryHTTPStatus(resp.StatusCode, &generalRetries, &rateLimitRetries, maxRetries, maxRateLimitRetries)
 				h.logUsageForRequest(c, &database.UsageLogInput{
 					AccountID:         account.ID(),
@@ -2777,7 +2778,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				return
 			}
 
-			h.store.ClearModelCooldown(account, effectiveModel)
+			h.store.ClearModelCooldown(account, cooldownModelFor(account, effectiveModel, mappedModel))
 			respBody, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if verdict := audit.InspectResponseBody(respBody, false); writeUpstreamGuardBlock(c, verdict) {
@@ -2891,7 +2892,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 
 			logUpstreamError("/v1/responses/compact", resp.StatusCode, model, account.ID(), errBody)
 			h.logUpstreamCyberPolicy(c, "/v1/responses/compact", model, errBody)
-			decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, effectiveModel)
+			decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, cooldownModelFor(account, effectiveModel, mappedModel))
 			shouldRetry := shouldRetryHTTPStatus(resp.StatusCode, &generalRetries, &rateLimitRetries, maxRetries, maxRateLimitRetries)
 			h.logUsageForRequest(c, &database.UsageLogInput{
 				AccountID:         account.ID(),
@@ -2921,7 +2922,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 
 		// 成功：直接透传响应体
 		SyncCodexUsageState(h.store, account, resp)
-		h.store.ClearModelCooldown(account, effectiveModel)
+		h.store.ClearModelCooldown(account, cooldownModelFor(account, effectiveModel, mappedModel))
 
 		respBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
@@ -3033,8 +3034,17 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	if h.enforceAPIKeyLimitsAndReply(c, effectiveModel) {
 		return
 	}
-	accountFilter := accountFilterForModel(effectiveModel)
-	accountFilter = h.withModelCooldownFilter(effectiveModel, accountFilter)
+	// 模型名映射：与 /v1/responses 保持一致，Codex 模型名 → 多供应商模型名。
+	// 过滤与转发都必须使用 mappedModel，否则配置了映射的账号会被
+	// SupportsOpenAIResponsesModel 判为不支持而整体排除，导致断流。
+	mappedModel := resolveOpenAIResponsesModel(effectiveModel, h.store.GetModelMapping())
+	// chat/completions 会先翻译为 Responses 格式再发上游，因此同样可以使用
+	// responses_api 类型账号（账号池全是这种类型时，旧过滤器会导致 503）。
+	// allowCodexAccounts 由 mappedModel 是否在内置支持列表决定：
+	// 映射后的第三方模型名（如 free/glm-5.3-flash）不在内置列表中时，
+	// Codex 原生账号不参与调度，避免模型名被改写后打到官方上游 400。
+	accountFilter := accountFilterForResponsesModel(mappedModel, modelIDInList(mappedModel, SupportedModelIDs(c.Request.Context(), h.db)))
+	accountFilter = h.withModelCooldownFilter(mappedModel, accountFilter)
 
 	sessionID := ResolveSessionID(c.Request.Header, codexBody)
 	apiKeyID := requestAPIKeyID(c)
@@ -3130,7 +3140,13 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			h.store.Release(account)
 			return
 		}
-		resp, reqErr := ExecuteRequest(upstreamCtx, account, codexBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, useWebsocket)
+		// 模型名映射：仅对 responses_api 账号替换模型名。
+		// Codex 原生账号必须保留原模型名，否则官方上游会因模型名未知返回 400。
+		forwardBody := codexBody
+		if account.IsOpenAIResponsesAPI() && mappedModel != effectiveModel {
+			forwardBody = replaceModelInJSONBody(codexBody, mappedModel)
+		}
+		resp, reqErr := ExecuteRequest(upstreamCtx, account, forwardBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, useWebsocket)
 		durationMs := int(time.Since(start).Milliseconds())
 
 		if reqErr != nil {
@@ -3188,7 +3204,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			log.Printf("上游返回错误 (attempt %d, status %d): %s", attempt+1, resp.StatusCode, upstreamErrorLogBody(errBody))
 			logUpstreamError("/v1/chat/completions", resp.StatusCode, model, account.ID(), errBody)
 			h.logUpstreamCyberPolicy(c, "/v1/chat/completions", model, errBody)
-			decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, effectiveModel)
+			decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, cooldownModelFor(account, effectiveModel, mappedModel))
 			shouldRetry := shouldRetryHTTPStatus(resp.StatusCode, &generalRetries, &rateLimitRetries, maxRetries, maxRateLimitRetries)
 			h.logUsageForRequest(c, &database.UsageLogInput{
 				AccountID:         account.ID(),
@@ -3504,7 +3520,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
 			h.store.UnbindSessionAffinity(affinityKey, account.ID())
 		} else if outcome.logStatusCode == http.StatusOK {
-			h.store.ClearModelCooldown(account, effectiveModel)
+			h.store.ClearModelCooldown(account, cooldownModelFor(account, effectiveModel, mappedModel))
 			h.store.ReportRequestSuccessTTFT(account, time.Duration(firstTokenMs)*time.Millisecond, time.Duration(totalDuration)*time.Millisecond)
 		}
 		h.store.Release(account)
@@ -3582,6 +3598,31 @@ func (h *Handler) handleCompactResponse(c *gin.Context, body io.Reader, model, c
 // ==================== 通用辅助 ====================
 
 // parseRetryAfter 解析上游 429 响应中的重试时间（参考 CLIProxyAPI codex_executor.go:689-708）
+// parseRetryAfterHeader 解析上游 HTTP 响应头中的 Retry-After。
+// 支持两种格式：秒数（如 "120"）和 HTTP 日期（如 "Wed, 21 Oct 2026 07:28:00 GMT"）。
+// 未设置或无法解析时返回 0，调用方应忽略。
+func parseRetryAfterHeader(resp *http.Response) time.Duration {
+	if resp == nil {
+		return 0
+	}
+	raw := strings.TrimSpace(resp.Header.Get("Retry-After"))
+	if raw == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(raw); err == nil {
+		if secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
+		return 0
+	}
+	if t, err := http.ParseTime(raw); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
+}
+
 func parseRetryAfter(body []byte) time.Duration {
 	if len(body) == 0 {
 		return 2 * time.Minute
@@ -3812,7 +3853,9 @@ func isDailyLimitExceeded(body []byte) bool {
 		strings.Contains(msg, "当天额度")
 }
 
-// matchGenericUpstreamRateLimit 解析各类第三方中转、聚合网关等非标准 Codex 报错
+// matchGenericUpstreamRateLimit 解析各类第三方中转、聚合网关等非标准 Codex 报错。
+// 命中「日配额/周配额/欠费」等强语义错误时返回完整决策；
+// 短时频控（RPM/TPM）不在此处理，交由 classify429RateLimit 在域名规则之后判断。
 func matchGenericUpstreamRateLimit(body []byte, now time.Time) (codex429Decision, bool) {
 	if len(body) == 0 {
 		return codex429Decision{}, false
@@ -3867,22 +3910,33 @@ func matchGenericUpstreamRateLimit(body []byte, now time.Time) (codex429Decision
 		}, true
 	}
 
-	// 4. 短时频控 (RPM / TPM / Per Minute)
+	return codex429Decision{}, false
+}
+
+// matchGenericBurstRateLimit 只处理「短时频控」（RPM / TPM / Per Minute）这一类通用兜底。
+// 单独抽出是为了让上游域名级冷却规则能优先于它生效：
+// 用户在设置里配了 agnes-ai.cn = 120s，就应该用 120s 而不是这里的固定 1 分钟。
+func matchGenericBurstRateLimit(body []byte, now time.Time) (codex429Decision, bool) {
+	if len(body) == 0 {
+		return codex429Decision{}, false
+	}
+	msg := strings.ToLower(extractAllErrorText(body))
+	if msg == "" {
+		return codex429Decision{}, false
+	}
 	if strings.Contains(msg, "requests per min") ||
 		strings.Contains(msg, "rpm") ||
 		strings.Contains(msg, "tpm") ||
 		strings.Contains(msg, "rate limit reached for requests") ||
 		strings.Contains(msg, "too many requests per") {
 		cooldown := 1 * time.Minute
-		resetAt := now.Add(cooldown)
 		return codex429Decision{
 			Scope:    rateLimitScopeAccount,
 			Reason:   "rate_limited",
-			ResetAt:  resetAt,
+			ResetAt:  now.Add(cooldown),
 			Cooldown: cooldown,
 		}, true
 	}
-
 	return codex429Decision{}, false
 }
 
@@ -3914,8 +3968,32 @@ func classify429RateLimit(account *auth.Account, body []byte, resp *http.Respons
 		return codex429Decision{Scope: rateLimitScopeAccount, Reason: "rate_limited_7d", ResetAt: resetAt, Cooldown: resetAt.Sub(now)}
 	}
 
-	// 针对第三方中转、聚合网关等非标准 Codex header 的通用语义分类
+	// 第一优先级：强语义分类（日配额 / 周配额 / 欠费）。
+	// 这些错误有明确的业务含义，不应被域名冷却规则覆盖。
 	if decision, matched := matchGenericUpstreamRateLimit(body, now); matched {
+		return decision
+	}
+
+	// 第二优先级：上游域名级冷却规则（用户在设置页显式配置）。
+	// 位于强语义之后、通用短时频控之前，确保用户配置能压过固定的 1 分钟兜底。
+	// 若上游通过 Retry-After 明确要求更长冷却，取两者较大值。
+	if account != nil && account.BaseURL != "" {
+		if cooldownSec := MatchUpstreamCooldown(account.BaseURL); cooldownSec > 0 {
+			cooldown := time.Duration(cooldownSec) * time.Second
+			if retryAfter := parseRetryAfterHeader(resp); retryAfter > cooldown {
+				cooldown = retryAfter
+			}
+			return codex429Decision{
+				Scope:    rateLimitScopeAccount,
+				Reason:   "rate_limited",
+				ResetAt:  now.Add(cooldown),
+				Cooldown: cooldown,
+			}
+		}
+	}
+
+	// 第三优先级：短时频控通用兜底（RPM / TPM 等）。
+	if decision, matched := matchGenericBurstRateLimit(body, now); matched {
 		return decision
 	}
 
@@ -3935,6 +4013,7 @@ func classify429RateLimit(account *auth.Account, body []byte, resp *http.Respons
 
 	cooldown := 5 * time.Minute
 	resetAt = now.Add(cooldown)
+
 	return codex429Decision{Scope: rateLimitScopeAccount, Reason: "rate_limited", ResetAt: resetAt, Cooldown: cooldown}
 }
 
@@ -3957,8 +4036,63 @@ func Apply429Cooldown(store *auth.Store, account *auth.Account, body []byte, res
 		store.MarkPremium5hRateLimited(account, decision.ResetAt)
 		return decision
 	}
-	store.MarkCooldown(account, decision.Cooldown, "rate_limited")
+	reason := decision.Reason
+	if reason == "" {
+		reason = "rate_limited"
+	}
+	store.MarkCooldown(account, decision.Cooldown, reason)
 	return decision
+}
+
+// cooldownModelFor 返回模型级冷却应使用的 key：实际转发给上游的模型名。
+// responses_api 账号转发前会把模型名替换为 mappedModel，因此冷却必须以 mappedModel
+// 为 key，否则调度过滤（用 mappedModel 检查 IsModelRateLimited）永远查不到冷却记录。
+// Codex 原生账号不替换模型名，沿用 effectiveModel。
+func cooldownModelFor(account *auth.Account, effectiveModel, mappedModel string) string {
+	if account != nil && account.IsOpenAIResponsesAPI() && strings.TrimSpace(mappedModel) != "" {
+		return mappedModel
+	}
+	return effectiveModel
+}
+
+// modelScopedQuotaFailure 判断 403/402 是否属于「按模型分组的额度/权限问题」。
+//
+// 聚合网关（如 Agnes、daseinai）常按模型分组计费：付费分组余额不足时，
+// 同一个 key 下的免费分组（如 *-flash）依然完全可用。若把这类错误当成
+// 账号级 payment_required，会让整账号（含免费模型）冷却 6 小时，属于误伤。
+//
+// 命中返回 true 时调用方应改用模型级冷却，只隔离出问题的那个模型。
+//
+// 注意：以下语义属于「账号级欠费」，不在此处理，交由上层按账号级
+// payment_required 冷却，避免账号级余额耗尽时其它模型仍被反复调度撞墙：
+//   - insufficient_quota（OpenAI 标准错误码）
+//   - insufficient quota（"You exceeded your current quota ... insufficient_quota"）
+//   - exceeded your current quota
+// 仅保留明确带有「分组 / 用户维度」关键词的语义：
+//   - insufficient user quota / insufficient_user_quota（NewAPI 分组额度）
+//   - not enabled for this group（分组未开通）
+//   - billing + hard limit（账单硬上限）
+func modelScopedQuotaFailure(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	msg := strings.ToLower(extractAllErrorText(body))
+	if msg == "" {
+		return false
+	}
+	if strings.Contains(msg, "insufficient user quota") {
+		return true
+	}
+	if strings.Contains(msg, "insufficient_user_quota") {
+		return true
+	}
+	if strings.Contains(msg, "not enabled for this group") {
+		return true
+	}
+	if strings.Contains(msg, "billing") && strings.Contains(msg, "hard limit") {
+		return true
+	}
+	return false
 }
 
 // ApplyUpstreamAccountFailure writes the canonical account state for upstream
@@ -3989,6 +4123,12 @@ func ApplyUpstreamAccountFailure(store *auth.Store, account *auth.Account, statu
 		if isDailyLimitExceeded(body) {
 			_, cooldown := timeUntilNextMidnight(time.Now())
 			store.MarkCooldownWithError(account, cooldown, "rate_limited", upstreamAccountErrorMessage(statusCode, body))
+			return true
+		}
+		// 按模型分组的额度问题：只冷却出问题的模型，避免同一 key 下的免费模型被一起锁死。
+		if strings.TrimSpace(model) != "" && modelScopedQuotaFailure(body) {
+			store.MarkModelCooldown(account, model, 30*time.Minute, "payment_required")
+			log.Printf("账号 %d 模型 %s 额度不足，仅冷却该模型 30 分钟", account.ID(), model)
 			return true
 		}
 		store.MarkCooldownWithError(account, 6*time.Hour, "payment_required", upstreamAccountErrorMessage(statusCode, body))
@@ -4294,7 +4434,7 @@ func (h *Handler) ListModels(c *gin.Context) {
 	if c != nil && c.Request != nil {
 		ctx = c.Request.Context()
 	}
-	modelIDs := h.supportedModelIDs(ctx)
+	modelIDs := h.exposedModelIDs(ctx)
 	models := make([]api.Model, 0, len(modelIDs))
 	now := time.Now().Unix()
 	for _, id := range modelIDs {
@@ -4309,7 +4449,10 @@ func (h *Handler) ListModels(c *gin.Context) {
 }
 
 func (h *Handler) supportedModelIDs(ctx context.Context) []string {
-	models := SupportedModelIDs(ctx, h.db)
+	// SupportedModelIDs 返回缓存切片，这里必须拷贝后再 append：
+	// enabledModelIDs 用 make([]string, 0, len(items)) 分配，存在 cap > len 的余量，
+	// 直接 append 会写入缓存底层数组的空闲槽位，并发调用时产生数据竞争并互相串写模型。
+	models := append([]string(nil), SupportedModelIDs(ctx, h.db)...)
 	seen := make(map[string]struct{}, len(models))
 	for _, model := range models {
 		seen[strings.ToLower(strings.TrimSpace(model))] = struct{}{}
@@ -4330,4 +4473,25 @@ func (h *Handler) supportedModelIDs(ctx context.Context) []string {
 		}
 	}
 	return models
+}
+
+// exposedModelIDs 返回 /v1/models 对外暴露的模型列表。
+// 白名单仅影响列表展示，不影响请求校验（避免误杀账号实际支持的模型）。
+func (h *Handler) exposedModelIDs(ctx context.Context) []string {
+	models := h.supportedModelIDs(ctx)
+	exposed := CurrentExposedModels()
+	if len(exposed) == 0 {
+		return models
+	}
+	seen := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		seen[strings.ToLower(strings.TrimSpace(model))] = struct{}{}
+	}
+	filtered := make([]string, 0, len(exposed))
+	for _, name := range exposed {
+		if _, ok := seen[strings.ToLower(name)]; ok {
+			filtered = append(filtered, name)
+		}
+	}
+	return filtered
 }

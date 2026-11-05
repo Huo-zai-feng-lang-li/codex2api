@@ -73,20 +73,25 @@ func TestListModelsIncludesLatestRequestedModels(t *testing.T) {
 	for _, model := range payload.Data {
 		ids = append(ids, model.ID)
 	}
-	for _, model := range []string{"gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.2", "gpt-image-2"} {
-		if !slices.Contains(ids, model) {
-			t.Fatalf("/v1/models missing %q in %v", model, ids)
-		}
+	// 白名单已启用：/v1/models 只能是白名单的子集。
+	// 注：本用例使用空 Handler（无 DB / 无账号池），只有内置模型中命中白名单的才会出现；
+	// 白名单模型的完整可见性依赖账号池支撑，由真机 CF 发包验证。
+	whitelist := CurrentExposedModels()
+	if len(whitelist) == 0 {
+		t.Fatal("default exposed model whitelist should not be empty")
 	}
-	for _, model := range []string{"gpt-image-2-2k", "gpt-image-2-4k"} {
-		if !slices.Contains(ids, model) {
-			t.Fatalf("/v1/models missing image alias %q in %v", model, ids)
+	if len(ids) == 0 {
+		t.Fatalf("/v1/models returned empty list, want subset of whitelist %v", whitelist)
+	}
+	for _, id := range ids {
+		if !slices.Contains(whitelist, id) {
+			t.Fatalf("/v1/models leaked non-whitelisted model %q, whitelist=%v", id, whitelist)
 		}
 	}
 
-	for _, model := range []string{"gpt-5", "gpt-5.1", "gpt-5.2-codex"} {
+	for _, model := range []string{"gpt-5", "gpt-5.1", "gpt-5.2-codex", "gpt-5.5", "gpt-image-2", "gpt-image-2-2k", "gpt-5.3-codex-spark"} {
 		if slices.Contains(ids, model) {
-			t.Fatalf("/v1/models should not include %q in %v", model, ids)
+			t.Fatalf("/v1/models should not include non-whitelisted %q in %v", model, ids)
 		}
 	}
 }

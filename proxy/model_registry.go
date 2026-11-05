@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/codex2api/database"
@@ -238,9 +239,49 @@ func mergeModelInfos(rows []database.ModelRegistryRow) []ModelInfo {
 }
 
 // SupportedModelIDs returns enabled runtime model IDs.
+// supportedModelIDsCache 缓存 SupportedModelIDs 的结果。
+// 原实现每次调用都触发 ListModelCatalog 的两次 SQL 查询
+// （ListModelRegistry + GetModelRegistrySyncState），而该函数在每次
+// ChatCompletions / Messages / Responses 请求中都会被调用一次，
+// 高并发下会产生无意义的 SQLite 锁竞争和堆内存逃逸。
+// 模型注册表通过 SyncOfficialCodexModels 低频更新，TTL 取 15 秒兼顾实时性与性能；
+// 同步成功后调用 InvalidateSupportedModelIDsCache 主动失效，保证切换模型后立即生效。
+var supportedModelIDsCache struct {
+	mu       sync.RWMutex
+	models   []string
+	expireAt time.Time
+}
+
+const supportedModelIDsCacheTTL = 15 * time.Second
+
+// InvalidateSupportedModelIDsCache 主动失效 SupportedModelIDs 缓存。
+// 任何写入 model_registry 的操作（同步、启用/禁用）后必须调用。
+func InvalidateSupportedModelIDsCache() {
+	supportedModelIDsCache.mu.Lock()
+	supportedModelIDsCache.models = nil
+	supportedModelIDsCache.expireAt = time.Time{}
+	supportedModelIDsCache.mu.Unlock()
+}
+
+// SupportedModelIDs 返回注册表中启用的模型 ID 列表（不含账号实际支持的模型）。
+// 结果带 15s TTL 缓存，避免热路径重复查库。返回的切片对所有调用方只读。
 func SupportedModelIDs(ctx context.Context, db *database.DB) []string {
+	supportedModelIDsCache.mu.RLock()
+	if supportedModelIDsCache.models != nil && time.Now().Before(supportedModelIDsCache.expireAt) {
+		cached := supportedModelIDsCache.models
+		supportedModelIDsCache.mu.RUnlock()
+		return cached
+	}
+	supportedModelIDsCache.mu.RUnlock()
+
 	catalog, _ := ListModelCatalog(ctx, db)
-	return catalog.Models
+	models := catalog.Models
+
+	supportedModelIDsCache.mu.Lock()
+	supportedModelIDsCache.models = models
+	supportedModelIDsCache.expireAt = time.Now().Add(supportedModelIDsCacheTTL)
+	supportedModelIDsCache.mu.Unlock()
+	return models
 }
 
 // TextTestModelIDs returns enabled non-image models for account connection tests.
@@ -416,6 +457,8 @@ func ApplyOfficialCodexModelSync(ctx context.Context, db *database.DB, html stri
 	if err := db.UpdateModelRegistrySyncState(ctx, OfficialCodexModelsURL, syncedAt); err != nil {
 		return nil, err
 	}
+	// 注册表写入后主动失效 SupportedModelIDs 缓存，保证调度与校验立即看到新模型。
+	InvalidateSupportedModelIDsCache()
 
 	catalog, err := ListModelCatalog(ctx, db)
 	if err != nil {

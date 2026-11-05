@@ -494,7 +494,7 @@ accountAttempts:
 					log.Printf("Responses WebSocket OpenAI Responses upstream returned error (attempt %d, status %d): %s", attempt+1, resp.StatusCode, upstreamErrorLogBody(errBody))
 					logUpstreamError("/v1/responses", resp.StatusCode, model, account.ID(), errBody)
 					h.logUpstreamCyberPolicy(c, "/v1/responses", model, errBody)
-					decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, effectiveModel)
+					decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, cooldownModelFor(account, effectiveModel, mappedModel))
 					shouldRetry := false
 					if transport.fallbackTTL == 0 || resp.StatusCode == http.StatusTooManyRequests {
 						shouldRetry = shouldRetryHTTPStatus(resp.StatusCode, &generalRetries, &rateLimitRetries, maxRetries, maxRateLimitRetries)
@@ -529,7 +529,7 @@ accountAttempts:
 
 				completed, err := h.streamResponsesWSUpstream(
 					c, conn, resp, account, proxyURL, affinityKey, transport.endpoint,
-					model, effectiveModel, reasoningEffort, serviceTier, expandedInputRaw,
+					model, effectiveModel, mappedModel, reasoningEffort, serviceTier, expandedInputRaw,
 					audit, transportStart, attempt+1,
 					transport.useWebSocket && websocketFallbackHTTPEnabled(),
 					continuationCacheBody, sessionID,
@@ -613,7 +613,11 @@ accountAttempts:
 			h.store.Release(account)
 			return newResponsesWSCloseError(websocket.ClosePolicyViolation, upstreamGuardBlockMessage(verdict), nil)
 		}
-		// 模型名映射：转发前将 body 中的 Codex 模型名替换为实际的多供应商模型名
+		// 模型名映射：本分支只处理 Codex 原生账号（responses_api 账号在上方分支已 return）。
+		// 与 chat/completions、messages 的口径不同：那两处对 Codex 账号绝不替换模型名，
+		// 因为它们是翻译入口，映射目标通常是第三方模型名。
+		// 这里能走到说明 mappedModel 命中了官方支持列表（见上方 accountFilterForResponsesModel
+		// 的 modelIDInList 判断），属于「官方模型别名」场景，替换是有意为之。
 		wsCodexBody := codexBody
 		if mappedModel != effectiveModel {
 			wsCodexBody = replaceModelInJSONBody(wsCodexBody, mappedModel)
@@ -695,7 +699,7 @@ accountAttempts:
 			log.Printf("Responses WebSocket upstream returned error (attempt %d, status %d): %s", attempt+1, resp.StatusCode, upstreamErrorLogBody(errBody))
 			logUpstreamError("/v1/responses", resp.StatusCode, model, account.ID(), errBody)
 			h.logUpstreamCyberPolicy(c, "/v1/responses", model, errBody)
-			decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, effectiveModel)
+			decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, cooldownModelFor(account, effectiveModel, mappedModel))
 			shouldRetry := shouldRetryHTTPStatus(resp.StatusCode, &generalRetries, &rateLimitRetries, maxRetries, maxRateLimitRetries)
 			h.logUsageForRequest(c, &database.UsageLogInput{
 				AccountID:         account.ID(),
@@ -725,7 +729,7 @@ accountAttempts:
 			return nil
 		}
 
-		if _, err := h.streamResponsesWSUpstream(c, conn, resp, account, proxyURL, affinityKey, upstreamEndpoint, model, effectiveModel, reasoningEffort, serviceTier, expandedInputRaw, audit, start, attempt+1, false, continuationCacheBody, sessionID); err != nil {
+		if _, err := h.streamResponsesWSUpstream(c, conn, resp, account, proxyURL, affinityKey, upstreamEndpoint, model, effectiveModel, mappedModel, reasoningEffort, serviceTier, expandedInputRaw, audit, start, attempt+1, false, continuationCacheBody, sessionID); err != nil {
 			if errors.Is(err, errResponsesWSClientGone) {
 				return err
 			}
@@ -778,6 +782,7 @@ func (h *Handler) streamResponsesWSUpstream(
 	upstreamEndpoint string,
 	model string,
 	effectiveModel string,
+	mappedModel string,
 	reasoningEffort string,
 	serviceTier string,
 	expandedInputRaw string,
@@ -907,7 +912,7 @@ func (h *Handler) streamResponsesWSUpstream(
 		!wroteAnyMessage &&
 		(len(terminalFailurePayload) == 0 || withheldRetryableFailure)
 	if retryBeforeDownstream && len(terminalFailurePayload) > 0 {
-		decision := h.applyCooldownForModel(account, outcome.logStatusCode, terminalFailurePayload, resp, effectiveModel)
+		decision := h.applyCooldownForModel(account, outcome.logStatusCode, terminalFailurePayload, resp, cooldownModelFor(account, effectiveModel, mappedModel))
 		if kind := upstreamErrorKind(outcome.logStatusCode, terminalFailurePayload, decision); kind != "" {
 			outcome.failureKind = kind
 		}
@@ -974,7 +979,7 @@ func (h *Handler) streamResponsesWSUpstream(
 		recyclePooledClient(account, proxyURL)
 		h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
 	} else if outcome.logStatusCode == http.StatusOK {
-		h.store.ClearModelCooldown(account, effectiveModel)
+		h.store.ClearModelCooldown(account, cooldownModelFor(account, effectiveModel, mappedModel))
 		h.store.ReportRequestSuccessTTFT(account, time.Duration(firstTokenMs)*time.Millisecond, time.Duration(totalDuration)*time.Millisecond)
 	}
 	if !recoverableWSTransportFailure {

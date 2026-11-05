@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -6,6 +6,7 @@ import {
   Clock3,
   Cpu,
   Database,
+  Globe,
   HardDrive,
   Power,
   RefreshCw,
@@ -32,7 +33,18 @@ export default function Operations() {
   const { t } = useTranslation();
   const { showToast } = useToast();
   const [shutdownLoading, setShutdownLoading] = useState(false);
+  const [tunnelDomain, setTunnelDomain] = useState('');
+  const [tunnelRunning, setTunnelRunning] = useState(false);
+  const [tunnelCopied, setTunnelCopied] = useState(false);
   const loadOperationsData = useCallback(() => api.getOpsOverview(), []);
+
+  // 获取隧道状态
+  useEffect(() => {
+    api.getSettings().then(s => {
+      setTunnelDomain(s.tunnel_domain || '');
+      setTunnelRunning(s.tunnel_running);
+    }).catch(() => {});
+  }, []);
 
   const {
     data: overview,
@@ -102,6 +114,7 @@ export default function Operations() {
             </div>
           }
         />
+
         <OpsTabs />
 
         {overview ? (
@@ -266,6 +279,36 @@ export default function Operations() {
                   />
                   {overview.storage && (
                     <StorageCard storage={overview.storage} t={t} />
+                  )}
+                  {tunnelDomain && (
+                    <Card className="py-0 md:col-span-2">
+                      <CardContent className="p-6">
+                        <div className="flex items-center gap-2 mb-4">
+                          <Globe className="size-5 text-muted-foreground" />
+                          <span className="font-semibold">公网隧道</span>
+                          <span className={`ml-auto size-2 rounded-full ${tunnelRunning ? 'bg-green-500' : 'bg-gray-400'}`} />
+                          <span className="text-xs text-muted-foreground">{tunnelRunning ? '运行中' : '未运行'}</span>
+                        </div>
+                        <div className="max-w-md">
+                          <div className="text-xs text-muted-foreground mb-1.5">Base URL</div>
+                          <div className="flex items-center gap-2">
+                            <code className="flex-1 truncate rounded bg-muted px-2.5 py-1.5 text-xs">{`https://${tunnelDomain}/v1`}</code>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="shrink-0 cursor-pointer"
+                              onClick={() => {
+                                void navigator.clipboard.writeText(`https://${tunnelDomain}/v1`);
+                                setTunnelCopied(true);
+                                window.setTimeout(() => setTunnelCopied(false), 1500);
+                              }}
+                            >
+                              {tunnelCopied ? '已复制' : '复制'}
+                            </Button>
+                          </div>
+                        </div>
+                      </CardContent>
+                    </Card>
                   )}
                 </div>
               </CardContent>

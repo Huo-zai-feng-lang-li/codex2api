@@ -3,6 +3,7 @@ package proxy
 import (
 	"container/list"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -1662,6 +1663,18 @@ func upstreamServiceTier(tier string) (string, bool) {
 	}
 }
 
+// functionCallItemID 从 OpenAI Chat 的 tool_call.id 派生 Responses API 的 item id。
+// Responses API 的 function_call 同时有 id（item 标识）和 call_id（关联工具结果），
+// 而 Chat 格式只有 tool_call.id，这里用哈希前缀生成稳定 id。
+func functionCallItemID(callID string) string {
+	callID = strings.TrimSpace(callID)
+	if callID == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(callID))
+	return "fc_" + hex.EncodeToString(sum[:8])
+}
+
 // convertMessagesToInputSlice 将 OpenAI messages 转换为 Codex input 数组（纯内存操作，零中间序列化）
 func convertMessagesToInputSlice(messages []openAIMessage) []any {
 	input := make([]any, 0, len(messages))
@@ -1688,11 +1701,17 @@ func convertMessagesToInputSlice(messages []openAIMessage) []any {
 					})
 				}
 				for _, tc := range m.ToolCalls {
+					// id / status 是 OpenAI Responses API 规范字段，部分上游（Agnes）
+					// 会严格反序列化：缺少它们会直接 400 invalid_request_error。
+					// id 由 call_id 派生，保证同一 call_id 每次回放得到相同 id，
+					// 避免破坏上游的 prompt cache 命中。
 					input = append(input, map[string]any{
 						"type":      "function_call",
+						"id":        functionCallItemID(tc.ID),
 						"call_id":   tc.ID,
 						"name":      tc.Function.Name,
 						"arguments": tc.Function.Arguments,
+						"status":    "completed",
 					})
 				}
 			} else {

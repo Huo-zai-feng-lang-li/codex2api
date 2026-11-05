@@ -352,6 +352,17 @@ async function compressSiteLogoFile(file: File, mimeType: string) {
   }
 }
 
+function formatExposedModels(raw: string): string {
+  if (!raw) return ''
+  try {
+    const arr = JSON.parse(raw)
+    if (Array.isArray(arr)) return arr.join('\n')
+  } catch {
+    // 非 JSON 时按原文展示（兼容换行分隔）
+  }
+  return raw
+}
+
 export default function Settings() {
   const { t } = useTranslation()
   const { applyBranding } = useBranding()
@@ -470,7 +481,12 @@ export default function Settings() {
     image_s3_secret_key: '',
     image_s3_prefix: '',
     image_s3_force_path_style: false,
+    upstream_cooldown_rules: '[]',
+    exposed_models: '[]',
+    tunnel_domain: '',
+    tunnel_running: false,
   })
+  const [exposedModelsText, setExposedModelsText] = useState('')
   const lazyModeActive = settingsForm.lazy_mode
   const [savingSettings, setSavingSettings] = useState(false)
   const [testingImageStorage, setTestingImageStorage] = useState(false)
@@ -488,6 +504,7 @@ export default function Settings() {
   const loadSettingsData = useCallback(async () => {
     const [health, settings, modelsResp] = await Promise.all([api.getHealth(), api.getSettings(), api.getModels()])
     setSettingsForm(normalizeLazySettingsForm(settings))
+    setExposedModelsText(formatExposedModels(settings.exposed_models))
     const branding = {
       site_name: settings.site_name,
       site_logo: settings.site_logo,
@@ -524,6 +541,7 @@ export default function Settings() {
       const adminSecretChanged = settingsForm.admin_auth_source !== 'env' && settingsForm.admin_secret !== loadedAdminSecret
       const updated = await api.updateSettings(normalizeLazySettingsForm(settingsForm))
       setSettingsForm(normalizeLazySettingsForm(updated))
+      setExposedModelsText(formatExposedModels(updated.exposed_models))
       const branding = {
         site_name: updated.site_name,
         site_logo: updated.site_logo,
@@ -1237,6 +1255,43 @@ export default function Settings() {
                     )}
                     placeholder='[{"rule_id":"response_injection","endpoint":"/v1/responses","action":"downgrade"}]'
                     onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setSettingsForm((f) => ({ ...f, upstream_guard_suppressions: e.target.value }))}
+                  />
+                </SettingField>
+                <SettingField
+                  label="上游限流冷却规则"
+                  description="按上游域名匹配的 429 冷却时间（秒），不匹配则走默认 OpenAI 逻辑"
+                  className="md:col-span-2"
+                >
+                  <textarea
+                    value={settingsForm.upstream_cooldown_rules}
+                    aria-label="上游限流冷却规则"
+                    spellCheck={false}
+                    className={cn(
+                      'min-h-[108px] w-full min-w-0 resize-y rounded-md border border-input bg-transparent px-3 py-2 text-sm font-mono shadow-xs outline-none transition-[color,box-shadow]',
+                      'placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50'
+                    )}
+                    placeholder='[{"domain_contains":"agnes-ai.cn","cooldown_seconds":120},{"domain_contains":"openai.com","cooldown_seconds":604800}]'
+                    onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setSettingsForm((f) => ({ ...f, upstream_cooldown_rules: e.target.value }))}
+                  />
+                </SettingField>
+                <SettingField
+                  label="对外暴露模型白名单"
+                  description="仅控制 /v1/models 列表展示；一行一个。留空 = 不过滤，展示全部可用模型。不影响请求校验"
+                  className="md:col-span-2"
+                >
+                  <textarea
+                    value={exposedModelsText}
+                    aria-label="对外暴露模型白名单"
+                    spellCheck={false}
+                    className={cn(
+                      'min-h-[108px] w-full min-w-0 resize-y rounded-md border border-input bg-transparent px-3 py-2 text-sm font-mono shadow-xs outline-none transition-[color,box-shadow]',
+                      'placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50'
+                    )}
+                    placeholder="gpt-6-astra"
+                    onChange={(e: ChangeEvent<HTMLTextAreaElement>) => {
+                      setExposedModelsText(e.target.value)
+                      setSettingsForm((f) => ({ ...f, exposed_models: e.target.value }))
+                    }}
                   />
                 </SettingField>
               </div>

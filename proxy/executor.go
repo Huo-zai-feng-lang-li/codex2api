@@ -260,13 +260,21 @@ var ExecuteRequest = executeRequest
 // useWebsocket 可选，如果为 true 则使用 WebSocket 连接
 // headers 下游请求头，用于设备指纹学习
 func executeRequest(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header, useWebsocket ...bool) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	// OpenAI Responses API 第三方账号（api_key + base_url）走独立执行器。
+	// 这类账号没有 AccessToken，若落到下面的 Codex 路径会被判定为「无可用账号」。
+	// /v1/responses 路由在上层已显式分派，这里补齐 chat/completions、messages 等
+	// 需要先翻译再转发到同一上游的入口。
+	if account != nil && account.IsOpenAIResponsesAPI() {
+		return ExecuteOpenAIResponsesRequest(ctx, account, requestBody, proxyOverride, headers)
+	}
+
 	// 检查是否使用 WebSocket
 	if len(useWebsocket) > 0 && useWebsocket[0] && WebsocketExecuteFunc != nil {
 		return WebsocketExecuteFunc(ctx, account, requestBody, sessionID, proxyOverride, apiKey, deviceCfg, headers)
-	}
-
-	if ctx == nil {
-		ctx = context.Background()
 	}
 
 	account.Mu().RLock()
@@ -340,10 +348,52 @@ func executeRequest(ctx context.Context, account *auth.Account, requestBody []by
 	return resp, nil
 }
 
+// ensureFunctionCallItemIDs 为第三方 Responses API 补全 function_call 项的
+// id / status 字段。部分上游（Agnes）严格反序列化 ResponseInput 枚举，缺失会 400。
+// id 由 call_id 稳定派生，保证同一会话重复回放得到相同 id（不影响上游缓存命中）。
+func ensureFunctionCallItemIDs(requestBody []byte) []byte {
+	input := gjson.GetBytes(requestBody, "input")
+	if !input.IsArray() {
+		return requestBody
+	}
+
+	patched := requestBody
+	changed := false
+	input.ForEach(func(key, item gjson.Result) bool {
+		if item.Get("type").String() != "function_call" {
+			return true
+		}
+		path := "input." + key.String()
+		if strings.TrimSpace(item.Get("status").String()) == "" {
+			patched, _ = sjson.SetBytes(patched, path+".status", "completed")
+			changed = true
+		}
+		if strings.TrimSpace(item.Get("id").String()) == "" {
+			callID := strings.TrimSpace(item.Get("call_id").String())
+			if callID == "" {
+				callID = fmt.Sprintf("input-%s", key.String())
+			}
+			sum := sha256.Sum256([]byte(callID))
+			patched, _ = sjson.SetBytes(patched, path+".id", "fc_"+hex.EncodeToString(sum[:8]))
+			changed = true
+		}
+		return true
+	})
+	if !changed {
+		return requestBody
+	}
+	return patched
+}
+
 func ExecuteOpenAIResponsesRequest(ctx context.Context, account *auth.Account, requestBody []byte, proxyOverride string, headers http.Header) (*http.Response, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
+	// 第三方 Responses API 实现（如 Agnes）对 input 项做严格反序列化：
+	// function_call 必须同时带 id 与 status，缺一会直接 400。
+	// Codex 官方上游相反要求 store=false 时剥离 id，因此这一步只在此路径生效。
+	requestBody = ensureFunctionCallItemIDs(requestBody)
 
 	baseURL, apiKey := account.OpenAIResponsesCredentials()
 	account.Mu().RLock()

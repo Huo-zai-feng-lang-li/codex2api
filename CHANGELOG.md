@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+## v2.2.9 - 2026-11-05
+
+### Fixes
+
+- **Model mapping no longer corrupts Codex native accounts.** `/v1/chat/completions` and `/v1/messages` previously replaced the model name unconditionally, so a mapped third-party model name (e.g. `free/glm-5.3-flash`) could be forwarded to the official Codex upstream for a native account and rejected. Model replacement is now guarded by `account.IsOpenAIResponsesAPI()`, and the account filter excludes Codex accounts unless the mapped model is in the built-in supported list.
+- **Model-level cooldowns are now actually honored.** Cooldown writes used the original requested model name while the scheduler filtered on the mapped name, so model-scoped cooldowns never matched. A new `cooldownModelFor` helper resolves the model actually forwarded upstream, and all cooldown write/clear call sites (responses, chat/completions, messages, WebSocket, recheck) now use it.
+- **Account-level quota errors are no longer treated as model-scoped.** `insufficient_quota`, `insufficient quota` and `exceeded your current quota` describe billing-level exhaustion. They now fall back to the account-wide `payment_required` cooldown instead of only cooling down a single model, which previously caused the account to be re-dispatched and fail repeatedly.
+- **Exposed model whitelist description corrected.** The settings UI claimed the whitelist limited request validation and that clearing it restored six default models. In practice it only filters the `/v1/models` listing, and an empty value disables filtering entirely. The description now states this accurately.
+- **Concurrent model-list corruption fixed.** `supportedModelIDs` appended directly to the cached slice returned by `SupportedModelIDs`. Because `enabledModelIDs` allocates with spare capacity, concurrent requests wrote into the same spare slots, causing a data race and cross-contamination of the model list. The caller now copies the slice first.
+- **Exhaustion recheck clears the forwarded-model cooldown.** After the account pool was exhausted and re-probed, only the original model name had its cooldown cleared, leaving the mapped model cooled down. The recheck now also clears the mapped name for responses-api accounts.
+
+### Improvements
+
+- **`SupportedModelIDs` caching.** The model registry lookup ran two SQL queries per request on every chat/completions, messages, responses and `/v1/models` call. Results are now cached for 15 seconds behind a read-write mutex and invalidated after a registry sync.
+- **Non-blocking cloudflared probe.** `GetSettings` used to run a synchronous `tasklist` (or `/proc` scan) probe of `cloudflared` whenever its 10-second cache expired, occasionally stalling first paint. The probe now refreshes on a background goroutine and settings reads go through an atomic value.
+- **`CODEX_TUNNEL_DOMAIN` now accepts an `http://` prefix** in addition to `https://`.
+
+### Verification
+
+- `go build ./...`, `go vet ./...`, `go test ./... -count=1` (16 packages).
+- `npx tsc --noEmit` and `npm run build` for the frontend.
+- `build-and-restart.bat` hot swap with `/health` reporting `ok`.
+- Two-turn `/v1/responses` continuation: both the initial request and the `previous_response_id` follow-up completed.
+- Model mapping smoke test through `/v1/chat/completions` and `/v1/messages` both returned 200 with the mapped model forwarded upstream.
+- Service log showed no `409`, no panics and no `continuation_context_unavailable` events.
+
 ## v2.2.8 - 2026-08-19
 
 ### Improvements

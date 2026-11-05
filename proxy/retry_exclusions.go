@@ -95,7 +95,14 @@ func (h *Handler) recheckAccountsAfterExhaustion(ctx context.Context, models ...
 	for accountID := range recovered {
 		if account := h.store.FindByID(accountID); account != nil {
 			for _, model := range models {
+				// responses_api 账号的模型级冷却以映射后的模型名为 key（见 cooldownModelFor），
+				// 调用方传入的是 effectiveModel，这里两个 key 都清，避免残留冷却继续拦住恢复的账号。
 				h.store.ClearModelCooldown(account, model)
+				if account.IsOpenAIResponsesAPI() {
+					if mapped := resolveOpenAIResponsesModel(model, h.store.GetModelMapping()); mapped != model {
+						h.store.ClearModelCooldown(account, mapped)
+					}
+				}
 			}
 		}
 	}

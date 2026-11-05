@@ -18,8 +18,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -4443,6 +4445,10 @@ type settingsResponse struct {
 	ImageS3SecretKey                 string `json:"image_s3_secret_key"`
 	ImageS3Prefix                    string `json:"image_s3_prefix"`
 	ImageS3ForcePathStyle            bool   `json:"image_s3_force_path_style"`
+	UpstreamCooldownRules            string `json:"upstream_cooldown_rules"`
+	ExposedModels                    string `json:"exposed_models"`
+	TunnelDomain                     string `json:"tunnel_domain"`
+	TunnelRunning                    bool   `json:"tunnel_running"`
 }
 
 type updateSettingsReq struct {
@@ -4519,6 +4525,8 @@ type updateSettingsReq struct {
 	ImageS3SecretKey                 *string `json:"image_s3_secret_key"`
 	ImageS3Prefix                    *string `json:"image_s3_prefix"`
 	ImageS3ForcePathStyle            *bool   `json:"image_s3_force_path_style"`
+	UpstreamCooldownRules            *string `json:"upstream_cooldown_rules"`
+	ExposedModels                    *string `json:"exposed_models"`
 }
 
 type brandingResponse struct {
@@ -4529,6 +4537,89 @@ type brandingResponse struct {
 	BackgroundBlur         int    `json:"background_blur"`
 	BackgroundGlassOpacity int    `json:"background_glass_opacity"`
 	BackgroundGlassBlur    int    `json:"background_glass_blur"`
+}
+
+func marshalUpstreamCooldownRules() string {
+	rules := proxy.CurrentUpstreamCooldownRules()
+	data, err := json.Marshal(rules)
+	if err != nil {
+		return "[]"
+	}
+	return string(data)
+}
+
+// defaultTunnelDomain 是内置的默认公网隧道域名。
+const defaultTunnelDomain = "codex2api.ai95.indevs.in"
+
+// resolveTunnelDomain 返回当前公网隧道域名。
+// 优先读环境变量 CODEX_TUNNEL_DOMAIN，便于私有化部署或更换隧道时无需重新编译。
+func resolveTunnelDomain() string {
+	if v := strings.TrimSpace(os.Getenv("CODEX_TUNNEL_DOMAIN")); v != "" {
+		v = strings.TrimPrefix(v, "https://")
+		v = strings.TrimPrefix(v, "http://")
+		return strings.TrimSuffix(v, "/")
+	}
+	return defaultTunnelDomain
+}
+
+// checkTunnelRunning 探测 cloudflared 是否在运行。
+//
+// 旧实现每 10 秒 TTL 过期后在 GetSettings 内同步执行 tasklist / /proc 扫描，
+// Windows 上偶发 1-2 秒阻塞，而前端有 8 个页面都会调用 GetSettings。
+// 新实现改为后台协程周期刷新 + 原子读：
+//   - 首次调用同步探一次，保证第一屏数据准确；
+//   - 之后由后台 ticker 每 tunnelRunningCacheTTL 刷新，GetSettings 只读原子值。
+var (
+	tunnelRunningState atomic.Bool
+	tunnelProbeOnce    sync.Once
+)
+
+const tunnelRunningCacheTTL = 10 * time.Second
+
+func startTunnelProbeOnce() {
+	tunnelProbeOnce.Do(func() {
+		tunnelRunningState.Store(probeTunnelProcess())
+		go func() {
+			ticker := time.NewTicker(tunnelRunningCacheTTL)
+			defer ticker.Stop()
+			for range ticker.C {
+				tunnelRunningState.Store(probeTunnelProcess())
+			}
+		}()
+	})
+}
+
+func checkTunnelRunning() bool {
+	startTunnelProbeOnce()
+	return tunnelRunningState.Load()
+}
+
+func probeTunnelProcess() bool {
+	if runtime.GOOS == "windows" {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "tasklist", "/FI", "IMAGENAME eq cloudflared.exe", "/NH")
+		out, err := cmd.Output()
+		if err != nil {
+			return false
+		}
+		return strings.Contains(strings.ToLower(string(out)), "cloudflared.exe")
+	}
+	// Linux: 扫描 /proc
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		comm, err := os.ReadFile(filepath.Join("/proc", e.Name(), "comm"))
+		if err == nil && strings.TrimSpace(string(comm)) == "cloudflared" {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeUpstreamGuardSuppressionsJSON(raw string) (string, []upstreamguard.SuppressionRule, error) {
@@ -5119,6 +5210,10 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		ImageS3SecretKey:                 imgCfg.SecretKey,
 		ImageS3Prefix:                    imgPrefix,
 		ImageS3ForcePathStyle:            imgCfg.ForcePathStyle,
+		UpstreamCooldownRules:            marshalUpstreamCooldownRules(),
+		ExposedModels:                    proxy.MarshalExposedModels(),
+		TunnelDomain:                     resolveTunnelDomain(),
+		TunnelRunning:                    checkTunnelRunning(),
 	})
 }
 
@@ -5471,6 +5566,20 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		showFullUsageNumbers = *req.ShowFullUsageNumbers
 		log.Printf("设置已更新: show_full_usage_numbers = %t", showFullUsageNumbers)
 	}
+	if req.UpstreamCooldownRules != nil {
+		if err := proxy.SetUpstreamCooldownRules(*req.UpstreamCooldownRules); err != nil {
+			writeError(c, http.StatusBadRequest, "上游冷却规则 JSON 格式错误: "+err.Error())
+			return
+		}
+		log.Printf("设置已更新: upstream_cooldown_rules")
+	}
+	if req.ExposedModels != nil {
+		if err := proxy.SetExposedModels(*req.ExposedModels); err != nil {
+			writeError(c, http.StatusBadRequest, "对外模型白名单格式错误: "+err.Error())
+			return
+		}
+		log.Printf("设置已更新: exposed_models")
+	}
 	runtimeCfg = proxy.ApplyRuntimeSettings(runtimeCfg)
 
 	usageLogChanged := false
@@ -5777,6 +5886,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		ShowFullUsageNumbers:             showFullUsageNumbers,
 		ImageStorageConfig:               imgConfigJSON,
 		BackgroundConfig:                 encodeBackgroundConfig(bgCfg),
+		UpstreamCooldownRules:            marshalUpstreamCooldownRules(),
+		ExposedModels:                    proxy.MarshalExposedModels(),
 	})
 	if err != nil {
 		log.Printf("无法持久化保存设置: %v", err)

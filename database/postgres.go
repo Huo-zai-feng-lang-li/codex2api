@@ -871,6 +871,8 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS proxy_request_system_prompt TEXT DEFAULT '';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS proxy_response_rewrite_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS proxy_response_rewrite_prompt TEXT DEFAULT '';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS upstream_cooldown_rules TEXT DEFAULT '';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS exposed_models TEXT DEFAULT '';
 
 			CREATE TABLE IF NOT EXISTS prompt_filter_logs (
 				id               SERIAL PRIMARY KEY,
@@ -1509,6 +1511,8 @@ type SystemSettings struct {
 	ProxyRequestSystemPrompt         string
 	ProxyResponseRewriteEnabled      bool
 	ProxyResponseRewritePrompt       string
+	UpstreamCooldownRules            string
+	ExposedModels                    string
 }
 
 // GetSystemSettings 加载全局设置
@@ -1566,7 +1570,9 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 	       COALESCE(proxy_request_system_prompt_enabled, false),
 	       COALESCE(proxy_request_system_prompt, ''),
 	       COALESCE(proxy_response_rewrite_enabled, false),
-	       COALESCE(proxy_response_rewrite_prompt, '')
+	       COALESCE(proxy_response_rewrite_prompt, ''),
+	       COALESCE(upstream_cooldown_rules, ''),
+	       COALESCE(exposed_models, '')
 		FROM system_settings WHERE id = 1
 	`).Scan(
 		&s.SiteName, &s.SiteLogo,
@@ -1599,6 +1605,8 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.ProxyRequestSystemPrompt,
 		&s.ProxyResponseRewriteEnabled,
 		&s.ProxyResponseRewritePrompt,
+		&s.UpstreamCooldownRules,
+		&s.ExposedModels,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -1723,13 +1731,16 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		    proxy_request_system_prompt_enabled = $8,
 		    proxy_request_system_prompt = $9,
 		    proxy_response_rewrite_enabled = $10,
-		    proxy_response_rewrite_prompt = $11
+		    proxy_response_rewrite_prompt = $11,
+		    upstream_cooldown_rules = $12,
+		    exposed_models = $13
 		WHERE id = 1
 	`, s.SecurityAuditEnabled, NormalizeUpstreamGuardMode(s.UpstreamGuardMode), strings.TrimSpace(s.UpstreamGuardSuppressions),
 		NormalizeSecurityEventRetentionDays(s.SecurityEventRetentionDays), NormalizeSecurityCaptureMode(s.SecurityCaptureMode),
 		NormalizeSecurityCaptureRetentionDays(s.SecurityCaptureRetentionDays), NormalizeSecurityCaptureMaxBodyBytes(s.SecurityCaptureMaxBodyBytes),
 		s.ProxyRequestSystemPromptEnabled, strings.TrimSpace(s.ProxyRequestSystemPrompt),
-		s.ProxyResponseRewriteEnabled, strings.TrimSpace(s.ProxyResponseRewritePrompt))
+		s.ProxyResponseRewriteEnabled, strings.TrimSpace(s.ProxyResponseRewritePrompt),
+		strings.TrimSpace(s.UpstreamCooldownRules), strings.TrimSpace(s.ExposedModels))
 	return err
 }
 

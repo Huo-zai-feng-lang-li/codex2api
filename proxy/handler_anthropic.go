@@ -122,8 +122,13 @@ func (h *Handler) Messages(c *gin.Context) {
 	if h.enforceAPIKeyLimitsAndReply(c, effectiveModel) {
 		return
 	}
-	accountFilter := accountFilterForModel(effectiveModel)
-	accountFilter = h.withModelCooldownFilter(effectiveModel, accountFilter)
+	// 模型名映射：与 /v1/responses 保持一致。
+	mappedModel := resolveOpenAIResponsesModel(effectiveModel, h.store.GetModelMapping())
+	// Messages 接口同样会翻译为 Responses 格式再发上游，需允许 responses_api 账号。
+	// allowCodexAccounts 与 chat/completions 保持一致：映射后的第三方模型名不在内置
+	// 支持列表时排除 Codex 原生账号，避免模型名改写后打到官方上游 400。
+	accountFilter := accountFilterForResponsesModel(mappedModel, modelIDInList(mappedModel, SupportedModelIDs(c.Request.Context(), h.db)))
+	accountFilter = h.withModelCooldownFilter(mappedModel, accountFilter)
 
 	// 提取 reasoning effort（从翻译后的 codex body 中）
 	reasoningEffort := extractReasoningEffort(codexBody)
@@ -220,7 +225,12 @@ func (h *Handler) Messages(c *gin.Context) {
 			sendAnthropicError(c, http.StatusForbidden, "permission_error", upstreamGuardBlockMessage(verdict))
 			return
 		}
-		resp, reqErr := ExecuteRequest(upstreamCtx, account, codexBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, useWebsocket)
+		// 模型名映射：转发前把 body 中的 Codex 模型名替换为实际多供应商模型名。
+		forwardBody := codexBody
+		if account.IsOpenAIResponsesAPI() && mappedModel != effectiveModel {
+			forwardBody = replaceModelInJSONBody(codexBody, mappedModel)
+		}
+		resp, reqErr := ExecuteRequest(upstreamCtx, account, forwardBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, useWebsocket)
 		durationMs := int(time.Since(start).Milliseconds())
 
 		if reqErr != nil {
@@ -279,7 +289,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			log.Printf("上游返回错误 (attempt %d, status %d, /v1/messages): %s", attempt+1, resp.StatusCode, upstreamErrorLogBody(errBody))
 			logUpstreamError("/v1/messages", resp.StatusCode, model, account.ID(), errBody)
 			h.logUpstreamCyberPolicy(c, "/v1/messages", model, errBody)
-			decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, effectiveModel)
+			decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, cooldownModelFor(account, effectiveModel, mappedModel))
 			shouldRetry := shouldRetryHTTPStatus(resp.StatusCode, &generalRetries, &rateLimitRetries, maxRetries, maxRateLimitRetries)
 			h.logUsageForRequest(c, &database.UsageLogInput{
 				AccountID:         account.ID(),
@@ -589,7 +599,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
 			h.store.UnbindSessionAffinity(affinityKey, account.ID())
 		} else if outcome.logStatusCode == http.StatusOK {
-			h.store.ClearModelCooldown(account, effectiveModel)
+			h.store.ClearModelCooldown(account, cooldownModelFor(account, effectiveModel, mappedModel))
 			h.store.ReportRequestSuccess(account, time.Duration(totalDuration)*time.Millisecond)
 		}
 		h.store.Release(account)

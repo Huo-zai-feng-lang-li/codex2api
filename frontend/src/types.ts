@@ -633,6 +633,10 @@ export interface SystemSettings {
   image_s3_secret_key_configured?: boolean
   image_s3_prefix: string
   image_s3_force_path_style: boolean
+  upstream_cooldown_rules: string
+  exposed_models: string
+  tunnel_domain: string
+  tunnel_running: boolean
 }
 
 export interface SetupHintsResponse {

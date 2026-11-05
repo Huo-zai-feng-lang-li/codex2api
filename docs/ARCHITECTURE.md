@@ -406,6 +406,61 @@ function SelectAccount():
     return candidates[0]
 ```
 
+
+### 模型映射与模型级冷却（v2.2.9）
+
+**模型名映射的双路径差异**（重要，改动时勿混用）：
+
+| 入口 | 是否对 Codex 原生账号替换模型名 | 原因 |
+|------|------------------------------|------|
+| `/v1/responses`（HTTP + WS，responses_api 分支） | 是 | 目标是第三方上游，必须换成上游认的模型名 |
+| `/v1/chat/completions` | **否** | 翻译入口，映射目标通常是第三方名；换给官方上游必 400 |
+| `/v1/messages` | **否** | 同上 |
+| `/v1/responses`（WS，Codex 分支） | 是 | 只有 `modelIDInList(mappedModel, SupportedModelIDs(...))` 命中才会走到，属官方别名场景 |
+
+调度侧对应约束：`accountFilterForResponsesModel(model, allowCodexAccounts)` 的第二参必须由 `modelIDInList(mappedModel, SupportedModelIDs(ctx, db))` 决定，不能硬编码 `true`。硬编码 `true` 会让 Codex 账号接收第三方模型名的请求。
+
+**模型级冷却的 key 一致性**：
+
+冷却写入与调度过滤必须使用同一个 key，否则冷却永不命中。统一由 `cooldownModelFor(account, effectiveModel, mappedModel)` 决定：
+
+- `account.IsOpenAIResponsesAPI()` 且 `mappedModel` 非空 → 返回 `mappedModel`（实际转发给上游的名字）
+- 其余（Codex 原生账号）→ 返回 `effectiveModel`
+
+所有 `applyCooldownForModel` / `ClearModelCooldown` 调用点都必须走这个 helper。`recheckAccountsAfterExhaustion` 额外对 responses_api 账号清一次 `resolveOpenAIResponsesModel(model, mapping)`，覆盖调用方只传 effectiveModel 的场景。
+
+**账号级 vs 模型级的错误语义边界**：
+
+`modelScopedQuotaFailure` 只认「分组 / 用户维度」的额度语义：
+
+| 语义 | 归类 | 冷却范围 |
+|------|------|----------|
+| `insufficient user quota` / `insufficient_user_quota` | 模型级（分组额度） | 单模型 30 分钟 |
+| `not enabled for this group` | 模型级（分组未开通） | 单模型 30 分钟 |
+| `billing` + `hard limit` | 模型级（账单硬上限） | 单模型 30 分钟 |
+| `insufficient_quota` / `insufficient quota` / `exceeded your current quota` | **账号级**（billing 耗尽） | 整账号 6 小时 |
+
+误把账号级当模型级，会让账号其它模型继续被调度并反复撞墙。
+
+**模型注册表缓存**：
+
+`SupportedModelIDs(ctx, db)` 带 15 秒 TTL 缓存（`sync.RWMutex` + `time.Time`）。它在每个 chat/completions、messages、responses、`/v1/models` 请求里都会被调用，无缓存时每次触发两次 SQL（`ListModelRegistry` + `GetModelRegistrySyncState`）。
+
+- 注册表写入后必须调用 `InvalidateSupportedModelIDsCache()`（`ApplyOfficialCodexModelSync` 已覆盖）
+- **返回的切片是缓存的内部数组，调用方禁止原地修改或直接 append**。`enabledModelIDs` 用 `make([]string, 0, len(items))` 分配，存在 `cap > len` 的余量，直接 append 会写入空闲槽位并污染缓存。`supportedModelIDs` 已改为先 `append([]string(nil), ...)` 拷贝再追加。
+
+**对外模型白名单（exposed_models）**：
+
+只影响 `/v1/models` 的列表输出，**不影响请求校验**（校验走全量 `supportedModelIDs`，避免白名单过窄堵死账号实际能用的模型）。语义约定：
+
+- 空配置 = 不启用过滤，输出全量
+- 显式配置 = 只输出白名单 ∩ 实际可用模型的交集
+- 默认 6 个模型仅在进程首次 `init()` 装载一次，保存过设置后不再回归默认值
+
+**上游域名级 429 冷却规则（upstream_cooldown_rules）**：
+
+`classify429RateLimit` 的三级优先级：强语义（日/周配额/欠费）→ 域名规则 → burst（RPM/TPM）兜底。域名规则让用户在设置页配的 `agnes-ai.cn = 120s` 能压过固定 1 分钟兜底；若上游 `Retry-After` 更长则取较大值。
+
 ---
 
 ## 存储层

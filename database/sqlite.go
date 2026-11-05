@@ -158,7 +158,9 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 				proxy_request_system_prompt_enabled INTEGER DEFAULT 0,
 				proxy_request_system_prompt TEXT DEFAULT '',
 				proxy_response_rewrite_enabled INTEGER DEFAULT 0,
-				proxy_response_rewrite_prompt TEXT DEFAULT ''
+				proxy_response_rewrite_prompt TEXT DEFAULT '',
+				upstream_cooldown_rules TEXT DEFAULT '',
+				exposed_models TEXT DEFAULT ''
 			);`,
 		`CREATE TABLE IF NOT EXISTS model_registry (
 			id TEXT PRIMARY KEY,
@@ -439,6 +441,8 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "proxy_request_system_prompt", "TEXT DEFAULT ''"},
 		{"system_settings", "proxy_response_rewrite_enabled", "INTEGER DEFAULT 0"},
 		{"system_settings", "proxy_response_rewrite_prompt", "TEXT DEFAULT ''"},
+		{"system_settings", "upstream_cooldown_rules", "TEXT DEFAULT ''"},
+		{"system_settings", "exposed_models", "TEXT DEFAULT ''"},
 		{"security_captures", "capture_error", "TEXT DEFAULT ''"},
 		{"accounts", "enabled", "INTEGER DEFAULT 1"},
 		{"accounts", "locked", "INTEGER DEFAULT 0"},
