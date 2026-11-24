@@ -1,32 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Codex 一键更新脚本
-==================
-链路：Codex 桌面端 -> 本地 codex2api(127.0.0.1:18080) -> 上游 responses_api 号池
+codex2api 模型列表更新脚本
+==========================
+链路：下游客户端 -> 本地 codex2api(127.0.0.1:18080) -> 上游 responses_api 号池
 
-默认依次执行：
-  1. 更新 Codex        商店版优先 winget，回退 codex update；商店本就自动更新，失败仅警告
-  2. 同步模型          POST /models/sync 拉官方目录；官方页 403/超时则保留本地并警告
-  3. 重启 app-server   非提升终端用 daemon restart；提升终端改为重启桌面端（连带 app-server）
-  4. 号池更新          逐个 responses_api 账号拉取上游 /v1/models 并保存（默认只增不删）
+两步：
+  1. 同步官方目录    POST /api/admin/models/sync；官方页 403/超时则保留本地并警告
+  2. 更新号池模型    逐个 responses_api 账号拉取上游 /v1/models 并保存（默认只增不删）
 
-退出码：存在硬性失败 -> 1；仅警告 -> 0。日志在 logs/update-<时间戳>.log。
+Codex 桌面端已卸载，脚本不再执行 `winget upgrade Codex` 与 `app-server` 重启；
+旧参数 --skip-update / --skip-restart 仍被接受，仅作兼容占位。
+
+退出码：存在硬性失败 -> 1；仅警告 -> 0。日志在 logs/update-models-<时间戳>.log。
 
 常用参数：
-  --skip-update / --skip-sync / --skip-restart / --skip-refresh
+  --skip-sync / --skip-refresh
   --prune       号池精确同步（删除上游本次未列出的模型）；默认只增不删
   --dry-run     号池只拉取、比对，不写入
   --keep-all    含危险字符的模型也原样提交（默认跳过并记录）
 """
 import argparse
-import ctypes
 import json
 import os
 import re
 import sys
-import subprocess
-import time
 import unicodedata
 import urllib.request
 import urllib.error
@@ -40,10 +38,6 @@ except Exception:
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
-# 商店包信息
-STORE_PRODUCT_ID = "9PLM9XGG6VKS"
-CODEX_AUMID = "OpenAI.Codex_2p2nqsd0c76g0!App"
-
 # 步骤三态
 OK, WARN, FAIL = "ok", "warn", "fail"
 
@@ -53,7 +47,7 @@ class Logger:
     def __init__(self):
         os.makedirs(os.path.join(ROOT, "logs"), exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        self.path = os.path.join(ROOT, "logs", f"update-{stamp}.log")
+        self.path = os.path.join(ROOT, "logs", f"update-models-{stamp}.log")
         self.fp = open(self.path, "w", encoding="utf-8")
 
     def log(self, msg=""):
@@ -80,28 +74,6 @@ def load_env():
                     k, v = line.split("=", 1)
                     env[k.strip()] = v.strip()
     return env
-
-
-def find_codex_exe():
-    """返回 bin 下修改时间最新的 codex.exe（更新后可能出现新的 hash 目录）。"""
-    root = os.path.join(os.environ.get("LOCALAPPDATA", ""), "OpenAI", "Codex", "bin")
-    candidates = []
-    if os.path.isdir(root):
-        for d in os.listdir(root):
-            p = os.path.join(root, d, "codex.exe")
-            if os.path.isfile(p):
-                candidates.append((os.path.getmtime(p), p))
-    if candidates:
-        candidates.sort(reverse=True)
-        return candidates[0][1]
-    return None
-
-
-def is_elevated():
-    try:
-        return ctypes.windll.shell32.IsUserAnAdmin() != 0
-    except Exception:
-        return False
 
 
 # ----------------------------- HTTP -----------------------------
@@ -189,110 +161,24 @@ def union_models(old, new):
     return final
 
 
-# ----------------------------- 命令执行 -----------------------------
-def run_command(args, timeout, lg):
-    lg.log("    $ " + " ".join(f'"{a}"' if " " in a else a for a in args))
-    try:
-        proc = subprocess.run(args, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace", timeout=timeout)
-        out = ((proc.stdout or "") + (proc.stderr or "")).strip()
-        for line in out.splitlines():
-            lg.log("    | " + line)
-        return proc.returncode == 0, out
-    except subprocess.TimeoutExpired:
-        return False, f"超时（>{timeout}s）"
-    except Exception as e:
-        return False, str(e)
-
-
-def process_exists(proc_name, lg):
-    ps = f"if (Get-Process -Name '{proc_name}' -ErrorAction SilentlyContinue) {{exit 0}} else {{exit 1}}"
-    ok, _ = run_command(["powershell", "-NoProfile", "-Command", ps], 20, lg)
-    return ok
-
-
-# ----------------------------- 步骤 1：更新 -----------------------------
-def step_codex_update(lg):
-    lg.log("[1/4] 更新 Codex ...")
-    exe = find_codex_exe()
-    common = ["--accept-source-agreements", "--accept-package-agreements",
-              "--disable-interactivity", "--silent"]
-    strategies = [
-        ["winget", "upgrade", "-e", "--id", STORE_PRODUCT_ID, "--source", "msstore"] + common,
-        ["winget", "upgrade", "-e", "--id", STORE_PRODUCT_ID] + common,
-    ]
-    if exe:
-        strategies.append([exe, "update"])
-
-    for cmd in strategies:
-        ok, out = run_command(cmd, 300, lg)
-        low = out.lower()
-        if ok:
-            lg.log("    [OK] Codex 已更新 / 已是最新")
-            return OK
-        if re.search(r"no available upgrade|no applicable|already|latest|已安装|最新|没有可用", low):
-            lg.log("    [OK] 已是最新版本，无需更新")
-            return OK
-    lg.log("    [警告] 自动更新未成功。商店应用通常由 Microsoft Store 自动更新；")
-    lg.log("           也可打开『Microsoft Store → 库 → 获取更新』手动检查。")
-    return WARN
-
-
-# ----------------------------- 步骤 2：同步模型 -----------------------------
+# ----------------------------- 步骤 1：同步官方目录 -----------------------------
 def step_sync_models(client, lg):
-    lg.log("[2/4] 同步官方模型 (POST /models/sync) ...")
+    lg.log("[1/2] 同步官方模型目录 (POST /api/admin/models/sync) ...")
     try:
         resp = client.call("POST", "/api/admin/models/sync", {}, timeout=60)
         lg.log("    [OK] " + json.dumps(resp, ensure_ascii=False)[:300])
         return OK
     except Exception as e:
-        if is_temporary(e):
+        if is_temporary(e) or "403" in str(e):
             lg.log(f"    [警告] 官方模型页暂时不可用，已保留本地模型列表（{e}）")
             return WARN
         lg.log(f"    [失败] sync: {e}")
         return FAIL
 
 
-# ----------------------------- 步骤 3：重启 app-server -----------------------------
-def kill_appserver(lg):
-    ps = ("Get-CimInstance Win32_Process -Filter \"Name='codex.exe'\" | "
-          "Where-Object { $_.CommandLine -match 'app-server' } | "
-          "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }")
-    run_command(["powershell", "-NoProfile", "-Command", ps], 30, lg)
-
-
-def restart_desktop(lg):
-    lg.log("    通过重启桌面端来重启 app-server ...")
-    run_command(["taskkill", "/F", "/IM", "ChatGPT.exe"], 30, lg)
-    kill_appserver(lg)
-    time.sleep(3)
-    run_command(["explorer.exe", f"shell:AppsFolder\\{CODEX_AUMID}"], 30, lg)
-    time.sleep(6)
-    if process_exists("ChatGPT", lg):
-        lg.log("    [OK] 桌面端已重启，app-server 已随之重新拉起")
-        return OK
-    lg.log("    [警告] 已发出重启指令，但未在限定时间内检测到桌面端，请手动确认")
-    return WARN
-
-
-def step_restart_appserver(lg, elevated):
-    lg.log("[3/4] 重启 app-server ...")
-    if not elevated:
-        exe = find_codex_exe()
-        if exe:
-            ok, _ = run_command([exe, "app-server", "daemon", "restart"], 90, lg)
-            if ok:
-                lg.log("    [OK] app-server daemon 已重启")
-                return OK
-            lg.log("    daemon restart 未成功，改为重启桌面端 ...")
-    else:
-        lg.log("    当前为管理员(elevated)终端，daemon 出于安全拒绝在此启动；改为重启桌面端 ...")
-    return restart_desktop(lg)
-
-
-# ----------------------------- 步骤 4：号池更新 -----------------------------
+# ----------------------------- 步骤 2：号池更新 -----------------------------
 def step_refresh_pool(client, lg, keep_all, dry_run, prune):
-    label = "[4/4] 号池更新（dry-run，不写入）" if dry_run else "[4/4] 号池更新"
+    label = "[2/2] 号池模型更新（dry-run，不写入）" if dry_run else "[2/2] 号池模型更新"
     mode = "精确同步(prune)" if prune else "只增不删(merge)"
     lg.log(f"{label}  模式：{mode} ...")
     try:
@@ -307,10 +193,13 @@ def step_refresh_pool(client, lg, keep_all, dry_run, prune):
         accounts = resp
     else:
         accounts = []
-    targets = [a for a in accounts if a.get("openai_responses_api")]
+    targets = [a for a in accounts
+               if a.get("openai_responses_api") and a.get("enabled", True)
+               and str(a.get("status") or "").lower() != "deleted"]
     lg.log(f"    发现 {len(targets)} 个 responses_api 账号")
 
     n_ok = n_retry = n_fail = 0
+    added_all = []
     for a in targets:
         aid = a.get("id")
         name = a.get("name") or f"ID {aid}"
@@ -336,12 +225,13 @@ def step_refresh_pool(client, lg, keep_all, dry_run, prune):
                 removed = []
             added = [m for m in final if m.lower() not in {x.lower() for x in old}]
 
-            if not dry_run:
+            if not dry_run and (added or removed):
                 patch = {"name": name, "base_url": base_url, "api_key": "",
                          "models": final, "proxy_url": proxy_url}
                 client.call("PATCH", f"/api/admin/accounts/{aid}/openai-responses",
                             patch, timeout=30)
             n_ok += 1
+            added_all.extend(added)
             lg.log(f"    [{aid}] {name}: {len(old)} -> {len(final)} "
                    f"新增{len(added)} 移除{len(removed)} 跳过{len(skipped)} [OK]")
             for m in added:
@@ -358,8 +248,11 @@ def step_refresh_pool(client, lg, keep_all, dry_run, prune):
                 n_fail += 1
                 lg.log(f"    [{aid}] {name}: [失败] {e}")
 
+    unique_added = sorted({m for m in added_all}, key=str.lower)
     lg.log("    ---- 号池汇总 ----")
     lg.log(f"    成功 {n_ok} / 待重试 {n_retry} / 失败 {n_fail}")
+    if unique_added:
+        lg.log(f"    本次新增模型 {len(unique_added)} 个：{', '.join(unique_added)}")
     if n_fail:
         return FAIL
     if n_retry:
@@ -371,22 +264,21 @@ def step_refresh_pool(client, lg, keep_all, dry_run, prune):
 # ----------------------------- 主流程 -----------------------------
 def main():
     ap = argparse.ArgumentParser(
-        description="Codex 一键更新：更新 Codex + 同步模型 + 重启 app-server + 号池拉取")
-    ap.add_argument("--skip-update", action="store_true")
+        description="codex2api 模型列表更新：同步官方目录 + 号池模型拉取（不再处理 Codex 客户端）")
     ap.add_argument("--skip-sync", action="store_true")
-    ap.add_argument("--skip-restart", action="store_true")
     ap.add_argument("--skip-refresh", action="store_true")
     ap.add_argument("--prune", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--keep-all", action="store_true")
+    # 兼容旧脚本参数：Codex 相关步骤已移除，这里仅接受不报错
+    ap.add_argument("--skip-update", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--skip-restart", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
 
     lg = Logger()
     lg.log("=" * 60)
-    lg.log("Codex 一键更新  " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    lg.log("codex2api 模型列表更新  " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     lg.log("项目根: " + ROOT)
-    elevated = is_elevated()
-    lg.log("权限:   " + ("管理员(elevated)" if elevated else "普通用户"))
     lg.log("日志:   " + lg.path)
     lg.log("=" * 60)
 
@@ -407,14 +299,10 @@ def main():
     lg.log(f"[预检] codex2api 健康 OK，端口 {port}")
 
     results = {}
-    if not args.skip_update:
-        results["更新 Codex"] = step_codex_update(lg)
     if not args.skip_sync:
-        results["同步模型"] = step_sync_models(client, lg)
-    if not args.skip_restart:
-        results["重启 app-server"] = step_restart_appserver(lg, elevated)
+        results["同步官方目录"] = step_sync_models(client, lg)
     if not args.skip_refresh:
-        results["号池更新"] = step_refresh_pool(
+        results["号池模型更新"] = step_refresh_pool(
             client, lg, args.keep_all, args.dry_run, args.prune)
 
     lg.log("=" * 60)

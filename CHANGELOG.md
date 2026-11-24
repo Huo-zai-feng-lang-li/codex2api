@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## v2.3.0 - 2026-11-24
+
+### Changes
+
+- **Codex client auto-update removed from the maintenance tooling.** The Codex desktop app (Microsoft Store package `OpenAI.Codex`), its CLI and `~/.codex` were uninstalled from this machine, so `update_codex_and_models.py` step 1 (`winget upgrade` / `codex update`) and step 3 (`codex app-server daemon restart` / desktop relaunch) had no target left. The script is replaced by **`update_models.py`**, which keeps only the two steps that actually matter for this gateway: official catalog sync (`POST /api/admin/models/sync`) and upstream pool model refresh.
+- **Launcher renamed** `更新Codex和模型.bat` → **`更新模型列表.bat`** (the old wrapper's Chinese full-width brackets also broke `cmd` echo parsing; the new launcher uses ASCII-only banner text).
+- **Backward compatibility.** `--skip-update` and `--skip-restart` are still accepted as hidden no-ops, so any existing scheduled task invoking the old flags keeps working. New flags: `--skip-sync`, `--skip-refresh`, `--prune`, `--dry-run`, `--keep-all`.
+- **Pool refresh no longer PATCHes unchanged accounts.** A `PATCH /api/admin/accounts/{id}/openai-responses` is only issued when the model list actually gained or lost entries (`--prune` removals included), cutting write traffic against the account table.
+- **`新模型接入手册.md` marked obsolete sections.** Everything that depends on the Codex desktop app — the `app-server` dropdown, `model_catalog_json`, `~/.codex/config.toml`, `winget` product id — is explicitly flagged as retired; the registry (`model_registry`) and pool (`credentials.models`) flows remain.
+
+### Verification
+
+- `python -m py_compile update_models.py` and a live smoke run of `更新模型列表.bat` against `127.0.0.1:18080` (`/health` ok, launcher banner clean).
+- Full run against the live pool: 37 accounts refreshed, 1 upstream offline (`http://127.0.0.1:3000` unreachable), 8 models added — `gpt-6.2-astra`, `gpt-6.2-sol`, `gpt-6.1-sol`, `gpt-6.1-terra`, `codex-auto-review`, `agnes-3.0-pro`, `agnes-sys1-1.0`, `agnes-2.5-pro-theta`. `/v1/models` went from 45 to 51 entries.
+- Go/前端构建验证：清盘后系统句柄/内存资源紧张（`ERROR_NO_SYSTEM_RESOURCES`），`go build ./...` 无法在此状态完成；重启后由 `build-and-restart.bat` 补跑并热替换。
+
 ## v2.2.9 - 2026-11-05
 
 ### Fixes

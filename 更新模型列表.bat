@@ -2,9 +2,10 @@
 chcp 65001 >nul
 cd /d "%~dp0"
 echo ============================================
-echo   Update Codex and refresh model lists
+echo   codex2api model list sync
+echo   official catalog + upstream pool
 echo ============================================
 echo.
-python update_codex_and_models.py %*
+python update_models.py %*
 echo.
 pause
