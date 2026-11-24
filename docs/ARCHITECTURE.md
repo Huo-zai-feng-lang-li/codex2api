@@ -420,6 +420,16 @@ function SelectAccount():
 
 调度侧对应约束：`accountFilterForResponsesModel(model, allowCodexAccounts)` 的第二参必须由 `modelIDInList(mappedModel, SupportedModelIDs(ctx, db))` 决定，不能硬编码 `true`。硬编码 `true` 会让 Codex 账号接收第三方模型名的请求。
 
+### Chat 图片请求的 Responses→Chat 回退
+
+部分第三方上游（如 Agnes）的 `/v1/responses` 不支持图片内容块，但同一账号的 `/v1/chat/completions` 支持。为避免把 Cuckoo 的标准 chat 图片请求翻译成 Responses 后丢图，`ChatCompletions` 在以下条件全部满足时回退：
+
+- `responses_api` 账号；
+- 原始下游 chat body 内含 `image_url`；
+- `/v1/responses` 返回 400，且错误体含 `unknown` / `image` / `vision` / `multimodal` 关键词。
+
+回退保留原始 chat body（含 `stream`、`tools`、`max_tokens`、`reasoning_effort`），只替换模型映射，直接 POST 同一账号的 `/v1/chat/completions`。成功时 JSON/SSE 原样回传，并按 chat `usage` 记用量；失败时继续原有 400 错误、重试与冷却路径。非图片 400 不触发回退，避免普通参数错误被悄悄改协议重试。
+
 **模型级冷却的 key 一致性**：
 
 冷却写入与调度过滤必须使用同一个 key，否则冷却永不命中。统一由 `cooldownModelFor(account, effectiveModel, mappedModel)` 决定：

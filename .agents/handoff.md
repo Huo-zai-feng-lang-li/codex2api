@@ -1,6 +1,15 @@
-# 最新接续状态 (2026-11-05 23:55)
+# 最新接续状态 (2026-11-24 23:05)
 
-## 核心进展
+## 2026-11-24 Agnes 图片 400 回退
+
+- **根因**：Agnes `/v1/responses` 不支持图片内容块（报 `type='unknown'`），同 Key 的 `/v1/chat/completions` 支持图片。
+- **修复**：新增 `proxy/chat_completions_fallback.go`；`ChatCompletions` 在图片请求收到 Responses 400 时，保留原始 chat body 直打同账号 `/v1/chat/completions`，JSON/SSE 原样回传；非图片 400 不回退。
+- **测试**：3 个新增测试（非流式/流式/纯文本不触发）全过；`go test ./...`、`go vet ./...` 全过。
+- **真机**：Agnes 图片非流式 200“红色”，流式 200“绿色”，`data: [DONE]` 正常；`usage_logs` 显示 `account_id=867`、`upstream_endpoint=/v1/chat/completions`、200。
+- **号池**：`856` 局域网账号已软删除；12 个官方 Key 已写入 `Agnes-官方-1..12`，全部 `/v1/models` 200。
+- **提交**：`b530272 fix(proxy): fall back to chat completions for image 400`；**未推送**，本机 VPN `127.0.0.1:51081` 未启动，GitHub 直连被 reset。
+
+## 历史进展（2026-11-05）
 本轮完成**审计驱动的 8 项修复**（1 🔴 + 6 🟡 + 1 🟢），含独立子代理对抗性复核后追加的 2 项。全部通过编译/vet/测试/前端构建/真机两连包验证。代码已暂存（21 文件），**已发版 v2.2.9**。
 
 ## 本轮修复清单（审计报告：.agents/模型映射与限流冷却-审计.md）

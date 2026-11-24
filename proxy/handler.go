@@ -3191,12 +3191,26 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 
 		if resp.StatusCode != http.StatusOK {
 			ttftGuard.Stop()
+			errBody, _ := readUpstreamErrorBody(resp)
+			resp.Body.Close()
+
+			// Agnes 等上游的 /v1/responses 只支持文本；图片内容块会 400。
+			// 下游本来就是 chat/completions，保留原始 chat body 改打同账号的
+			// /v1/chat/completions，避免把图片丢掉。
+			if chatRequestHasImage(rawBody) && isImageContentRejection(resp.StatusCode, errBody) {
+				if h.tryChatCompletionsFallback(
+					c, upstreamCtx, rawBody, model, mappedModel, account, proxyURL,
+					isStream, reasoningEffort, serviceTier, attempt, start,
+				) {
+					h.store.Release(account)
+					return
+				}
+			}
+
 			if kind := classifyHTTPFailure(resp.StatusCode); kind != "" {
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 			}
 			SyncCodexUsageState(h.store, account, resp)
-			errBody, _ := readUpstreamErrorBody(resp)
-			resp.Body.Close()
 			h.store.Release(account)
 			h.store.UnbindSessionAffinity(affinityKey, account.ID())
 			retryExclusions.MarkHard(account.ID())
@@ -4068,6 +4082,7 @@ func cooldownModelFor(account *auth.Account, effectiveModel, mappedModel string)
 //   - insufficient_quota（OpenAI 标准错误码）
 //   - insufficient quota（"You exceeded your current quota ... insufficient_quota"）
 //   - exceeded your current quota
+//
 // 仅保留明确带有「分组 / 用户维度」关键词的语义：
 //   - insufficient user quota / insufficient_user_quota（NewAPI 分组额度）
 //   - not enabled for this group（分组未开通）
