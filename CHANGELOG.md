@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## v2.3.1 - 2026-11-24
+
+### Security
+
+- `github.com/andybalholm/brotli` v1.0.6 → **v1.2.7**（GO-2026-6888，恶意压缩流解压时内存暴涨）。
+- `github.com/klauspost/compress` v1.17.6 → **v1.20.2**（GO-2026-6865，两段帧触发 panic）。
+- `golang.org/x/net` v0.55.0 → **v0.60.0**（GO-2026-6617）。
+- `github.com/gorilla/websocket` v1.5.3 → **v1.5.4-0.20240701034025-d67f41855da4**（GO-2026-6278）。
+- `golang.org/x/image` v0.43.0 → **v0.45.0**（GO-2026-6222，VP8L 解码内存暴涨）。
+- `go` 指令/工具链升到 **go 1.26.11**，清掉标准库 `net/http`（GO-2026-6859）与 `crypto/x509`（GO-2026-6809）两条告警。
+- 前端：`nanoid` 3.3.16 → **3.3.20**（overrides）、`vite` 8.2.0 → **8.3.8**、`source-map-js` → **1.2.4**（overrides），清掉 `Security Scan` 里 npm audit 的 high 拦截项。
+
+### Verification
+
+- `go build ./...`、`go vet ./...`、`go test ./... -count=1`（16 个包全过）。
+- `govulncheck ./...` → **No vulnerabilities found**（0 影响代码；3 条仅存在于未被调用的依赖模块）。
+- `node scripts/security/npm-audit-high.mjs` → `{"status":"ok","high_or_critical_blocked":0}`。
+- `npx tsc --noEmit`、`npm run build` 通过。
+
 ## v2.3.0 - 2026-11-24
 
 ### Changes
