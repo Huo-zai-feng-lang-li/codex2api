@@ -16,7 +16,8 @@
 
 - `python -m py_compile update_models.py` and a live smoke run of `更新模型列表.bat` against `127.0.0.1:18080` (`/health` ok, launcher banner clean).
 - Full run against the live pool: 37 accounts refreshed, 1 upstream offline (`http://127.0.0.1:3000` unreachable), 8 models added — `gpt-6.2-astra`, `gpt-6.2-sol`, `gpt-6.1-sol`, `gpt-6.1-terra`, `codex-auto-review`, `agnes-3.0-pro`, `agnes-sys1-1.0`, `agnes-2.5-pro-theta`. `/v1/models` went from 45 to 51 entries.
-- Go/前端构建验证：清盘后系统句柄/内存资源紧张（`ERROR_NO_SYSTEM_RESOURCES`），`go build ./...` 无法在此状态完成；重启后由 `build-and-restart.bat` 补跑并热替换。
+- `go build ./...`, `go vet ./...`, `go test ./... -count=1`（16 个包全过，重启后补跑）。
+- `build-and-restart.bat` 重建并热替换：`/health` = ok，PID 15004，`/v1/models` 仍为 51 个（含 gpt-6.2-astra / gpt-6.2-sol）。
 
 ## v2.2.9 - 2026-11-05
 
