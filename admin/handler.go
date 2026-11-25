@@ -18,10 +18,8 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -230,6 +228,8 @@ func (h *Handler) RequestShutdown(reason string) bool {
 
 // RegisterRoutes 注册管理 API 路由
 func (h *Handler) RegisterRoutes(r *gin.Engine) {
+	// 服务启动即武装隧道守护，避免热替换后要等前端打开设置页才恢复隧道。
+	startTunnelGuard()
 	r.GET("/p/img/:id", h.GetSignedImageAssetFile)
 	r.GET("/p/backgrounds/:filename", h.GetBackgroundAssetFile)
 	r.HEAD("/p/backgrounds/:filename", h.GetBackgroundAssetFile)
@@ -302,6 +302,9 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.PUT("/settings", h.UpdateSettings)
 	api.POST("/settings/background-upload", h.UploadBackgroundAsset)
 	api.POST("/settings/image-storage/test", h.TestImageStorageConnection)
+	api.GET("/tunnel", h.GetTunnel)
+	api.POST("/tunnel/autostart", h.SetTunnelAutostart)
+	api.POST("/tunnel/start", h.StartTunnel)
 	api.GET("/prompt-filter/logs", h.ListPromptFilterLogs)
 	api.DELETE("/prompt-filter/logs", h.ClearPromptFilterLogs)
 	api.POST("/prompt-filter/test", h.TestPromptFilter)
@@ -4449,6 +4452,8 @@ type settingsResponse struct {
 	ExposedModels                    string `json:"exposed_models"`
 	TunnelDomain                     string `json:"tunnel_domain"`
 	TunnelRunning                    bool   `json:"tunnel_running"`
+	TunnelReady                      bool   `json:"tunnel_ready"`
+	TunnelAutostart                  bool   `json:"tunnel_autostart"`
 }
 
 type updateSettingsReq struct {
@@ -4562,65 +4567,8 @@ func resolveTunnelDomain() string {
 	return defaultTunnelDomain
 }
 
-// checkTunnelRunning 探测 cloudflared 是否在运行。
-//
-// 旧实现每 10 秒 TTL 过期后在 GetSettings 内同步执行 tasklist / /proc 扫描，
-// Windows 上偶发 1-2 秒阻塞，而前端有 8 个页面都会调用 GetSettings。
-// 新实现改为后台协程周期刷新 + 原子读：
-//   - 首次调用同步探一次，保证第一屏数据准确；
-//   - 之后由后台 ticker 每 tunnelRunningCacheTTL 刷新，GetSettings 只读原子值。
-var (
-	tunnelRunningState atomic.Bool
-	tunnelProbeOnce    sync.Once
-)
-
-const tunnelRunningCacheTTL = 10 * time.Second
-
-func startTunnelProbeOnce() {
-	tunnelProbeOnce.Do(func() {
-		tunnelRunningState.Store(probeTunnelProcess())
-		go func() {
-			ticker := time.NewTicker(tunnelRunningCacheTTL)
-			defer ticker.Stop()
-			for range ticker.C {
-				tunnelRunningState.Store(probeTunnelProcess())
-			}
-		}()
-	})
-}
-
-func checkTunnelRunning() bool {
-	startTunnelProbeOnce()
-	return tunnelRunningState.Load()
-}
-
-func probeTunnelProcess() bool {
-	if runtime.GOOS == "windows" {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, "tasklist", "/FI", "IMAGENAME eq cloudflared.exe", "/NH")
-		out, err := cmd.Output()
-		if err != nil {
-			return false
-		}
-		return strings.Contains(strings.ToLower(string(out)), "cloudflared.exe")
-	}
-	// Linux: 扫描 /proc
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		comm, err := os.ReadFile(filepath.Join("/proc", e.Name(), "comm"))
-		if err == nil && strings.TrimSpace(string(comm)) == "cloudflared" {
-			return true
-		}
-	}
-	return false
-}
+// tunnelState 状态探测统一走 currentTunnelState（admin/tunnel_*.go），
+// 原先每 10 秒 tasklist 的探针已移除：单次 171ms 且会把机器上其他 cloudflared 实例误判成"在跑"。
 
 func normalizeUpstreamGuardSuppressionsJSON(raw string) (string, []upstreamguard.SuppressionRule, error) {
 	rules, err := upstreamguard.ParseSuppressions(raw)
@@ -5131,6 +5079,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 	if dbSettings != nil {
 		bgCfg = decodeBackgroundConfig(dbSettings.BackgroundConfig)
 	}
+	tunnelSt := currentTunnelState()
 	c.JSON(http.StatusOK, settingsResponse{
 		SiteName:                         branding.SiteName,
 		SiteLogo:                         branding.SiteLogo,
@@ -5213,7 +5162,78 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		UpstreamCooldownRules:            marshalUpstreamCooldownRules(),
 		ExposedModels:                    proxy.MarshalExposedModels(),
 		TunnelDomain:                     resolveTunnelDomain(),
-		TunnelRunning:                    checkTunnelRunning(),
+		TunnelRunning:                    tunnelSt.Ready,
+		TunnelReady:                      tunnelSt.Ready,
+		TunnelAutostart:                  tunnelSt.Autostart,
+	})
+}
+
+// GetTunnel 返回公网隧道状态与自启开关。
+func (h *Handler) GetTunnel(c *gin.Context) {
+	state := currentTunnelState()
+	c.JSON(http.StatusOK, gin.H{
+		"domain":    resolveTunnelDomain(),
+		"running":   state.Running,
+		"ready":     state.Ready,
+		"autostart": state.Autostart,
+		"supported": state.Supported,
+	})
+}
+
+// SetTunnelAutostart 开启/关闭公网隧道开机自启；开启时顺带把隧道拉起来，避免首字节撞上冷启动。
+func (h *Handler) SetTunnelAutostart(c *gin.Context) {
+	if !tunnelAutostartSupported() {
+		writeError(c, http.StatusBadRequest, "当前平台不支持开机自启托管")
+		return
+	}
+	var req struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.Enabled == nil {
+		writeError(c, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	if err := setTunnelAutostart(*req.Enabled); err != nil {
+		writeError(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	ready := false
+	if *req.Enabled {
+		if err := ensureTunnelRunning(); err != nil {
+			writeError(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		ready = waitTunnelReady(20 * time.Second)
+		log.Printf("公网隧道：已开启开机自启，边缘就绪=%v", ready)
+	} else {
+		log.Printf("公网隧道：已关闭开机自启")
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"domain":    resolveTunnelDomain(),
+		"running":   tunnelAlive(),
+		"ready":     tunnelReady(),
+		"autostart": tunnelAutostartEnabled(),
+		"supported": true,
+	})
+}
+
+// StartTunnel 立即拉起隧道（不等下一次开机），并等待边缘就绪。
+func (h *Handler) StartTunnel(c *gin.Context) {
+	if !tunnelAutostartSupported() {
+		writeError(c, http.StatusBadRequest, "当前平台不支持隧道进程托管")
+		return
+	}
+	if err := ensureTunnelRunning(); err != nil {
+		writeError(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	ready := waitTunnelReady(20 * time.Second)
+	c.JSON(http.StatusOK, gin.H{
+		"domain":    resolveTunnelDomain(),
+		"running":   tunnelAlive(),
+		"ready":     ready,
+		"autostart": tunnelAutostartEnabled(),
+		"supported": true,
 	})
 }
 

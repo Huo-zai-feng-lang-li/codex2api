@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+## v2.4.0 - 2026-11-25
+
+### Features
+
+- **公网隧道托管**：管理台新增「公网隧道」卡片，可一键开关 Cloudflare Tunnel 开机自启，并支持「立即启动隧道」。
+  - 开机自启通过启动目录隐藏 VBS（`Codex2apiTunnel.vbs`）+ 标记文件 `data/tunnel/autostart.enabled` 实现，登录即拉起，不依赖服务是否启动。
+  - 服务内守护协程每 15s 巡检，隧道掉线自动重启。
+  - 新增接口：`GET /api/admin/tunnel`、`POST /api/admin/tunnel/autostart`、`POST /api/admin/tunnel/start`。
+- 隧道凭据统一走 token 模式（`CODEX_TUNNEL_TOKEN` 或 `data/tunnel/tunnel-token.txt`），不再依赖 `~/.cloudflared/config.yml` 里可能缺失的 credentials 文件。
+
+### Performance
+
+- **移除 tasklist 探针**：旧实现每 10s spawn 一次 `tasklist`（实测单次 171ms，约 1.7% 单核常驻），且只看进程名会把机器上其他 cloudflared 实例误判为"隧道在跑"。
+  现改为拨测本实例独占的 metrics 端口 `127.0.0.1:20260/ready`，约 1ms，且只认本服务这条隧道。
+
+### Fix
+
+- 修复隧道启动参数顺序：`--metrics` / `--logfile` 必须位于 `run` 之前，否则 cloudflared 报 `flag provided but not defined` 并静默退出。
+- 不再硬编码 `--protocol http2`，交由 cloudflared precheck 自行判定（可用 QUIC 时走 QUIC，不可用时回落 http2）。
+- 隧道进程经一个立即退出的 `wscript` 拉起，成为孤儿进程：热替换脚本的 `taskkill /T` 不再连带杀掉隧道；守护协程在服务启动时立即补位（实测重启后 3 秒内恢复连接）。
+
 ## v2.3.1 - 2026-11-24
 
 ### Security

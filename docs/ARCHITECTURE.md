@@ -473,6 +473,28 @@ function SelectAccount():
 
 ---
 
+### 公网隧道托管（v2.4.0）
+
+公网域名由 Cloudflare Tunnel（named tunnel）暴露到本机 `18080`。隧道**不是**由服务进程拉起的外部依赖，而是由服务托管：
+
+| 关注点 | 实现 |
+|---|---|
+| 凭据 | 隧道 token：`CODEX_TUNNEL_TOKEN` 环境变量 > `data/tunnel/tunnel-token.txt`（`/data/` 已在 gitignore） |
+| 启动 | `cloudflared tunnel --metrics 127.0.0.1:20260 --logfile … run --token …`，`CREATE_NO_WINDOW` 脱控制台拉起 |
+| 开机自启 | 启动目录写入隐藏 VBS `Codex2apiTunnel.vbs` + 标记文件 `data/tunnel/autostart.enabled`；删除两者即关闭 |
+| 守护 | 服务内 goroutine 每 15s 巡检，自启开启且进程掉线时自动重启 |
+| 状态探测 | 拨测本实例独占的 metrics 端口 `127.0.0.1:20260/ready`（返回 `readyConnections`），约 1ms |
+
+**为什么删掉 tasklist 探针**：旧实现每 10 秒 spawn 一次 `tasklist`（实测 171ms ≈ 1.7% 单核常驻），且只看进程名，会把机器上其他 cloudflared 实例（例如 Cuckoo 自带隧道）误判成"我们这条隧道在跑"。现在只认 `20260` 这个端口——它由本实例独占，天然隔离。
+
+**参数位置坑**：`--metrics` / `--logfile` 是 tunnel 级参数，必须写在 `run` 之前；`--token` 是 `run` 的子命令参数。写成 `tunnel run --token … --metrics …` 会被 cloudflared 判为 `flag provided but not defined` 并直接退出（exit 0，无 stderr），表现为"启动即消失"。
+
+**协议选择**：cloudflared 启动 precheck 会自己判定 QUIC 是否可用，不可用时打印 `degraded transport` 并回落 `http2`。不要硬编码 `--protocol`，否则会牺牲掉可用的 QUIC 连接。
+
+接口：`GET /api/admin/tunnel`、`POST /api/admin/tunnel/autostart {enabled}`、`POST /api/admin/tunnel/start`。
+
+---
+
 ## 存储层
 
 ### 数据库 Schema

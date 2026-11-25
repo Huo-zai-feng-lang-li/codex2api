@@ -485,11 +485,14 @@ export default function Settings() {
     exposed_models: '[]',
     tunnel_domain: '',
     tunnel_running: false,
+    tunnel_ready: false,
+    tunnel_autostart: false,
   })
   const [exposedModelsText, setExposedModelsText] = useState('')
   const lazyModeActive = settingsForm.lazy_mode
   const [savingSettings, setSavingSettings] = useState(false)
   const [testingImageStorage, setTestingImageStorage] = useState(false)
+  const [tunnelBusy, setTunnelBusy] = useState(false)
   const [loadedAdminSecret, setLoadedAdminSecret] = useState('')
   const [modelList, setModelList] = useState<string[]>([])
   const [modelItems, setModelItems] = useState<ModelInfo[]>([])
@@ -500,6 +503,45 @@ export default function Settings() {
   const backgroundFileInputRef = useRef<HTMLInputElement>(null)
   const persistedBrandingRef = useRef<Partial<SiteBranding> | null>(null)
   const { toast, showToast } = useToast()
+
+  const applyTunnelStatus = useCallback((status: { running: boolean; ready: boolean; autostart: boolean }) => {
+    setSettingsForm((f) => ({
+      ...f,
+      tunnel_running: status.ready,
+      tunnel_ready: status.ready,
+      tunnel_autostart: status.autostart,
+    }))
+  }, [])
+
+  const handleTunnelAutostart = useCallback(async (enabled: boolean) => {
+    setTunnelBusy(true)
+    try {
+      const status = await api.setTunnelAutostart(enabled)
+      applyTunnelStatus(status)
+      if (!enabled) {
+        showToast(t('settings.tunnelDisabled'))
+      } else {
+        showToast(status.ready ? t('settings.tunnelEnabled') : t('settings.tunnelEnabledPending'), status.ready ? undefined : 'error')
+      }
+    } catch (error) {
+      showToast(`${t('settings.tunnelFailed')}: ${getErrorMessage(error)}`, 'error')
+    } finally {
+      setTunnelBusy(false)
+    }
+  }, [applyTunnelStatus, showToast, t])
+
+  const handleStartTunnel = useCallback(async () => {
+    setTunnelBusy(true)
+    try {
+      const status = await api.startTunnel()
+      applyTunnelStatus(status)
+      showToast(status.ready ? t('settings.tunnelStarted') : t('settings.tunnelStartedPending'), status.ready ? undefined : 'error')
+    } catch (error) {
+      showToast(`${t('settings.tunnelFailed')}: ${getErrorMessage(error)}`, 'error')
+    } finally {
+      setTunnelBusy(false)
+    }
+  }, [applyTunnelStatus, showToast, t])
 
   const loadSettingsData = useCallback(async () => {
     const [health, settings, modelsResp] = await Promise.all([api.getHealth(), api.getSettings(), api.getModels()])
@@ -1068,6 +1110,37 @@ export default function Settings() {
                 </Button>
               </div>
             ) : null}
+          </SettingsCard>
+
+          <SettingsCard title={t('settings.tunnel')} description={t('settings.tunnelDesc')}>
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] gap-4">
+              <SettingField label={t('settings.tunnelDomain')} description={t('settings.tunnelDomainDesc')}>
+                <div className="flex items-center gap-2">
+                  <span className="break-all font-mono text-xs text-foreground">{settingsForm.tunnel_domain || '-'}</span>
+                  <Badge variant={settingsForm.tunnel_ready ? 'default' : settingsForm.tunnel_running ? 'outline' : 'secondary'}>
+                    {settingsForm.tunnel_ready
+                      ? t('settings.tunnelStatusReady')
+                      : settingsForm.tunnel_running
+                        ? t('settings.tunnelStatusStarting')
+                        : t('settings.tunnelStatusDown')}
+                  </Badge>
+                </div>
+              </SettingField>
+              <SettingField label={t('settings.tunnelAutostart')} description={t('settings.tunnelAutostartDesc')}>
+                <Select
+                  value={settingsForm.tunnel_autostart ? 'true' : 'false'}
+                  onValueChange={(value) => void handleTunnelAutostart(value === 'true')}
+                  options={booleanOptions}
+                  disabled={tunnelBusy}
+                />
+              </SettingField>
+            </div>
+            <div className="mt-4 flex items-center gap-3">
+              <Button type="button" size="sm" variant="outline" onClick={() => void handleStartTunnel()} disabled={tunnelBusy}>
+                {t('settings.tunnelStartNow')}
+              </Button>
+              {tunnelBusy ? <span className="text-xs text-muted-foreground">{t('settings.tunnelBusy')}</span> : null}
+            </div>
           </SettingsCard>
 
           <SettingsCard title={t('settings.autoCleanup')}>

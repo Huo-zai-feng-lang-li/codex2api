@@ -637,6 +637,16 @@ export interface SystemSettings {
   exposed_models: string
   tunnel_domain: string
   tunnel_running: boolean
+  tunnel_ready: boolean
+  tunnel_autostart: boolean
+}
+
+export interface TunnelStatusResponse {
+  domain: string
+  running: boolean
+  ready: boolean
+  autostart: boolean
+  supported: boolean
 }
 
 export interface SetupHintsResponse {

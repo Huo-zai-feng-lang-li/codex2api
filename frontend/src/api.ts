@@ -45,6 +45,7 @@ import type {
   SetupHintsResponse,
   CPAExportEntry,
   SystemSettings,
+  TunnelStatusResponse,
   UpdateAccountSchedulerRequest,
   UpdateAPIKeyRequest,
   UpdateOpenAIResponsesAccountRequest,
@@ -508,6 +509,10 @@ export const api = {
   getSettings: () => request<SystemSettings>('/settings'),
   updateSettings: (data: Partial<SystemSettings>) =>
     request<SystemSettings>('/settings', { method: 'PUT', body: JSON.stringify(data) }),
+  getTunnel: () => request<TunnelStatusResponse>('/tunnel'),
+  setTunnelAutostart: (enabled: boolean) =>
+    request<TunnelStatusResponse>('/tunnel/autostart', { method: 'POST', body: JSON.stringify({ enabled }) }),
+  startTunnel: () => request<TunnelStatusResponse>('/tunnel/start', { method: 'POST' }),
   uploadBackground: (file: File) => {
     const form = new FormData()
     form.set('file', file)

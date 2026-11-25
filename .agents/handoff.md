@@ -1,79 +1,57 @@
-# 最新接续状态 (2026-11-24 23:05)
+# 最新接续状态 (2026-11-25 12:45)
 
-## 2026-11-24 Agnes 图片 400 回退
+## 2026-11-25 公网隧道托管 + 开机自启开关（v2.4.0）
 
-- **根因**：Agnes `/v1/responses` 不支持图片内容块（报 `type='unknown'`），同 Key 的 `/v1/chat/completions` 支持图片。
-- **修复**：新增 `proxy/chat_completions_fallback.go`；`ChatCompletions` 在图片请求收到 Responses 400 时，保留原始 chat body 直打同账号 `/v1/chat/completions`，JSON/SSE 原样回传；非图片 400 不回退。
-- **测试**：3 个新增测试（非流式/流式/纯文本不触发）全过；`go test ./...`、`go vet ./...` 全过。
-- **真机**：Agnes 图片非流式 200“红色”，流式 200“绿色”，`data: [DONE]` 正常；`usage_logs` 显示 `account_id=867`、`upstream_endpoint=/v1/chat/completions`、200。
-- **号池**：`856` 局域网账号已软删除；12 个官方 Key 已写入 `Agnes-官方-1..12`，全部 `/v1/models` 200。
-- **提交**：`b530272 fix(proxy): fall back to chat completions for image 400`；**未推送**，本机 VPN `127.0.0.1:51081` 未启动，GitHub 直连被 reset。
+- **根因**：公网域名 DNS CNAME 指向隧道 `a3adcb37`（name=codex2api），该隧道长期 `status=down / conns=0` → 公网 530。`~/.cloudflared/config.yml` 引用的 `a3adcb37...json` 凭据文件不存在，config 模式根本起不来。
+- **修复路径**：改用 token 模式（CF API 取 tunnel token），远端 ingress 已存在（`http://127.0.0.1:18080`），实测 4 条连接注册、公网 200。
+- **新增能力**：
+  - 管理台「系统设置 → 公网隧道」卡片：域名 + 状态徽标 + **开机自启开关** + 「立即启动隧道」。
+  - 自启 = 启动目录 `Codex2apiTunnel.vbs`（隐藏窗口）+ 标记文件 `data/tunnel/autostart.enabled`，登录即拉起，不依赖服务是否启动。
+  - 服务内守护协程每 15s 巡检，自启开启且进程掉线时自动重启；服务启动即武装，不等前端打开页面。
+  - 隧道进程经立即退出的 `wscript` 拉起成孤儿进程，`taskkill /T` 不再连带杀隧道。
+  - 状态探测改为拨测独占 metrics 端口 `127.0.0.1:20260/ready`（~1ms），替代每 10s 一次 `tasklist`（实测 171ms/次 ≈ 1.7% 单核），并消除"机器上其他 cloudflared 被误判为我们的隧道"。
+- **参数坑（重要）**：`--metrics` / `--logfile` 必须写在 `run` 之前，`--token` 写在 `run` 之后。写错会被 cloudflared 判 `flag provided but not defined` 并以 **exit 0 静默退出**（只往 stdout 打 usage），表现为"启动即消失"。
+- **协议**：不再硬编码 `--protocol http2`。cloudflared precheck 自身判定：本机 QUIC region2 失败 → 打印 `degraded transport` 并回落 http2。
+- **接口**：`GET /api/admin/tunnel`、`POST /api/admin/tunnel/autostart {enabled}`、`POST /api/admin/tunnel/start`。
+- **凭据**：`CODEX_TUNNEL_TOKEN` 环境变量 > `data/tunnel/tunnel-token.txt`（`/data/` 已在 gitignore）。
 
-## 历史进展（2026-11-05）
-本轮完成**审计驱动的 8 项修复**（1 🔴 + 6 🟡 + 1 🟢），含独立子代理对抗性复核后追加的 2 项。全部通过编译/vet/测试/前端构建/真机两连包验证。代码已暂存（21 文件），**已发版 v2.2.9**。
+### 验证凭证（全部实测）
 
-## 本轮修复清单（审计报告：.agents/模型映射与限流冷却-审计.md）
+- `go build ./...` / `go vet ./admin ./api` 通过；`go test ./admin` 通过（含 2 个新增 `tunnel_windows_test.go` 用例）。
+- `build-and-restart.bat` 热替换成功（PID 18420，`/health` 200）。
+- 开关打开 → VBS 落地 + 标记文件存在 → `GET /api/admin/tunnel` 返回 `{"autostart":true,"ready":true}`。
+- 关闭 → VBS 与标记文件双双消失。
+- 单独执行 VBS（模拟登录）→ cloudflared 起来、公网 200。
+- 杀进程 → 守护 15s 内拉起、公网 200（实测 4s 生效）。
+- 热替换后 cloudflared 的 `ParentProcessId` 已死（孤儿进程），不再被进程树连带杀掉。
+- 公网实测：本机 21ms；公网 TTFB 0.9–1.2s 常见，偶发 3.3s / 12.9s / 122s（网络层抖动，非隧道逻辑）。
 
-| # | 级别 | 问题 | 修复 |
-|---|---|---|---|
-| 1 | 🔴 | ChatCompletions/Messages 对 Codex 原生账号也替换模型名 → 官方上游 400 | 调度过滤器第二参改 `modelIDInList(mappedModel, SupportedModelIDs(...))`；`replaceModelInJSONBody` 移入 `if account.IsOpenAIResponsesAPI()` 分支 |
-| 2 | 🟡 | 模型级冷却写 `effectiveModel`、查 `mappedModel`，永不命中 | 新增 `cooldownModelFor(account, effectiveModel, mappedModel)`；替换全部调用点；`streamResponsesWSUpstream` 增传 `mappedModel` |
-| 3 | 🟡 | 白名单前端文案撒谎（"允许调用"/"恢复默认 6 个"均不成立） | Settings.tsx description 改为「仅控制 /v1/models 列表展示；留空 = 不过滤；不影响请求校验」 |
-| 4 | 🟡 | `insufficient_quota` 账号级欠费被当模型级冷却 | `modelScopedQuotaFailure` 移除账号级语义，保留 `insufficient user quota` / `insufficient_user_quota` / `not enabled for this group` / `billing+hard limit` |
-| 5 | 🟡 | `SupportedModelIDs` 每次请求 2 次 SQL + 全量遍历，无缓存 | `model_registry.go` 加 15s TTL 缓存 + `InvalidateSupportedModelIDsCache()` |
-| 6 | 🟡 | `GetSettings` 同步阻塞 `tasklist` 探测 cloudflared | 改后台 goroutine 周期刷新 + `atomic.Bool` 读 |
-| 7 | 🟡 | （子代理发现）`supportedModelIDs` 直接 append 缓存切片 → 数据竞争 + 模型串写 | 先 `append([]string(nil), ...)` 拷贝；新增回归测试 |
-| 8 | 🟢 | （子代理发现）`recheckAccountsAfterExhaustion` 只清 effectiveModel 冷却 | recheck 内对 responses_api 账号额外清 mappedModel 冷却 |
-| 9 | 🟢 | `resolveTunnelDomain` 只剥 `https://` 前缀 | 同时剥 `http://` |
+### 提交
 
-**未改（有意为之）**：`responses_ws.go` 的 Codex 分支仍替换模型名——该分支只能走到 Codex 账号，且调度侧 `modelIDInList` 已保证 mappedModel 属官方支持列表，属「官方别名」机制。已补注释说明与 chat/messages 的口径差异。
+- `ca49195 feat(tunnel): 公网隧道托管 + 开机自启开关，tasklist 探针改为 metrics /ready`，tag `v2.4.0`，**未推送**（需 VPN）。
 
-## 关键设计说明
+## 待办
 
-- **`cooldownModelFor`**：responses_api 账号返回 `mappedModel`，Codex 账号返回 `effectiveModel`。写入与调度过滤的 key 必须一致。
-- **`SupportedModelIDs` 缓存**：15s TTL + 同步后失效。返回切片是缓存内部数组，**调用方禁止原地修改或直接 append**（`enabledModelIDs` 用 `make(0, len)` 有余量）。
-- **额度语义边界**：只有分组/用户维度才走模型级 30min 冷却；账号级欠费（`insufficient_quota` 等）回归账号级 6h `payment_required`。
-
-## 验证凭证（全部通过）
-
-- `go build ./...` / `go vet ./...` / `go test ./... -count=1` **16 包全过**
-- `npx tsc --noEmit` / `npm run build`
-- 新增回归测试 6 个全 PASS（含 `TestSupportedModelIDsCacheNotCorruptedByAppend`）
-- `build-and-restart.bat` 热替换成功，`/health` = ok，新 PID 39168
-- **两连包**：`/v1/responses` 首包 A `status=completed` → 续问包 B（带 `previous_response_id`）`status=completed`
-- **P0 双通道**：映射 `gpt-5.5 → gpt-6-astra`，`/v1/chat/completions` 200、`/v1/messages` 200（测完已恢复原映射）
-- `/v1/models` 白名单精确返回 6 个模型
-- 日志：409=0，panic=0，continuation_context_unavailable=0
-
-## 待办事项
-
-- [x] 发版 v2.2.9 四位一体（CHANGELOG / package.json / middleware.go / git tag）
-- [x] 更新 docs/ARCHITECTURE.md（新增「模型映射与模型级冷却」章节）
-- [ ] 用户侧待处理：Agnes 10 个账号 pro/image 组额度为 $0.000000，需去 apihub.agnes-ai.cn 充值
+- [ ] 用户侧：确认「开机自启」保持开启（当前为开）。
+- [ ] 若要压低公网 TTFB：本机到 CF 边缘 RTT ~0.25s、CF 静态页 TTFB ~0.75–1.1s，瓶颈在链路；迁到海外 VPS 才是根治。
 
 ## 关键上下文
 
 - **目录**: `D:\Desktop\Super-File\codex2api`
-- **二进制**: `codex2api.exe`（23:52 构建，PID 39168）
 - **服务**: `http://127.0.0.1:18080`，CF 公网 `https://codex2api.ai95.indevs.in`
-- **当前版本**: v2.2.9
-- **Admin 密钥**: `.env` 中 `ADMIN_SECRET=133413`（请求头 `X-Admin-Key`，注意不是 `X-Admin-Secret`）
-- **Admin 路由前缀**: `/api/admin/*`（不是 `/admin/api/*`）
-- **测试 API Key**: `sk-36970501a8e0faad9c6428ec42e6a486eec32233f3a3af21`
-- **模型映射当前值**: `{"gpt-5.5":"cuckoo-default","gpt-cuckoo-default":"cuckoo-default"}`
+- **当前版本**: v2.4.0
+- **Admin 密钥**: `.env` 中 `ADMIN_SECRET=133413`（请求头 `X-Admin-Key`）
+- **隧道**: id `a3adcb37-c179-43b6-b1ec-0f9cb8d12ca6`，token 存 `data/tunnel/tunnel-token.txt`
+- **cloudflared**: `D:\cloudflared\cloudflared.exe`（v2026.10.7）
+- **CF 账号**: `6b14a138558986705be9edd377d7d092`；另一条隧道 `c62b7d95`（antigravity-gateway）由 Cuckoo-Code 自己拉起
+- **MCP**: `C:\Users\Administrator\.agents\mcp.json` 已加 `cloudflare`（mcp-cloudflare-lite，含 ACCOUNT_ID / API_TOKEN），`initialize` 实测通过
 - **本轮核心文件**:
-  - `proxy/handler.go` — `cooldownModelFor`（新增）、`modelScopedQuotaFailure`（改）、ChatCompletions 过滤器（改）、`supportedModelIDs`（改拷贝）
-  - `proxy/handler_anthropic.go` — Messages 过滤器（改）
-  - `proxy/responses_ws.go` — `streamResponsesWSUpstream` 增 `mappedModel` 参数
-  - `proxy/model_registry.go` — `SupportedModelIDs` 缓存
-  - `proxy/retry_exclusions.go` — recheck 清 mappedModel 冷却
-  - `admin/handler.go` — `checkTunnelRunning` 异步化、`resolveTunnelDomain` 前缀修复
-  - `proxy/exposed_models_test.go` — 6 个回归测试
-  - `docs/ARCHITECTURE.md` — 新增「模型映射与模型级冷却（v2.2.9）」章节
-
-## 历史接续（归档）
-
-前序工作见 git log 与 `.agents/plan-*.md`。上一轮完成了模型白名单、429 冷却三层、responses_api 全端点打通、Agnes function_call 兼容、模型级额度隔离、CF 隧道修复。
+  - `admin/tunnel_windows.go` — token 读取、进程拉起（孤儿化）、`/ready` 探测、VBS 生成、守护协程
+  - `admin/tunnel_other.go` — 非 Windows 桩
+  - `admin/tunnel_windows_test.go` — 启动脚本参数顺序 / 隐藏窗口回归测试
+  - `admin/handler.go` — 三路由、`tunnel_state`，删 tasklist 探针
+  - `frontend/src/pages/Settings.tsx`、`api.ts`、`types.ts`、`locales/*.json`
+  - `docs/ARCHITECTURE.md` — 新增「公网隧道托管（v2.4.0）」
 
 ---
 
