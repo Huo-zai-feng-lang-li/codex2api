@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## v2.4.1 - 2026-11-25
+
+### Fix
+
+- **会话粘性 off 不生效**：主链路（chat/completions、responses、WS）走的是 `NextForStrictSessionExcludingWithFilter`，该入口此前完全忽略 `affinity_mode`，已有绑定就直接复用/等待原账号，导致 UI 选「关闭（每次重新挑号）」后仍然一直命中同一个号。现在 off 模式跳过绑定，改走分散挑号。
+- **off 模式仍按打分挑号**：打分类调度会给连续成功的账号 +2/次（上限 +12）的成功加成，谁刚成功谁分高，越用越粘。off 模式改为按 `scheduler_mode` 分散：`round_robin` 在最高健康档内轮询；`remaining_quota` 取用量最低一档（差 5 个百分点内视为同档）并用游标轮换。
+- **短时限流被当成配额耗尽**：`rate_limited` 属于粘性冷却（`cooldownBlocksDispatch` 忽略到期时间），而上游域名冷却规则（默认 `agnes-ai.cn` 120s）、RPM/TPM 突发、未知 429 兜底都复用了这个 reason，配了 50s/120s 也永远不会自动恢复，只能等恢复探测（默认 30 分钟）或手动清理。现改为 `rate_limited_short`：到点自动恢复可调度，冷却期内仍展示为 `rate_limited`。
+
+### Verification
+
+- 新增 `auth/spread_scheduler_test.go`、`proxy/upstream_cooldown_reason_test.go`；`go test ./auth ./proxy -count=1` 全过。
+- 实测：`affinity=off`、`scheduler_mode=remaining_quota`，连发 8 条 `agnes-3.0-flash`，均匀落到 `Agnes-官方-1`…`Agnes-官方-8`，8 条全 200。
+
 ## v2.4.0 - 2026-11-25
 
 ### Features

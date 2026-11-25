@@ -3946,7 +3946,7 @@ func matchGenericBurstRateLimit(body []byte, now time.Time) (codex429Decision, b
 		cooldown := 1 * time.Minute
 		return codex429Decision{
 			Scope:    rateLimitScopeAccount,
-			Reason:   "rate_limited",
+			Reason:   auth.CooldownReasonTransientRateLimit,
 			ResetAt:  now.Add(cooldown),
 			Cooldown: cooldown,
 		}, true
@@ -3999,7 +3999,7 @@ func classify429RateLimit(account *auth.Account, body []byte, resp *http.Respons
 			}
 			return codex429Decision{
 				Scope:    rateLimitScopeAccount,
-				Reason:   "rate_limited",
+				Reason:   auth.CooldownReasonTransientRateLimit,
 				ResetAt:  now.Add(cooldown),
 				Cooldown: cooldown,
 			}
@@ -4028,7 +4028,7 @@ func classify429RateLimit(account *auth.Account, body []byte, resp *http.Respons
 	cooldown := 5 * time.Minute
 	resetAt = now.Add(cooldown)
 
-	return codex429Decision{Scope: rateLimitScopeAccount, Reason: "rate_limited", ResetAt: resetAt, Cooldown: cooldown}
+	return codex429Decision{Scope: rateLimitScopeAccount, Reason: auth.CooldownReasonTransientRateLimit, ResetAt: resetAt, Cooldown: cooldown}
 }
 
 // Apply429Cooldown 统一处理 429 对账号状态的影响。

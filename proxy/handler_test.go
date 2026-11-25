@@ -2555,10 +2555,10 @@ func TestClassify429InsufficientQuotaUsesPaymentRequired(t *testing.T) {
 func TestClassify429RPMUses1Minute(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	body := []byte(`{"error":{"message":"Requests per minute limit exceeded (RPM 60)"}}`)
-	
+
 	decision := classify429RateLimit(&auth.Account{PlanType: "team"}, body, nil, now, "gpt-5.4")
-	if decision.Scope != rateLimitScopeAccount || decision.Reason != "rate_limited" {
-		t.Fatalf("decision = %#v, want rate_limited", decision)
+	if decision.Scope != rateLimitScopeAccount || decision.Reason != auth.CooldownReasonTransientRateLimit {
+		t.Fatalf("decision = %#v, want %s（短时频控不能粘死账号）", decision, auth.CooldownReasonTransientRateLimit)
 	}
 	if decision.Cooldown != 1*time.Minute {
 		t.Fatalf("decision.Cooldown = %v, want 1 minute", decision.Cooldown)

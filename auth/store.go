@@ -1027,6 +1027,11 @@ func (a *Account) SetCooldownUntil(until time.Time, reason string) {
 		} else {
 			a.HealthTier = HealthTierRisky
 		}
+	case CooldownReasonTransientRateLimit:
+		// 短时限流同样降一档参与打分，但不会粘住调度。
+		if a.healthTierLocked() == HealthTierHealthy {
+			a.HealthTier = HealthTierWarm
+		}
 	default:
 		if a.HealthTier == "" {
 			a.HealthTier = HealthTierWarm
@@ -1064,6 +1069,10 @@ func (a *Account) IsBanned() bool {
 func (a *Account) cooldownRuntimeStatusLocked(now time.Time) string {
 	if isStickyCooldownClassification(a.CooldownReason) {
 		return a.CooldownReason
+	}
+	// 短时限流在冷却期内仍然展示为 rate_limited，到点自动回到 active。
+	if a.CooldownReason == CooldownReasonTransientRateLimit && now.Before(a.CooldownUtil) {
+		return "rate_limited"
 	}
 	if now.Before(a.CooldownUtil) {
 		if a.CooldownReason != "" {
@@ -1650,6 +1659,7 @@ type Store struct {
 	modelMapping         atomic.Value // 模型映射 JSON 字符串
 	schedulerMode        atomic.Value // string: "round_robin" or "remaining_quota"
 	affinityMode         atomic.Value // string: "bounded" / "off" / "strict"
+	rrCursor             atomic.Uint64 // 粘性关闭时的轮询游标
 	promptFilterConfig   atomic.Value // promptfilter.Config
 	upstreamGuardConfig  atomic.Value // upstreamguard.Config
 	promptRewriteConfig  atomic.Value // PromptRewriteConfig
@@ -1738,6 +1748,16 @@ const (
 	AffinityModeOff     = "off"     // 关闭粘性。每次都按调度策略重新挑号
 	AffinityModeStrict  = "strict"  // 旧行为。粘到底,直到 TTL 过期或账号失败
 )
+
+// 调度模式常量，scheduler_mode 系统设置使用以下值。
+const (
+	SchedulerModeRoundRobin     = "round_robin"
+	SchedulerModeRemainingQuota = "remaining_quota"
+)
+
+// CooldownReasonTransientRateLimit 标记"短时限流"：上游域名冷却规则、RPM/TPM 突发限流。
+// 与 rate_limited（配额耗尽，粘性、必须靠恢复探测才能解除）不同，它到点后自动恢复可调度。
+const CooldownReasonTransientRateLimit = "rate_limited_short"
 
 const (
 	accountCooldownCacheNamespace = "account-cooldown"
@@ -2953,6 +2973,13 @@ func (s *Store) NextExcludingWithFilter(apiKeyID int64, exclude map[int64]bool, 
 		return nil
 	}
 
+	// 会话粘性关闭（off）时按调度模式严格分散：轮询 / 剩余额度。
+	// 打分类调度会奖励"刚成功的账号"（SuccessBonus 最高 +12），连续命中同一个号，
+	// 与 off 模式承诺的"每次请求重新挑号、严格分散"冲突，所以这里走分散路径。
+	if s.GetAffinityMode() == AffinityModeOff {
+		return s.nextSpreadAccount(apiKeyID, exclude, filter)
+	}
+
 	for attempts := 0; attempts < 16; attempts++ {
 		s.mu.RLock()
 
@@ -3008,6 +3035,135 @@ func (s *Store) NextExcludingWithFilter(apiKeyID int64, exclude map[int64]bool, 
 		}
 	}
 	return nil
+}
+
+// dispatchCandidate 是一次挑号时的候选账号快照。
+type dispatchCandidate struct {
+	acc      *Account
+	limit    int64
+	priority int
+	usage    float64
+}
+
+// nextSpreadAccount 在会话粘性关闭时按 scheduler_mode 分散挑号。
+func (s *Store) nextSpreadAccount(apiKeyID int64, exclude map[int64]bool, filter AccountFilter) *Account {
+	if s.GetSchedulerMode() == SchedulerModeRemainingQuota {
+		return s.nextLowestUsageAccount(apiKeyID, exclude, filter)
+	}
+	return s.nextRoundRobinAccount(apiKeyID, exclude, filter)
+}
+
+// nextRoundRobinAccount 在最高健康档内轮询，保证连续请求落到不同账号。
+func (s *Store) nextRoundRobinAccount(apiKeyID int64, exclude map[int64]bool, filter AccountFilter) *Account {
+	for attempt := 0; attempt < 4; attempt++ {
+		candidates := s.collectDispatchCandidates(apiKeyID, exclude, filter)
+		if len(candidates) == 0 {
+			return nil
+		}
+		sort.SliceStable(candidates, func(i, j int) bool {
+			if candidates[i].priority != candidates[j].priority {
+				return candidates[i].priority > candidates[j].priority
+			}
+			return candidates[i].acc.DBID < candidates[j].acc.DBID
+		})
+		bestPriority := candidates[0].priority
+		group := make([]dispatchCandidate, 0, len(candidates))
+		for _, candidate := range candidates {
+			if candidate.priority != bestPriority {
+				break
+			}
+			group = append(group, candidate)
+		}
+		start := int(s.rrCursor.Add(1)-1) % len(group)
+		for offset := 0; offset < len(group); offset++ {
+			candidate := group[(start+offset)%len(group)]
+			if s.accountHasCachedCooldown(candidate.acc) {
+				continue
+			}
+			if tryAcquireAccount(candidate.acc, candidate.limit) {
+				return candidate.acc
+			}
+		}
+	}
+	return nil
+}
+
+// nextLowestUsageAccount 优先挑用量最低的账号；用量差在 sameUsageBand 以内的账号
+// 视为同一档，用游标轮换，避免用量探针不刷新时永远命中同一个号。
+func (s *Store) nextLowestUsageAccount(apiKeyID int64, exclude map[int64]bool, filter AccountFilter) *Account {
+	for attempt := 0; attempt < 4; attempt++ {
+		candidates := s.collectDispatchCandidates(apiKeyID, exclude, filter)
+		if len(candidates) == 0 {
+			return nil
+		}
+		sort.SliceStable(candidates, func(i, j int) bool {
+			if candidates[i].usage != candidates[j].usage {
+				return candidates[i].usage < candidates[j].usage
+			}
+			if candidates[i].priority != candidates[j].priority {
+				return candidates[i].priority > candidates[j].priority
+			}
+			return candidates[i].acc.DBID < candidates[j].acc.DBID
+		})
+		minUsage := candidates[0].usage
+		group := make([]dispatchCandidate, 0, len(candidates))
+		for _, candidate := range candidates {
+			if candidate.usage > minUsage+remainingQuotaSpreadBand {
+				break
+			}
+			group = append(group, candidate)
+		}
+		start := int(s.rrCursor.Add(1)-1) % len(group)
+		for offset := 0; offset < len(group); offset++ {
+			candidate := group[(start+offset)%len(group)]
+			if s.accountHasCachedCooldown(candidate.acc) {
+				continue
+			}
+			if tryAcquireAccount(candidate.acc, candidate.limit) {
+				return candidate.acc
+			}
+		}
+	}
+	return nil
+}
+
+// remainingQuotaSpreadBand 剩余额度模式下，用量差不超过该百分点视为同一档并轮换。
+const remainingQuotaSpreadBand = 5.0
+
+// collectDispatchCandidates 汇总当前可立即调度的账号及其配额/健康快照。
+func (s *Store) collectDispatchCandidates(apiKeyID int64, exclude map[int64]bool, filter AccountFilter) []dispatchCandidate {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	maxConcurrency := atomic.LoadInt64(&s.maxConcurrency)
+	candidates := make([]dispatchCandidate, 0, len(s.accounts))
+	for _, acc := range s.accounts {
+		if exclude != nil && exclude[acc.DBID] {
+			continue
+		}
+		if !acc.IsAvailable() {
+			continue
+		}
+		if !s.accountAllowedForAPIKey(acc, apiKeyID) {
+			continue
+		}
+		if filter != nil && !filter(acc) {
+			continue
+		}
+
+		load := atomic.LoadInt64(&acc.ActiveRequests)
+		tier, _, _, limit := acc.schedulerSnapshot(maxConcurrency)
+		if limit <= 0 || load >= limit {
+			continue
+		}
+		candidates = append(candidates, dispatchCandidate{
+			acc:      acc,
+			limit:    limit,
+			priority: tierPriority(tier),
+			usage:    acc.usagePercentForScheduling(),
+		})
+	}
+	return candidates
 }
 
 func (s *Store) accountLazySelectable(acc *Account) bool {
@@ -3286,12 +3442,19 @@ func (s *Store) NextForStrictSessionWithFilter(key string, apiKeyID int64, filte
 
 // NextForStrictSessionExcludingWithFilter keeps a bound Responses session on
 // its account, while applying retry exclusions after that binding is removed.
+//
+// affinity_mode=off 时这里也必须放弃绑定：UI 承诺"每次请求重新挑号"，而主链路
+// (chat/completions、responses) 全都走这个 strict 入口，不放开就永远粘在同一个号。
+// bounded / strict 保留原有行为（尊重绑定，必要时等原账号）。
 func (s *Store) NextForStrictSessionExcludingWithFilter(key string, apiKeyID int64, exclude map[int64]bool, filter AccountFilter) (*Account, string) {
 	if s == nil {
 		return nil, ""
 	}
 	key = strings.TrimSpace(key)
 	if key == "" {
+		return s.NextExcludingWithFilter(apiKeyID, exclude, filter), ""
+	}
+	if s.GetAffinityMode() == AffinityModeOff {
 		return s.NextExcludingWithFilter(apiKeyID, exclude, filter), ""
 	}
 	if binding, ok := s.strictSessionBinding(key); ok {
