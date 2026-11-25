@@ -12,6 +12,7 @@ type tunnelState struct {
 	Running   bool
 	Ready     bool
 	Autostart bool
+	Paused    bool
 	Supported bool
 }
 
@@ -22,6 +23,18 @@ func tunnelAlive() bool { return false }
 func tunnelReady() bool { return false }
 
 func tunnelAutostartEnabled() bool { return false }
+
+func tunnelPaused() bool { return false }
+
+// setTunnelPaused 在非 Windows 平台直接拒绝。
+func setTunnelPaused(paused bool) error {
+	return errors.New("隧道进程托管目前仅支持 Windows")
+}
+
+// stopTunnelProcess 在非 Windows 平台直接拒绝。
+func stopTunnelProcess() error {
+	return errors.New("隧道进程托管目前仅支持 Windows")
+}
 
 // setTunnelAutostart 在非 Windows 平台直接拒绝。
 func setTunnelAutostart(enabled bool) error {

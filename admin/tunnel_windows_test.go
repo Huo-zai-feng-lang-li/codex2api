@@ -31,6 +31,39 @@ func TestBuildTunnelLaunchScriptParamOrder(t *testing.T) {
 	}
 }
 
+// TestTunnelPausedFlagRoundTrip 锁死“停止标记”的写入/清除语义：
+// 标记存在时守护必须放弃自动拉起，清除后恢复。
+func TestTunnelPausedFlagRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	if tunnelPausedAt(dir) {
+		t.Fatal("空目录不应被判定为已暂停")
+	}
+	if err := setTunnelPausedAt(dir, true); err != nil {
+		t.Fatalf("写标记失败：%v", err)
+	}
+	if !tunnelPausedAt(dir) {
+		t.Fatal("写入标记后应判定为已暂停")
+	}
+	if err := setTunnelPausedAt(dir, false); err != nil {
+		t.Fatalf("清标记失败：%v", err)
+	}
+	if tunnelPausedAt(dir) {
+		t.Fatal("清除标记后不应仍判定为已暂停")
+	}
+}
+
+// TestBuildTunnelLaunchScriptRespectsStopFlag 登录自启必须尊重“手动停止”标记，
+// 否则用户停了隧道，一重启又被 VBS 拉起来。
+func TestBuildTunnelLaunchScriptRespectsStopFlag(t *testing.T) {
+	script := buildTunnelLaunchScript(`D:\cloudflared\cloudflared.exe`, "tok")
+	if !strings.Contains(script, "FileExists") || !strings.Contains(script, "stopped.flag") {
+		t.Fatalf("启动脚本缺少停止标记检查：\n%s", script)
+	}
+	if !strings.Contains(script, "WScript.Quit") {
+		t.Fatalf("标记存在时必须退出而不是继续启动：\n%s", script)
+	}
+}
+
 // TestBuildTunnelLaunchScriptHiddenWindow 启动脚本必须以隐藏窗口方式运行，否则每次登录都会弹黑框。
 func TestBuildTunnelLaunchScriptHiddenWindow(t *testing.T) {
 	script := buildTunnelLaunchScript(`D:\cloudflared\cloudflared.exe`, "tok")

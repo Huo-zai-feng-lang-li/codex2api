@@ -305,6 +305,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/tunnel", h.GetTunnel)
 	api.POST("/tunnel/autostart", h.SetTunnelAutostart)
 	api.POST("/tunnel/start", h.StartTunnel)
+	api.POST("/tunnel/stop", h.StopTunnel)
 	api.GET("/prompt-filter/logs", h.ListPromptFilterLogs)
 	api.DELETE("/prompt-filter/logs", h.ClearPromptFilterLogs)
 	api.POST("/prompt-filter/test", h.TestPromptFilter)
@@ -4454,6 +4455,7 @@ type settingsResponse struct {
 	TunnelRunning                    bool   `json:"tunnel_running"`
 	TunnelReady                      bool   `json:"tunnel_ready"`
 	TunnelAutostart                  bool   `json:"tunnel_autostart"`
+	TunnelPaused                     bool   `json:"tunnel_paused"`
 }
 
 type updateSettingsReq struct {
@@ -5165,6 +5167,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		TunnelRunning:                    tunnelSt.Ready,
 		TunnelReady:                      tunnelSt.Ready,
 		TunnelAutostart:                  tunnelSt.Autostart,
+		TunnelPaused:                     tunnelSt.Paused,
 	})
 }
 
@@ -5176,6 +5179,7 @@ func (h *Handler) GetTunnel(c *gin.Context) {
 		"running":   state.Running,
 		"ready":     state.Ready,
 		"autostart": state.Autostart,
+		"paused":    state.Paused,
 		"supported": state.Supported,
 	})
 }
@@ -5213,6 +5217,7 @@ func (h *Handler) SetTunnelAutostart(c *gin.Context) {
 		"running":   tunnelAlive(),
 		"ready":     tunnelReady(),
 		"autostart": tunnelAutostartEnabled(),
+		"paused":    tunnelPaused(),
 		"supported": true,
 	})
 }
@@ -5221,6 +5226,10 @@ func (h *Handler) SetTunnelAutostart(c *gin.Context) {
 func (h *Handler) StartTunnel(c *gin.Context) {
 	if !tunnelAutostartSupported() {
 		writeError(c, http.StatusBadRequest, "当前平台不支持隧道进程托管")
+		return
+	}
+	if err := setTunnelPaused(false); err != nil {
+		writeError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if err := ensureTunnelRunning(); err != nil {
@@ -5233,6 +5242,32 @@ func (h *Handler) StartTunnel(c *gin.Context) {
 		"running":   tunnelAlive(),
 		"ready":     ready,
 		"autostart": tunnelAutostartEnabled(),
+		"paused":    tunnelPaused(),
+		"supported": true,
+	})
+}
+
+// StopTunnel 立即停止隧道进程，并写入暂停标记，守护协程不会自动拉起。
+func (h *Handler) StopTunnel(c *gin.Context) {
+	if !tunnelAutostartSupported() {
+		writeError(c, http.StatusBadRequest, "当前平台不支持隧道进程托管")
+		return
+	}
+	if err := stopTunnelProcess(); err != nil {
+		writeError(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && tunnelAlive() {
+		time.Sleep(200 * time.Millisecond)
+	}
+	log.Printf("公网隧道：已手动停止，running=%v", tunnelAlive())
+	c.JSON(http.StatusOK, gin.H{
+		"domain":    resolveTunnelDomain(),
+		"running":   tunnelAlive(),
+		"ready":     tunnelReady(),
+		"autostart": tunnelAutostartEnabled(),
+		"paused":    tunnelPaused(),
 		"supported": true,
 	})
 }

@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.4.2 - 2026-11-25
+
+### Features
+
+- **隧道手动停止**：新增 `POST /api/admin/tunnel/stop`，立即结束本服务的 cloudflared 并写入 `data/tunnel/stopped.flag`；守护协程和启动目录 VBS 都尊重该标记，不会在 15 秒内或下次登录时把隧道重新拉起。点「启动隧道」清除标记并恢复。
+  - 管理台「公网隧道」卡片新增「停止隧道」按钮与「已手动停止」状态。
+
+### Verification
+
+- 新增 `TestTunnelPausedFlagRoundTrip`、`TestBuildTunnelLaunchScriptRespectsStopFlag`；`go test ./admin -run Tunnel -count=1` 通过。
+- 实测：停止后公网 `http=000`、`running=false,paused=true`，等待 16 秒守护未拉起；启动后 `ready=true`，公网 `/health` 200（走代理 TTFB 1.17s）。
+
 ## Unreleased
 
 ## v2.4.1 - 2026-11-25

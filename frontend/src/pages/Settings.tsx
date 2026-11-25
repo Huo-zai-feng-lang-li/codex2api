@@ -487,6 +487,7 @@ export default function Settings() {
     tunnel_running: false,
     tunnel_ready: false,
     tunnel_autostart: false,
+    tunnel_paused: false,
   })
   const [exposedModelsText, setExposedModelsText] = useState('')
   const lazyModeActive = settingsForm.lazy_mode
@@ -504,12 +505,13 @@ export default function Settings() {
   const persistedBrandingRef = useRef<Partial<SiteBranding> | null>(null)
   const { toast, showToast } = useToast()
 
-  const applyTunnelStatus = useCallback((status: { running: boolean; ready: boolean; autostart: boolean }) => {
+  const applyTunnelStatus = useCallback((status: { running: boolean; ready: boolean; autostart: boolean; paused?: boolean }) => {
     setSettingsForm((f) => ({
       ...f,
       tunnel_running: status.ready,
       tunnel_ready: status.ready,
       tunnel_autostart: status.autostart,
+      tunnel_paused: Boolean(status.paused),
     }))
   }, [])
 
@@ -536,6 +538,19 @@ export default function Settings() {
       const status = await api.startTunnel()
       applyTunnelStatus(status)
       showToast(status.ready ? t('settings.tunnelStarted') : t('settings.tunnelStartedPending'), status.ready ? undefined : 'error')
+    } catch (error) {
+      showToast(`${t('settings.tunnelFailed')}: ${getErrorMessage(error)}`, 'error')
+    } finally {
+      setTunnelBusy(false)
+    }
+  }, [applyTunnelStatus, showToast, t])
+
+  const handleStopTunnel = useCallback(async () => {
+    setTunnelBusy(true)
+    try {
+      const status = await api.stopTunnel()
+      applyTunnelStatus(status)
+      showToast(t('settings.tunnelStopped'))
     } catch (error) {
       showToast(`${t('settings.tunnelFailed')}: ${getErrorMessage(error)}`, 'error')
     } finally {
@@ -1120,9 +1135,11 @@ export default function Settings() {
                   <Badge variant={settingsForm.tunnel_ready ? 'default' : settingsForm.tunnel_running ? 'outline' : 'secondary'}>
                     {settingsForm.tunnel_ready
                       ? t('settings.tunnelStatusReady')
-                      : settingsForm.tunnel_running
-                        ? t('settings.tunnelStatusStarting')
-                        : t('settings.tunnelStatusDown')}
+                      : settingsForm.tunnel_paused
+                        ? t('settings.tunnelStatusPaused')
+                        : settingsForm.tunnel_running
+                          ? t('settings.tunnelStatusStarting')
+                          : t('settings.tunnelStatusDown')}
                   </Badge>
                 </div>
               </SettingField>
@@ -1138,6 +1155,9 @@ export default function Settings() {
             <div className="mt-4 flex items-center gap-3">
               <Button type="button" size="sm" variant="outline" onClick={() => void handleStartTunnel()} disabled={tunnelBusy}>
                 {t('settings.tunnelStartNow')}
+              </Button>
+              <Button type="button" size="sm" variant="outline" onClick={() => void handleStopTunnel()} disabled={tunnelBusy || !settingsForm.tunnel_running}>
+                {t('settings.tunnelStopNow')}
               </Button>
               {tunnelBusy ? <span className="text-xs text-muted-foreground">{t('settings.tunnelBusy')}</span> : null}
             </div>

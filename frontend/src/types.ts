@@ -639,6 +639,7 @@ export interface SystemSettings {
   tunnel_running: boolean
   tunnel_ready: boolean
   tunnel_autostart: boolean
+  tunnel_paused: boolean
 }
 
 export interface TunnelStatusResponse {
@@ -646,6 +647,7 @@ export interface TunnelStatusResponse {
   running: boolean
   ready: boolean
   autostart: boolean
+  paused: boolean
   supported: boolean
 }
 

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -23,6 +24,8 @@ const (
 	tunnelMetricsAddr = "127.0.0.1:20260"
 	// tunnelStartupVBSName 是投放到启动目录的文件名。
 	tunnelStartupVBSName = "Codex2apiTunnel.vbs"
+	// tunnelStopFlagName 是“手动停止”标记文件；存在时守护协程不会自动拉起隧道。
+	tunnelStopFlagName = "stopped.flag"
 	// tunnelGuardInterval 是守护协程的巡检周期。
 	tunnelGuardInterval = 15 * time.Second
 	// tunnelProbeTimeout 是单次就绪探测的超时。
@@ -44,7 +47,39 @@ func tunnelDataDir() string {
 
 func tunnelTokenPath() string { return filepath.Join(tunnelDataDir(), "tunnel-token.txt") }
 func tunnelFlagPath() string  { return filepath.Join(tunnelDataDir(), "autostart.enabled") }
-func tunnelLogPath() string   { return filepath.Join(tunnelDataDir(), "cloudflared.log") }
+
+// tunnelLogPath 返回 cloudflared 日志路径。
+func tunnelLogPath() string { return filepath.Join(tunnelDataDir(), "cloudflared.log") }
+
+// tunnelStopFlagPath 是“手动停止”标记，存在即表示用户主动停了隧道。
+func tunnelStopFlagPath() string { return filepath.Join(tunnelDataDir(), tunnelStopFlagName) }
+
+// tunnelPaused 报告用户是否手动停止了隧道；为 true 时守护协程不得自动拉起。
+func tunnelPaused() bool { return tunnelPausedAt(tunnelDataDir()) }
+
+// tunnelPausedAt 判断指定运行态目录下是否存在“手动停止”标记。
+func tunnelPausedAt(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, tunnelStopFlagName))
+	return err == nil
+}
+
+// setTunnelPaused 写入或清除“手动停止”标记。
+func setTunnelPaused(paused bool) error { return setTunnelPausedAt(tunnelDataDir(), paused) }
+
+// setTunnelPausedAt 在指定运行态目录写入或清除“手动停止”标记。
+func setTunnelPausedAt(dir string, paused bool) error {
+	flag := filepath.Join(dir, tunnelStopFlagName)
+	if !paused {
+		if err := os.Remove(flag); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(flag, []byte(time.Now().Format(time.RFC3339)), 0o644)
+}
 
 // tunnelStartupDir 返回当前用户的启动目录（登录时自动执行）。
 func tunnelStartupDir() string {
@@ -165,8 +200,52 @@ func startTunnelProcess() error {
 	return cmd.Run()
 }
 
+// tunnelMetricsPID 通过 netstat 找到独占 metrics 端口的 cloudflared 进程号。
+// 用端口而不是镜像名定位，避免误杀机器上其它 cloudflared 实例。
+func tunnelMetricsPID() int {
+	out, err := exec.Command("netstat", "-ano").Output()
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 || fields[1] != tunnelMetricsAddr {
+			continue
+		}
+		if !strings.EqualFold(fields[3], "LISTENING") {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[4])
+		if err == nil && pid > 0 {
+			return pid
+		}
+	}
+	return 0
+}
+
+// stopTunnelProcess 先落“手动停止”标记，再杀掉本服务拉起的 cloudflared。
+// 标记必须先生效：否则守护协程会在 15 秒内把进程重新拉起来。
+func stopTunnelProcess() error {
+	if err := setTunnelPaused(true); err != nil {
+		return err
+	}
+	pid := tunnelMetricsPID()
+	if pid == 0 {
+		return nil
+	}
+	cmd := exec.Command("taskkill", "/PID", strconv.Itoa(pid), "/F")
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: 0x08000000,
+	}
+	return cmd.Run()
+}
+
 // ensureTunnelRunning 保证隧道进程存在；如需等待就绪，由调用方决定轮询时长。
 func ensureTunnelRunning() error {
+	if tunnelPaused() {
+		return nil
+	}
 	if tunnelAlive() {
 		return nil
 	}
@@ -190,7 +269,7 @@ func startTunnelGuard() {
 	tunnelGuardOnce.Do(func() {
 		go func() {
 			ensure := func() {
-				if !tunnelAutostartEnabled() {
+				if !tunnelAutostartEnabled() || tunnelPaused() {
 					return
 				}
 				if tunnelAlive() {
@@ -245,17 +324,24 @@ func setTunnelAutostart(enabled bool) error {
 	if err := os.WriteFile(tunnelFlagPath(), []byte(time.Now().Format(time.RFC3339)), 0o644); err != nil {
 		return err
 	}
+	// 开启自启意味着用户希望隧道可用，清掉之前的“手动停止”标记。
+	if err := setTunnelPaused(false); err != nil {
+		return err
+	}
 	startTunnelGuard()
 	return nil
 }
 
 // buildTunnelLaunchScript 生成隐藏启动脚本（VBS 的 Run 第二参数 0 表示无窗口）。
+// 脚本先检查“手动停止”标记：用户主动停过隧道时，登录也不再拉起，直到在管理台点“启动隧道”。
 func buildTunnelLaunchScript(bin, token string) string {
 	quote := func(s string) string { return strings.ReplaceAll(s, `"`, `""`) }
 	return fmt.Sprintf(`' Codex2api 公网隧道开机自启（由管理台生成，删除本文件即关闭自启）
+Set fso = CreateObject("Scripting.FileSystemObject")
+If fso.FileExists("%s") Then WScript.Quit 0
 Set sh = CreateObject("WScript.Shell")
 sh.Run "%s tunnel --metrics %s --logfile ""%s"" run --token %s", 0, False
-`, quote(bin), tunnelMetricsAddr, quote(tunnelLogPath()), quote(token))
+`, quote(tunnelStopFlagPath()), quote(bin), tunnelMetricsAddr, quote(tunnelLogPath()), quote(token))
 }
 
 // tunnelState 汇总隧道状态，供管理台展示。
@@ -263,6 +349,7 @@ type tunnelState struct {
 	Running   bool // 进程在跑
 	Ready     bool // 已与边缘建立连接
 	Autostart bool // 已开启开机自启
+	Paused    bool // 用户手动停止，守护不再自动拉起
 	Supported bool
 }
 
@@ -272,6 +359,7 @@ func currentTunnelState() tunnelState {
 		Running:   tunnelAlive(),
 		Ready:     tunnelReady(),
 		Autostart: tunnelAutostartEnabled(),
+		Paused:    tunnelPaused(),
 		Supported: tunnelAutostartSupported(),
 	}
 }

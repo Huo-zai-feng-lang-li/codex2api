@@ -513,6 +513,7 @@ export const api = {
   setTunnelAutostart: (enabled: boolean) =>
     request<TunnelStatusResponse>('/tunnel/autostart', { method: 'POST', body: JSON.stringify({ enabled }) }),
   startTunnel: () => request<TunnelStatusResponse>('/tunnel/start', { method: 'POST' }),
+  stopTunnel: () => request<TunnelStatusResponse>('/tunnel/stop', { method: 'POST' }),
   uploadBackground: (file: File) => {
     const form = new FormData()
     form.set('file', file)
